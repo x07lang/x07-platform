@@ -1,0 +1,31 @@
+{
+  "files": {
+    "arch/budgets/profiles/mcp_router_v1.budget.json": {
+      "jcs_sha256_hex": "d4c096bc27c55da0201a25c8f2c7300ecfbd549762b28af625ad0ad3bba1e0f2"
+    },
+    "arch/budgets/profiles/mcp_tool_expensive_v1.budget.json": {
+      "jcs_sha256_hex": "cdfa0a1f9a8d14f4337caa7bc917ff813888b78f8a91b11abdf8eec822036656"
+    },
+    "arch/budgets/profiles/mcp_tool_fast_v1.budget.json": {
+      "jcs_sha256_hex": "4340c9fb15643f48aeeba419cdf928826116eea64eb8e1591679e79a6eeb7d00"
+    },
+    "arch/budgets/profiles/mcp_tool_standard_v1.budget.json": {
+      "jcs_sha256_hex": "ae9a10b4f0ec8dac30d6967c473dc11e88d721c9997b3fa4295b3ff311405d65"
+    },
+    "arch/rr/policies/mcp_session_v1.policy.json": {
+      "jcs_sha256_hex": "9991120555cbc6d3ca98fec67989ba50b82f87fe7e5ebbf2d231dd6c598df7d1"
+    },
+    "arch/rr/sanitizers/mcp_default_v1.sanitize.json": {
+      "jcs_sha256_hex": "0e09a5ccdb6580fa46333ecc7020fd7a3648d10e50357c26bfd2c3e7a508b1d6"
+    }
+  },
+  "indexes": {
+    "arch/budgets/index.x07budgets.json": {
+      "jcs_sha256_hex": "723aad034e577cfb7f008f13675f486b731f0a2e5403fbd70cc4decb8f8c9ef5"
+    },
+    "arch/rr/index.x07rr.json": {
+      "jcs_sha256_hex": "674e08f5eade95160edaabc7781ad2adb13d201bd7a595dc44728e6ebb71d48f"
+    }
+  },
+  "schema_version": "x07.arch.contracts.lock@0.1.0"
+}

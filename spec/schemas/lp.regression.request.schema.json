@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://x07.io/spec/lp.regression.request.schema.json",
+  "title": "lp.regression.request@0.1.0",
+  "description": "Structured request to generate regression fixtures from an incident bundle and a target artifact.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "regression_id", "created_unix_ms", "incident", "target_artifact", "invariants"],
+  "properties": {
+    "schema_version": { "const": "lp.regression.request@0.1.0" },
+    "regression_id": { "$ref": "#/$defs/id" },
+    "created_unix_ms": { "$ref": "#/$defs/unix_ms" },
+    "incident": { "$ref": "#/$defs/incident_ref" },
+    "target_artifact": { "$ref": "#/$defs/target_artifact" },
+    "invariants": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": { "$ref": "#/$defs/invariant_id" }
+    },
+    "notes": { "type": "string", "maxLength": 16384 },
+    "meta": { "type": "object", "additionalProperties": true, "default": {} }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "bytes_len": { "type": "integer", "minimum": 0 },
+    "unix_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "Unix timestamp in milliseconds (non-negative, JS-safe integer)."
+    },
+    "schema_id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*@[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "digest_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "bytes_len"],
+      "properties": {
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "bytes_len": { "$ref": "#/$defs/bytes_len" }
+      }
+    },
+    "invariant_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "description": "Identifier for a regression invariant (semantics defined by the regression generator)."
+    },
+    "incident_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "digest"],
+      "properties": {
+        "kind": { "const": "lp.incident.bundle@0.1.0" },
+        "digest": { "$ref": "#/$defs/digest_ref" }
+      }
+    },
+    "target_artifact": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "digest"],
+          "properties": {
+            "kind": { "enum": ["x07.app.pack@0.1.0", "x07.vm.bundle.manifest@0.2.0"] },
+            "digest": { "$ref": "#/$defs/digest_ref" }
+          }
+        }
+      ]
+    }
+  }
+}

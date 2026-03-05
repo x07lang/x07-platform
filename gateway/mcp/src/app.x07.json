@@ -1,0 +1,65 @@
+{
+  "schema_version": "x07.x07ast@0.5.0",
+  "kind": "module",
+  "module_id": "app",
+  "imports": [
+    "std.mcp.sandbox.worker_main",
+    "std.mcp.transport.stdio",
+    "std.os.env",
+    "std.os.stdio",
+    "std.os.stdio.spec"
+  ],
+  "decls": [
+    {
+      "kind": "export",
+      "names": ["app.router_main_v1", "app.worker_main_v1"]
+    },
+    {
+      "kind": "defn",
+      "name": "app.worker_main_v1",
+      "params": [{ "name": "in_bytes", "ty": "bytes_view" }],
+      "result": "bytes",
+      "body": ["std.mcp.sandbox.worker_main.run_v1", "in_bytes"]
+    },
+    {
+      "kind": "defasync",
+      "name": "app.router_main_v1",
+      "params": [{ "name": "in_bytes", "ty": "bytes_view" }],
+      "result": "bytes",
+      "body": [
+        "begin",
+        ["let", "_cfg_default", ["bytes.lit", "gateway/mcp/config/mcp.server.json"]],
+        ["let", "_cfg_env", ["std.os.env.get", ["bytes.lit", "X07_MCP_CFG_PATH"]]],
+        [
+          "let",
+          "_cfg_path",
+          ["if", [">", ["bytes.len", "_cfg_env"], 0], "_cfg_env", "_cfg_default"]
+        ],
+        ["let", "err", ["await", ["std.mcp.transport.stdio.serve_from_fs_v1", ["bytes.view", "_cfg_path"]]]],
+        [
+          "if",
+          [">", ["bytes.len", ["bytes.view", "err"]], 0],
+          [
+            "begin",
+            ["let", "is_eof", ["bytes.eq", ["bytes.view", "err"], ["bytes.view_lit", "eof"]]],
+            [
+              "if",
+              ["=", "is_eof", 1],
+              0,
+              [
+                "begin",
+                ["let", "caps0", ["std.os.stdio.spec.caps_default_v1"]],
+                ["std.os.stdio.write_stderr_v1", "err", "caps0"],
+                ["process.set_exit_code_v1", 1],
+                0
+              ]
+            ],
+            0
+          ],
+          0
+        ],
+        ["bytes.alloc", 0]
+      ]
+    }
+  ]
+}

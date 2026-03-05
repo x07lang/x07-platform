@@ -1,0 +1,32 @@
+{
+  "schemas": [
+    {
+      "id": "https://x07.io/spec/lp.change_request.schema.json",
+      "path": "lp.change_request.schema.json"
+    },
+    {
+      "id": "https://x07.io/spec/lp.cli.report.schema.json",
+      "path": "lp.cli.report.schema.json"
+    },
+    {
+      "id": "https://x07.io/spec/lp.decision.record.schema.json",
+      "path": "lp.decision.record.schema.json"
+    },
+    {
+      "id": "https://x07.io/spec/lp.deploy.execution.schema.json",
+      "path": "lp.deploy.execution.schema.json"
+    },
+    {
+      "id": "https://x07.io/spec/lp.incident.bundle.schema.json",
+      "path": "lp.incident.bundle.schema.json"
+    },
+    {
+      "id": "https://x07.io/spec/lp.pipeline.run.schema.json",
+      "path": "lp.pipeline.run.schema.json"
+    },
+    {
+      "id": "https://x07.io/spec/lp.regression.request.schema.json",
+      "path": "lp.regression.request.schema.json"
+    }
+  ]
+}

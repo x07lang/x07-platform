@@ -1,0 +1,7 @@
+{"id":1,"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2025-11-25"}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"id":2,"jsonrpc":"2.0","method":"tools/list","params":{}}
+{"id":3,"jsonrpc":"2.0","method":"tools/call","params":{"arguments":{"text":"hi"},"name":"echo"}}
+{"id":4,"jsonrpc":"2.0","method":"tools/call","params":{"arguments":{"b":2},"name":"sum"}}
+{"id":5,"jsonrpc":"2.0","method":"tools/call","params":{"arguments":{},"name":"nope"}}
+{"id":6,"jsonrpc":"2.0","method":"ping"}

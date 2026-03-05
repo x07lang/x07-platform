@@ -1,0 +1,47 @@
+{
+  "schema_version": "x07.mcp.tools_manifest@0.2.0",
+  "tools": [
+    {
+      "name": "echo",
+      "description": "Echo back the provided text.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": { "type": "string", "minLength": 1, "maxLength": 4096 }
+        },
+        "required": ["text"],
+        "additionalProperties": false
+      },
+      "x07": { "impl": "mcp.user.call_tool_v1", "limits_profile": "mcp_tool_fast_v1" }
+    },
+    {
+      "name": "read_file_preview",
+      "description": "Read up to max_bytes from a file and return a hex preview.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "max_bytes": { "type": "number" }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": { "fs": { "read_roots": ["."], "write_roots": [] }, "net": {}, "env": {} }
+      }
+    },
+    {
+      "name": "sum",
+      "description": "Add two numbers.",
+      "inputSchema": {
+        "type": "object",
+        "properties": { "a": { "type": "number" }, "b": { "type": "number" } },
+        "required": ["a", "b"],
+        "additionalProperties": false
+      },
+      "x07": { "impl": "mcp.user.call_tool_v1", "limits_profile": "mcp_tool_fast_v1" }
+    }
+  ]
+}

@@ -1,0 +1,203 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://x07.io/spec/x07-app.pack.schema.json",
+  "title": "x07.app.pack@0.1.0",
+  "description": "Content-addressed packaging manifest for a built x07 full-stack app bundle (frontend static assets + backend component).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profile_id",
+    "routing",
+    "bundle_manifest",
+    "frontend",
+    "backend",
+    "assets"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "x07.app.pack@0.1.0"
+    },
+    "profile_id": {
+      "$ref": "#/$defs/id"
+    },
+    "routing": {
+      "$ref": "#/$defs/routing"
+    },
+    "bundle_manifest": {
+      "$ref": "#/$defs/file_digest"
+    },
+    "frontend": {
+      "$ref": "#/$defs/frontend"
+    },
+    "backend": {
+      "$ref": "#/$defs/backend"
+    },
+    "assets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4096,
+      "items": {
+        "$ref": "#/$defs/asset"
+      }
+    },
+    "notes": {
+      "type": "string",
+      "maxLength": 16384
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "rel_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "pattern": "^(?![\\\\/])(?![A-Za-z]:)(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "serve_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "^/[^\\s]*$"
+    },
+    "api_prefix": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^/[^\\s]*$"
+    },
+    "header": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "k",
+        "v"
+      ],
+      "properties": {
+        "k": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9-]{1,64}$"
+        },
+        "v": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      }
+    },
+    "headers": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/header"
+      },
+      "default": []
+    },
+    "file_digest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "sha256",
+        "bytes_len"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/rel_path"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "bytes_len": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "routing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "api_prefix"
+      ],
+      "properties": {
+        "api_prefix": {
+          "$ref": "#/$defs/api_prefix"
+        }
+      }
+    },
+    "frontend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index_path"
+      ],
+      "properties": {
+        "index_path": {
+          "$ref": "#/$defs/serve_path",
+          "description": "Front-end document entrypoint (e.g., /index.html)."
+        }
+      }
+    },
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "adapter",
+        "component"
+      ],
+      "properties": {
+        "adapter": {
+          "type": "string",
+          "enum": [
+            "wasi_http_proxy_v1"
+          ]
+        },
+        "component": {
+          "$ref": "#/$defs/file_digest",
+          "description": "Backend component artifact packaged inside this pack."
+        }
+      }
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "serve_path",
+        "file",
+        "headers"
+      ],
+      "properties": {
+        "serve_path": {
+          "$ref": "#/$defs/serve_path"
+        },
+        "file": {
+          "$ref": "#/$defs/file_digest"
+        },
+        "headers": {
+          "$ref": "#/$defs/headers"
+        },
+        "content_type": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Optional content-type hint (host may override). null means infer from path/bytes."
+        }
+      }
+    }
+  }
+}

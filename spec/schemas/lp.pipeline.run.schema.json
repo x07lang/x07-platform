@@ -1,0 +1,259 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://x07.io/spec/lp.pipeline.run.schema.json",
+  "title": "lp.pipeline.run@0.1.0",
+  "description": "Authoritative pipeline run record for x07-platform. Ties together inputs, step reports, and decision records via content-addressed digests.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "run_id",
+    "created_unix_ms",
+    "mode",
+    "inputs",
+    "steps",
+    "decisions",
+    "state"
+  ],
+  "properties": {
+    "schema_version": { "const": "lp.pipeline.run@0.1.0" },
+    "run_id": { "$ref": "#/$defs/id" },
+    "created_unix_ms": { "$ref": "#/$defs/unix_ms" },
+    "mode": {
+      "type": "string",
+      "enum": ["local", "daemon", "remote"],
+      "default": "local"
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact"],
+      "properties": {
+        "change_request": { "$ref": "#/$defs/change_ref" },
+        "artifact": { "$ref": "#/$defs/accepted_artifact" },
+        "vcs": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "repo_url": { "type": "string", "maxLength": 2048 },
+            "commit_sha": { "type": "string", "maxLength": 64 },
+            "pr_url": { "type": "string", "maxLength": 2048 }
+          },
+          "default": {}
+        }
+      }
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4096,
+      "items": { "$ref": "#/$defs/step" }
+    },
+    "decisions": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": { "$ref": "#/$defs/decision_ref" },
+      "default": []
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["phase", "status", "current_step"],
+      "properties": {
+        "phase": { "$ref": "#/$defs/run_phase" },
+        "status": { "$ref": "#/$defs/run_status" },
+        "current_step": {
+          "type": ["string", "null"],
+          "maxLength": 128,
+          "default": null,
+          "description": "step_id of the current step if running."
+        }
+      }
+    },
+    "meta": { "type": "object", "additionalProperties": true, "default": {} }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "bytes_len": { "type": "integer", "minimum": 0 },
+    "unix_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "Unix timestamp in milliseconds (non-negative, JS-safe integer)."
+    },
+    "schema_id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*@[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "Schema identifier like 'x07.app.pack@0.1.0'."
+    },
+    "digest_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "bytes_len"],
+      "properties": {
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "bytes_len": { "$ref": "#/$defs/bytes_len" }
+      }
+    },
+    "artifact_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/schema_id" },
+        "digest": { "$ref": "#/$defs/digest_ref" },
+        "label": { "type": "string", "maxLength": 256 }
+      }
+    },
+    "step_kind": {
+      "type": "string",
+      "enum": [
+        "ingest_artifact",
+        "x07_wasm_app_verify",
+        "x07_wasm_ops_validate",
+        "decision_intake",
+        "deploy_plan_execute",
+        "incident_capture",
+        "regression_generate"
+      ],
+      "description": "Well-known step kinds. Platform may add new kinds in later versions."
+    },
+    "step_status": { "type": "string", "enum": ["ok", "error", "skipped", "running"] },
+    "run_phase": { "type": "string", "enum": ["intake", "deploy", "observe", "incident", "regression"] },
+    "run_status": {
+      "type": "string",
+      "enum": ["running", "succeeded", "failed", "stopped", "rolled_back"]
+    },
+    "change_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["change_id", "artifact"],
+      "properties": {
+        "change_id": { "$ref": "#/$defs/id" },
+        "artifact": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "digest"],
+          "properties": {
+            "kind": { "const": "lp.change_request@0.1.0" },
+            "digest": { "$ref": "#/$defs/digest_ref" }
+          }
+        }
+      }
+    },
+    "decision_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision_id", "record"],
+      "properties": {
+        "decision_id": { "$ref": "#/$defs/id" },
+        "record": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "digest"],
+          "properties": {
+            "kind": { "const": "lp.decision.record@0.1.0" },
+            "digest": { "$ref": "#/$defs/digest_ref" }
+          }
+        }
+      }
+    },
+    "accepted_artifact": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "manifest"],
+          "properties": {
+            "kind": { "const": "x07.app.pack@0.1.0" },
+            "manifest": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "digest"],
+              "properties": {
+                "kind": { "const": "x07.app.pack@0.1.0" },
+                "digest": { "$ref": "#/$defs/digest_ref" }
+              }
+            },
+            "profile_id": { "$ref": "#/$defs/id" },
+            "label": { "type": "string", "maxLength": 256 }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "manifest"],
+          "properties": {
+            "kind": { "const": "x07.vm.bundle.manifest@0.2.0" },
+            "manifest": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "digest"],
+              "properties": {
+                "kind": { "const": "x07.vm.bundle.manifest@0.2.0" },
+                "digest": { "$ref": "#/$defs/digest_ref" }
+              }
+            },
+            "bundle_id": { "$ref": "#/$defs/id" },
+            "label": { "type": "string", "maxLength": 256 }
+          }
+        }
+      ]
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "step_id",
+        "kind",
+        "status",
+        "started_unix_ms",
+        "ended_unix_ms",
+        "inputs",
+        "outputs"
+      ],
+      "properties": {
+        "step_id": { "$ref": "#/$defs/id" },
+        "kind": { "$ref": "#/$defs/step_kind" },
+        "status": { "$ref": "#/$defs/step_status" },
+        "attempt": { "type": "integer", "minimum": 1, "default": 1 },
+        "started_unix_ms": { "$ref": "#/$defs/unix_ms" },
+        "ended_unix_ms": {
+          "oneOf": [{ "$ref": "#/$defs/unix_ms" }, { "type": "null" }],
+          "default": null
+        },
+        "inputs": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/artifact_ref" },
+          "default": []
+        },
+        "outputs": {
+          "type": "array",
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/artifact_ref" },
+          "default": []
+        },
+        "diag": {
+          "type": ["object", "null"],
+          "default": null,
+          "additionalProperties": false,
+          "required": ["kind", "digest"],
+          "properties": {
+            "kind": { "const": "x07.x07diag@0.1.0" },
+            "digest": { "$ref": "#/$defs/digest_ref" }
+          }
+        },
+        "message": { "type": "string", "maxLength": 4096 }
+      }
+    }
+  }
+}

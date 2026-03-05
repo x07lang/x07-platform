@@ -1,0 +1,15 @@
+{
+  "schema_version": "x07.mcp.server_config@0.3.0",
+  "server": {
+    "name": "my-mcp-server",
+    "version": "0.1.0",
+    "protocolVersion": "2025-11-25"
+  },
+  "auth": {
+    "mode": "none"
+  },
+  "transports": { "http": { "enabled": false } },
+  "tools": { "descriptor_path": "replay/mcp.tools.json" },
+  "worker_exe_path": "out/mcp-worker",
+  "observability": { "clock": { "mode": "os_now" } }
+}

@@ -1,0 +1,63 @@
+{
+  "backend": {
+    "adapter": "wasi_http_proxy_v1",
+    "artifact": {
+      "bytes_len": 107091,
+      "path": "backend/app.http.component.wasm",
+      "sha256": "190da0646d7b30f40ec4f7348f62e1bf1ce482d83e470c35d9d6aa929cb33b4e"
+    }
+  },
+  "frontend": {
+    "artifacts": [
+      {
+        "bytes_len": 36607,
+        "path": "frontend/app-host.mjs",
+        "sha256": "c34ce30e274c7ae075844129264500f696781b58c8f58490d722227115734a9b"
+      },
+      {
+        "bytes_len": 51,
+        "path": "frontend/app.manifest.json",
+        "sha256": "7ab6f13f4c5ba27523b4231f7015c8153236f4d3460d74eb5a78f3e6eae0aca7"
+      },
+      {
+        "bytes_len": 18043,
+        "path": "frontend/app.wasm",
+        "sha256": "c9bca10a30431e76257c153f09b30414f5166a689acded8ccc5f8c0792f9d4a9"
+      },
+      {
+        "bytes_len": 2010,
+        "path": "frontend/app.wasm.manifest.json",
+        "sha256": "c7e7a43221005be341a720b807c84ad5e83d233cd393403141794ffdfc8a5959"
+      },
+      {
+        "bytes_len": 2327,
+        "path": "frontend/bootstrap.js",
+        "sha256": "f413cfc31725030c843d3e1a347d281c83c872a90e10b996b6c64db5143a89c6"
+      },
+      {
+        "bytes_len": 894,
+        "path": "frontend/index.html",
+        "sha256": "32dd8528fcd0a92d51031119e7f4b13de9b0b6120eb6dc79aa294d3a39fb7e5a"
+      },
+      {
+        "bytes_len": 100,
+        "path": "frontend/main.mjs",
+        "sha256": "254f54e73c2c3afea1b7b29aabded8fcd64fbe5f4f9f7fc07757b0d62a1272f0"
+      },
+      {
+        "bytes_len": 1205,
+        "path": "frontend/wasm.profile.json",
+        "sha256": "5ea3290f8c2831581764a57b550f294f244e311927dfde473846b3e6ca923651"
+      },
+      {
+        "bytes_len": 389,
+        "path": "frontend/web-ui.profile.json",
+        "sha256": "27c1da04a9c073c31a913759619eebd689ee5b6e68ca8e8425f13d3c048e4947"
+      }
+    ],
+    "dir_rel": "frontend",
+    "format": "core_wasm_v1"
+  },
+  "profile_id": "app_min_release",
+  "schema_version": "x07.app.bundle@0.1.0"
+}

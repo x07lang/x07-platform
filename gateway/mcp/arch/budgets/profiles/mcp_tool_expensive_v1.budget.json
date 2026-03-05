@@ -1,0 +1,16 @@
+{
+  "schema_version": "x07.budget.profile@0.1.0",
+  "id": "mcp_tool_expensive_v1",
+  "v": 1,
+  "cfg": {
+    "mode": "result_err_v1",
+    "label": "mcp.tool.expensive.v1",
+    "alloc_bytes": 134217728,
+    "alloc_calls": 400000,
+    "realloc_calls": 120000,
+    "memcpy_bytes": 536870912,
+    "sched_ticks": 2000000,
+    "fuel": 0
+  }
+}
+

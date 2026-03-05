@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://x07.io/spec/lp.incident.bundle.schema.json",
+  "title": "lp.incident.bundle@0.1.0",
+  "description": "Portable bundle of incident evidence captured by the platform. In Phase A this may be minimally populated; later phases harden capture fields.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "incident_id", "created_unix_ms", "app_id", "environment", "window", "refs"],
+  "properties": {
+    "schema_version": { "const": "lp.incident.bundle@0.1.0" },
+    "incident_id": { "$ref": "#/$defs/id" },
+    "created_unix_ms": { "$ref": "#/$defs/unix_ms" },
+    "app_id": { "$ref": "#/$defs/id" },
+    "environment": { "$ref": "#/$defs/environment" },
+    "window": { "$ref": "#/$defs/window" },
+    "deploy_execution": {
+      "type": ["object", "null"],
+      "default": null,
+      "additionalProperties": false,
+      "required": ["exec_id"],
+      "properties": { "exec_id": { "$ref": "#/$defs/id" } }
+    },
+    "request": { "oneOf": [{ "$ref": "#/$defs/req_ref" }, { "type": "null" }], "default": null },
+    "response": { "oneOf": [{ "$ref": "#/$defs/resp_ref" }, { "type": "null" }], "default": null },
+    "trace": { "oneOf": [{ "$ref": "#/$defs/trace_ref" }, { "type": "null" }], "default": null },
+    "diag_codes": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/diag_code" }, "default": [] },
+    "refs": { "type": "array", "maxItems": 2048, "items": { "$ref": "#/$defs/artifact_ref" }, "default": [] },
+    "notes": { "type": "string", "maxLength": 16384 },
+    "meta": { "type": "object", "additionalProperties": true, "default": {} }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "bytes_len": { "type": "integer", "minimum": 0 },
+    "unix_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991,
+      "description": "Unix timestamp in milliseconds (non-negative, JS-safe integer)."
+    },
+    "schema_id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*@[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "digest_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "bytes_len"],
+      "properties": {
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "bytes_len": { "$ref": "#/$defs/bytes_len" }
+      }
+    },
+    "artifact_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest"],
+      "properties": {
+        "kind": { "$ref": "#/$defs/schema_id" },
+        "digest": { "$ref": "#/$defs/digest_ref" },
+        "label": { "type": "string", "maxLength": 256 }
+      }
+    },
+    "env_name": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
+    "environment": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": { "kind": { "type": "string", "enum": ["dev", "staging", "prod"] } }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "name"],
+          "properties": { "kind": { "const": "custom" }, "name": { "$ref": "#/$defs/env_name" } }
+        }
+      ]
+    },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start_unix_ms", "end_unix_ms"],
+      "properties": { "start_unix_ms": { "$ref": "#/$defs/unix_ms" }, "end_unix_ms": { "$ref": "#/$defs/unix_ms" } }
+    },
+    "diag_code": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Z][A-Z0-9_-]*$" },
+    "req_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "digest"],
+      "properties": { "kind": { "const": "x07.http.request.envelope@0.1.0" }, "digest": { "$ref": "#/$defs/digest_ref" } }
+    },
+    "resp_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "digest"],
+      "properties": { "kind": { "const": "x07.http.response.envelope@0.1.0" }, "digest": { "$ref": "#/$defs/digest_ref" } }
+    },
+    "trace_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "digest"],
+      "properties": { "kind": { "const": "x07.app.trace@0.1.0" }, "digest": { "$ref": "#/$defs/digest_ref" } }
+    }
+  }
+}

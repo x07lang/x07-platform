@@ -1,0 +1,11 @@
+{
+  "schema_version": "x07.mcp.resources_manifest@0.1.0",
+  "resources": [
+    {
+      "uri": "about:example",
+      "name": "about",
+      "mimeType": "text/plain",
+      "text": "ok"
+    }
+  ]
+}

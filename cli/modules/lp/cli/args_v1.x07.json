@@ -1,0 +1,55 @@
+{
+  "schema_version": "x07.x07ast@0.5.0",
+  "kind": "module",
+  "module_id": "lp.cli.args_v1",
+  "imports": ["ext.cli"],
+  "decls": [
+    {
+      "kind": "export",
+      "names": [
+        "lp.cli.args_v1.arg_bytes_v1",
+        "lp.cli.args_v1.flag_present_v1",
+        "lp.cli.args_v1.opt_bytes_v1"
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.cli.args_v1.flag_present_v1",
+      "params": [
+        { "name": "doc", "ty": "bytes_view" },
+        { "name": "key", "ty": "bytes_view" }
+      ],
+      "result": "i32",
+      "body": ["option_bytes.is_some", ["ext.cli.matches_get", "doc", "key", 1]]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.cli.args_v1.opt_bytes_v1",
+      "params": [
+        { "name": "doc", "ty": "bytes_view" },
+        { "name": "key", "ty": "bytes_view" }
+      ],
+      "result": "bytes",
+      "body": [
+        "option_bytes.unwrap_or",
+        ["ext.cli.matches_get", "doc", "key", 2],
+        ["bytes.alloc", 0]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.cli.args_v1.arg_bytes_v1",
+      "params": [
+        { "name": "doc", "ty": "bytes_view" },
+        { "name": "key", "ty": "bytes_view" }
+      ],
+      "result": "bytes",
+      "body": [
+        "option_bytes.unwrap_or",
+        ["ext.cli.matches_get", "doc", "key", 3],
+        ["bytes.alloc", 0]
+      ]
+    }
+  ]
+}
+

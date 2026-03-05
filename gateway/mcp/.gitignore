@@ -1,0 +1,14 @@
+# X07 deps + generated artifacts
+.x07/deps/
+.x07/tmp/
+.x07/policies/_generated/
+
+# Build outputs
+target/
+dist/
+artifacts/
+out/
+
+# Editor noise
+.DS_Store
+*.log

@@ -1,0 +1,27 @@
+{
+  "schema_version": "x07.mcp.server_config@0.3.0",
+
+  "server": {
+    "name": "x07-platform",
+    "version": "0.1.0-phaseA",
+    "protocolVersion": "2025-11-25"
+  },
+
+  "auth": {
+    "mode": "none"
+  },
+
+  "transports": { "http": { "enabled": false } },
+
+  "tools": { "descriptor_path": "gateway/mcp/config/mcp.tools.json" },
+
+  "worker_exe_path": "gateway/mcp/bin/x07lp-mcp-worker.sh",
+  "observability": { "clock": { "mode": "os_now" } },
+
+  "sandbox": {
+    "per_tool": {
+      "enabled": true,
+      "policy_path": "gateway/mcp/policy/mcp.worker.base.policy.json"
+    }
+  }
+}

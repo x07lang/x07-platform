@@ -1,0 +1,19 @@
+{
+  "schema_version": "x07.arch.rr.index@0.1.0",
+  "policies": [
+    {
+      "id": "mcp_session_v1",
+      "policy_path": "arch/rr/policies/mcp_session_v1.policy.json",
+      "sanitize_id": "mcp_default_v1",
+      "sanitize_path": "arch/rr/sanitizers/mcp_default_v1.sanitize.json",
+      "worlds_allowed": ["run-os", "run-os-sandboxed", "solve-full", "solve-rr"],
+      "kinds_allowed": ["rr"],
+      "ops_allowed": [],
+      "cassette_brand": "std.rr.cassette_v1"
+    }
+  ],
+  "defaults": {
+    "record_modes_allowed": ["off", "record_missing_v1", "record_v1", "replay_v1", "rewrite_v1"]
+  }
+}
+

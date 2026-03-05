@@ -1,0 +1,60 @@
+{
+  "schema_version": "x07.x07ast@0.5.0",
+  "kind": "module",
+  "module_id": "lp.core.dm_extract_v1",
+  "imports": ["ext.data_model"],
+  "decls": [
+    {
+      "kind": "export",
+      "names": [
+        "lp.core.dm_extract_v1.map_value_bytes_v1",
+        "lp.core.dm_extract_v1.root_value_bytes_v1",
+        "lp.core.dm_extract_v1.value_bytes_at_v1"
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.core.dm_extract_v1.value_bytes_at_v1",
+      "params": [
+        { "name": "docv", "ty": "bytes_view" },
+        { "name": "off", "ty": "i32" }
+      ],
+      "result": "bytes",
+      "body": [
+        "begin",
+        ["let", "end", ["ext.data_model.skip_value", "docv", "off"]],
+        ["if", ["<", "end", 0], ["return", ["bytes.alloc", 0]], 0],
+        ["let", "len", ["-", "end", "off"]],
+        ["view.to_bytes", ["view.slice", "docv", "off", "len"]]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.core.dm_extract_v1.map_value_bytes_v1",
+      "params": [
+        { "name": "docv", "ty": "bytes_view" },
+        { "name": "map_off", "ty": "i32" },
+        { "name": "key", "ty": "bytes_view" }
+      ],
+      "result": "bytes",
+      "body": [
+        "begin",
+        ["let", "v_off", ["ext.data_model.map_find", "docv", "map_off", "key"]],
+        ["if", ["<", "v_off", 0], ["return", ["bytes.alloc", 0]], 0],
+        ["lp.core.dm_extract_v1.value_bytes_at_v1", "docv", "v_off"]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.core.dm_extract_v1.root_value_bytes_v1",
+      "params": [{ "name": "docv", "ty": "bytes_view" }],
+      "result": "bytes",
+      "body": [
+        "begin",
+        ["let", "root", ["ext.data_model.root_offset", "docv"]],
+        ["lp.core.dm_extract_v1.value_bytes_at_v1", "docv", "root"]
+      ]
+    }
+  ]
+}
+

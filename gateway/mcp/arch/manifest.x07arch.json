@@ -1,0 +1,77 @@
+{
+  "schema_version": "x07.arch.manifest@0.1.0",
+  "repo": { "id": "mcp-server-stdio", "root": "." },
+  "externals": {
+    "allowed_import_prefixes": ["std.", "ext.", "lp."],
+    "allowed_exact": []
+  },
+  "nodes": [
+    {
+      "id": "router_os",
+      "match": {
+        "module_prefixes": [],
+        "path_globs": ["src/main.x07.json", "src/app.x07.json"]
+      },
+      "world": "run-os",
+      "visibility": { "mode": "public", "visible_to": [] },
+      "imports": { "deny_prefixes": [], "allow_prefixes": [] }
+    },
+    {
+      "id": "worker_sandbox",
+      "match": {
+        "module_prefixes": [],
+        "path_globs": ["src/worker_main.x07.json", "src/mcp/*.x07.json"]
+      },
+      "world": "run-os-sandboxed",
+      "visibility": { "mode": "public", "visible_to": [] },
+      "imports": { "deny_prefixes": [], "allow_prefixes": [] }
+    },
+    {
+      "id": "tests_solve_fs",
+      "match": { "module_prefixes": [], "path_globs": ["tests/**/*.x07.json"] },
+      "world": "solve-fs",
+      "visibility": { "mode": "public", "visible_to": [] },
+      "imports": { "deny_prefixes": ["std.os."], "allow_prefixes": [] }
+    }
+  ],
+  "rules": [
+    {
+      "kind": "layers_v1",
+      "id": "layers.main_v1",
+      "layers": ["router_os", "worker_sandbox", "tests_solve_fs"],
+      "direction": "down"
+    },
+    { "kind": "deny_cycles_v1", "id": "deny_cycles.nodes_v1", "scope": "nodes" }
+  ],
+  "checks": {
+    "deny_cycles": true,
+    "deny_orphans": true,
+    "enforce_visibility": false,
+    "enforce_world_caps": true,
+    "brand_boundary_v1": { "enabled": false },
+    "allowlist_mode": {
+      "enabled": true,
+      "default_allow_external": true,
+      "default_allow_internal": false
+    }
+  },
+  "tool_budgets": {
+    "max_modules": 5000,
+    "max_edges": 50000,
+    "max_diags": 2000,
+    "contracts_budgets": { "max_contract_files": 2000, "max_contract_bytes": 67108864 }
+  },
+  "contracts_v1": {
+    "rr": {
+      "index_path": "arch/rr/index.x07rr.json",
+      "gen_dir": "arch/rr",
+      "require_policy_for_os_calls": false
+    },
+    "budgets": {
+      "index_path": "arch/budgets/index.x07budgets.json",
+      "gen_dir": "arch/budgets/gen",
+      "require_scopes": false
+    },
+    "canonical_json": { "mode": "jcs_rfc8785_v1" }
+  }
+}

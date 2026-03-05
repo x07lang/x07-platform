@@ -1,0 +1,171 @@
+{
+  "default_profile": "os",
+  "dependencies": [
+    {
+      "name": "ext-base64-rs",
+      "path": ".x07/deps/ext-base64-rs/0.1.4",
+      "version": "0.1.4"
+    },
+    {
+      "name": "ext-cli",
+      "path": ".x07/deps/ext-cli/0.1.14",
+      "version": "0.1.14"
+    },
+    {
+      "name": "ext-crypto-rs",
+      "path": ".x07/deps/ext-crypto-rs/0.1.5",
+      "version": "0.1.5"
+    },
+    {
+      "name": "ext-csv-rs",
+      "path": ".x07/deps/ext-csv-rs/0.1.5",
+      "version": "0.1.5"
+    },
+    {
+      "name": "ext-data-model",
+      "path": ".x07/deps/ext-data-model/0.1.10",
+      "version": "0.1.10"
+    },
+    {
+      "name": "ext-db-core",
+      "path": ".x07/deps/ext-db-core/0.1.11",
+      "version": "0.1.11"
+    },
+    {
+      "name": "ext-db-sqlite",
+      "path": ".x07/deps/ext-db-sqlite/0.1.11",
+      "version": "0.1.11"
+    },
+    {
+      "name": "ext-fs",
+      "path": ".x07/deps/ext-fs/0.1.5",
+      "version": "0.1.5"
+    },
+    {
+      "name": "ext-hex-rs",
+      "path": ".x07/deps/ext-hex-rs/0.1.4",
+      "version": "0.1.4"
+    },
+    {
+      "name": "ext-ini-rs",
+      "path": ".x07/deps/ext-ini-rs/0.1.4",
+      "version": "0.1.4"
+    },
+    {
+      "name": "ext-json-rs",
+      "path": ".x07/deps/ext-json-rs/0.1.6",
+      "version": "0.1.6"
+    },
+    {
+      "name": "ext-jsonschema-rs",
+      "path": ".x07/deps/ext-jsonschema-rs/0.1.0",
+      "version": "0.1.0"
+    },
+    {
+      "name": "ext-mcp-core",
+      "path": ".x07/deps/ext-mcp-core/0.3.4",
+      "version": "0.3.4"
+    },
+    {
+      "name": "ext-mcp-sandbox",
+      "path": ".x07/deps/ext-mcp-sandbox/0.3.10",
+      "version": "0.3.10"
+    },
+    {
+      "name": "ext-mcp-toolkit",
+      "path": ".x07/deps/ext-mcp-toolkit/0.3.7",
+      "version": "0.3.7"
+    },
+    {
+      "name": "ext-mcp-transport-stdio",
+      "path": ".x07/deps/ext-mcp-transport-stdio/0.3.6",
+      "version": "0.3.6"
+    },
+    {
+      "name": "ext-mcp-worker",
+      "path": ".x07/deps/ext-mcp-worker/0.3.6",
+      "version": "0.3.6"
+    },
+    {
+      "name": "ext-regex",
+      "path": ".x07/deps/ext-regex/0.2.4",
+      "version": "0.2.4"
+    },
+    {
+      "name": "ext-stdio",
+      "path": ".x07/deps/ext-stdio/0.1.0",
+      "version": "0.1.0"
+    },
+    {
+      "name": "ext-time-rs",
+      "path": ".x07/deps/ext-time-rs/0.1.6",
+      "version": "0.1.6"
+    },
+    {
+      "name": "ext-toml-rs",
+      "path": ".x07/deps/ext-toml-rs/0.1.5",
+      "version": "0.1.5"
+    },
+    {
+      "name": "ext-unicode-rs",
+      "path": ".x07/deps/ext-unicode-rs/0.1.5",
+      "version": "0.1.5"
+    },
+    {
+      "name": "ext-xml-rs",
+      "path": ".x07/deps/ext-xml-rs/0.1.4",
+      "version": "0.1.4"
+    },
+    {
+      "name": "ext-yaml-rs",
+      "path": ".x07/deps/ext-yaml-rs/0.1.4",
+      "version": "0.1.4"
+    }
+  ],
+  "entry": "cli/src/main.x07.json",
+  "lockfile": "x07.lock.json",
+  "module_roots": [
+    "cli/src",
+    "cli/modules",
+    "engine/modules",
+    "adapters/modules",
+    "gateway/mcp/src"
+  ],
+  "patch": {
+    "ext-crypto-rs": {
+      "path": ".x07/deps/ext-crypto-rs/0.1.5",
+      "version": "0.1.5"
+    },
+    "ext-data-model": {
+      "path": ".x07/deps/ext-data-model/0.1.10",
+      "version": "0.1.10"
+    },
+    "ext-json-rs": {
+      "path": ".x07/deps/ext-json-rs/0.1.6",
+      "version": "0.1.6"
+    },
+    "ext-mcp-sandbox": {
+      "path": ".x07/deps/ext-mcp-sandbox/0.3.10",
+      "version": "0.3.10"
+    },
+    "ext-time-rs": {
+      "path": ".x07/deps/ext-time-rs/0.1.6",
+      "version": "0.1.6"
+    }
+  },
+  "profiles": {
+    "os": {
+      "auto_ffi": true,
+      "solve_fuel": 50000000000,
+      "world": "run-os"
+    },
+    "sandbox": {
+      "auto_ffi": true,
+      "policy": "gateway/mcp/policy/mcp.worker.base.policy.json",
+      "solve_fuel": 50000000000,
+      "world": "run-os-sandboxed"
+    }
+  },
+  "schema_version": "x07.project@0.3.0",
+  "world": "run-os"
+}

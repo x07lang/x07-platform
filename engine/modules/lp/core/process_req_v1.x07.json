@@ -1,0 +1,63 @@
+{
+  "schema_version": "x07.x07ast@0.5.0",
+  "kind": "module",
+  "module_id": "lp.core.process_req_v1",
+  "imports": ["std.u32", "std.vec"],
+  "decls": [
+    {
+      "kind": "export",
+      "names": ["lp.core.process_req_v1.mk_argv6_noenv_v1"]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.core.process_req_v1.mk_argv6_noenv_v1",
+      "params": [
+        { "name": "a0", "ty": "bytes_view" },
+        { "name": "a1", "ty": "bytes_view" },
+        { "name": "a2", "ty": "bytes_view" },
+        { "name": "a3", "ty": "bytes_view" },
+        { "name": "a4", "ty": "bytes_view" },
+        { "name": "a5", "ty": "bytes_view" }
+      ],
+      "result": "bytes",
+      "body": [
+        "begin",
+        ["let", "v", ["std.vec.with_capacity", 256]],
+        ["set", "v", ["std.vec.push", "v", 1]],
+        ["set", "v", ["std.vec.push", "v", 0]],
+        ["set", "v", ["std.u32.push_le", "v", 6]],
+
+        ["let", "l0", ["view.len", "a0"]],
+        ["set", "v", ["std.u32.push_le", "v", "l0"]],
+        ["set", "v", ["vec_u8.extend_bytes_range", "v", "a0", 0, "l0"]],
+
+        ["let", "l1", ["view.len", "a1"]],
+        ["set", "v", ["std.u32.push_le", "v", "l1"]],
+        ["set", "v", ["vec_u8.extend_bytes_range", "v", "a1", 0, "l1"]],
+
+        ["let", "l2", ["view.len", "a2"]],
+        ["set", "v", ["std.u32.push_le", "v", "l2"]],
+        ["set", "v", ["vec_u8.extend_bytes_range", "v", "a2", 0, "l2"]],
+
+        ["let", "l3", ["view.len", "a3"]],
+        ["set", "v", ["std.u32.push_le", "v", "l3"]],
+        ["set", "v", ["vec_u8.extend_bytes_range", "v", "a3", 0, "l3"]],
+
+        ["let", "l4", ["view.len", "a4"]],
+        ["set", "v", ["std.u32.push_le", "v", "l4"]],
+        ["set", "v", ["vec_u8.extend_bytes_range", "v", "a4", 0, "l4"]],
+
+        ["let", "l5", ["view.len", "a5"]],
+        ["set", "v", ["std.u32.push_le", "v", "l5"]],
+        ["set", "v", ["vec_u8.extend_bytes_range", "v", "a5", 0, "l5"]],
+
+        ["set", "v", ["std.u32.push_le", "v", 0]],
+        ["set", "v", ["std.u32.push_le", "v", 0]],
+        ["set", "v", ["std.u32.push_le", "v", 0]],
+
+        ["std.vec.as_bytes", "v"]
+      ]
+    }
+  ]
+}
+

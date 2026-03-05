@@ -1,0 +1,1 @@
+{"decls":[],"imports":["lp.cli.main_v1"],"kind":"entry","module_id":"main","schema_version":"x07.x07ast@0.5.0","solve":["lp.cli.main_v1.run_v1","input"]}

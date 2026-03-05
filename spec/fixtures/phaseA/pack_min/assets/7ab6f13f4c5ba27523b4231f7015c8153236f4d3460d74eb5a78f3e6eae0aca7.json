@@ -1,0 +1,4 @@
+{
+  "apiPrefix": "/api",
+  "wasmUrl": "app.wasm"
+}

@@ -1,0 +1,585 @@
+{
+  "schema_version": "x07.x07ast@0.5.0",
+  "kind": "module",
+  "module_id": "mcp.user",
+  "imports": [
+    "ext.data_model",
+    "ext.json.data_model",
+    "lp.cli.main_v1",
+    "std.bytes",
+    "std.codec",
+    "std.mcp.diag",
+    "std.mcp.tool.result",
+    "std.vec"
+  ],
+  "decls": [
+    {
+      "kind": "export",
+      "names": [
+        "mcp.user.call_tool_v1"
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "mcp.user._err_invalid_args_v1",
+      "params": [
+        { "name": "human_text_utf8", "ty": "bytes" }
+      ],
+      "result": "bytes",
+      "body": [
+        "begin",
+        ["let", "diag", ["std.mcp.diag.code_invalid_args_v1"]],
+        ["let", "detail", ["bytes.lit", "{}"]],
+        [
+          "std.mcp.tool.result.err_v1",
+          ["bytes.view", "diag"],
+          ["bytes.view", "human_text_utf8"],
+          ["bytes.view", "detail"]
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "mcp.user._parse_args_doc_v1",
+      "params": [
+        { "name": "args_json", "ty": "bytes_view" }
+      ],
+      "result": "bytes",
+      "body": [
+        "begin",
+        ["let", "doc_b", ["ext.json.data_model.parse", "args_json"]],
+        [
+          "if",
+          ["=", ["ext.data_model.doc_is_err", ["bytes.view", "doc_b"]], 1],
+          ["return", ["bytes.alloc", 0]],
+          0
+        ],
+        [
+          "if",
+          ["!=", ["ext.data_model.root_kind", ["bytes.view", "doc_b"]], 5],
+          ["return", ["bytes.alloc", 0]],
+          0
+        ],
+        "doc_b"
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "mcp.user._req_string_v1",
+      "params": [
+        { "name": "doc", "ty": "bytes_view" },
+        { "name": "root", "ty": "i32" },
+        { "name": "key", "ty": "bytes_view" }
+      ],
+      "result": "bytes",
+      "body": [
+        "begin",
+        ["let", "off", ["ext.data_model.map_find", "doc", "root", "key"]],
+        ["if", ["<", "off", 0], ["return", ["bytes.alloc", 0]], 0],
+        ["if", ["!=", ["ext.data_model.kind_at", "doc", "off"], 3], ["return", ["bytes.alloc", 0]], 0],
+        ["ext.data_model.string_get", "doc", "off"]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "mcp.user._opt_string_v1",
+      "params": [
+        { "name": "doc", "ty": "bytes_view" },
+        { "name": "root", "ty": "i32" },
+        { "name": "key", "ty": "bytes_view" }
+      ],
+      "result": "bytes",
+      "body": [
+        "begin",
+        ["let", "off", ["ext.data_model.map_find", "doc", "root", "key"]],
+        ["if", ["<", "off", 0], ["return", ["bytes.alloc", 0]], 0],
+        ["if", ["!=", ["ext.data_model.kind_at", "doc", "off"], 3], ["return", ["bytes.alloc", 0]], 0],
+        ["ext.data_model.string_get", "doc", "off"]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "mcp.user._opt_dec_token_v1",
+      "params": [
+        { "name": "doc", "ty": "bytes_view" },
+        { "name": "root", "ty": "i32" },
+        { "name": "key", "ty": "bytes_view" }
+      ],
+      "result": "bytes",
+      "body": [
+        "begin",
+        ["let", "off", ["ext.data_model.map_find", "doc", "root", "key"]],
+        ["if", ["<", "off", 0], ["return", ["bytes.alloc", 0]], 0],
+        ["let", "k", ["ext.data_model.kind_at", "doc", "off"]],
+        ["if", ["=", "k", 2], ["return", ["ext.data_model.number_get", "doc", "off"]], 0],
+        ["if", ["=", "k", 3], ["return", ["ext.data_model.string_get", "doc", "off"]], 0],
+        ["bytes.alloc", 0]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "mcp.user._argv_push_token_v1",
+      "params": [
+        { "name": "argv", "ty": "vec_u8" },
+        { "name": "token", "ty": "bytes_view" }
+      ],
+      "result": "vec_u8",
+      "body": [
+        "begin",
+        ["let", "len_b", ["std.codec.write_u32_le", ["view.len", "token"]]],
+        ["set", "argv", ["std.vec.extend_bytes", "argv", ["bytes.view", "len_b"]]],
+        ["set", "argv", ["std.vec.extend_bytes", "argv", "token"]],
+        "argv"
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "mcp.user._tool_change_new_v1",
+      "params": [
+        { "name": "args_json", "ty": "bytes_view" }
+      ],
+      "result": "bytes",
+      "body": [
+        "begin",
+        ["let", "doc_b", ["mcp.user._parse_args_doc_v1", "args_json"]],
+        [
+          "if",
+          ["=", ["bytes.len", "doc_b"], 0],
+          ["return", ["mcp.user._err_invalid_args_v1", ["bytes.lit", "invalid arguments JSON"]]],
+          0
+        ],
+        ["let", "doc", ["bytes.view", "doc_b"]],
+        ["let", "root", ["ext.data_model.root_offset", "doc"]],
+        ["let", "app_id", ["mcp.user._req_string_v1", "doc", "root", ["bytes.view_lit", "app_id"]]],
+        ["let", "env", ["mcp.user._req_string_v1", "doc", "root", ["bytes.view_lit", "env"]]],
+        ["let", "intent", ["mcp.user._req_string_v1", "doc", "root", ["bytes.view_lit", "intent"]]],
+        [
+          "if",
+          ["|", ["=", ["bytes.len", "app_id"], 0], ["|", ["=", ["bytes.len", "env"], 0], ["=", ["bytes.len", "intent"], 0]]],
+          ["return", ["mcp.user._err_invalid_args_v1", ["bytes.lit", "missing required args: app_id/env/intent"]]],
+          0
+        ],
+        ["let", "out_path", ["mcp.user._opt_string_v1", "doc", "root", ["bytes.view_lit", "out"]]],
+        ["let", "state_dir", ["mcp.user._opt_string_v1", "doc", "root", ["bytes.view_lit", "state_dir"]]],
+        [
+          "if",
+          ["=", ["bytes.len", "state_dir"], 0],
+          ["set", "state_dir", ["bytes.lit", "out/x07lp_state"]],
+          0
+        ],
+        ["let", "now_tok", ["mcp.user._opt_dec_token_v1", "doc", "root", ["bytes.view_lit", "now_unix_ms"]]],
+        ["let", "argc", 10],
+        ["if", [">", ["bytes.len", "out_path"], 0], ["set", "argc", ["+", "argc", 2]], 0],
+        ["if", [">", ["bytes.len", "state_dir"], 0], ["set", "argc", ["+", "argc", 2]], 0],
+        ["if", [">", ["bytes.len", "now_tok"], 0], ["set", "argc", ["+", "argc", 2]], 0],
+        ["let", "argc_b", ["std.codec.write_u32_le", "argc"]],
+        ["let", "argv", ["std.vec.with_capacity", 512]],
+        ["set", "argv", ["std.vec.extend_bytes", "argv", ["bytes.view", "argc_b"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "x07lp"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "change"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "new"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--app-id"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "app_id"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--env"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "env"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--intent"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "intent"]]],
+        [
+          "if",
+          [">", ["bytes.len", "out_path"], 0],
+          [
+            "begin",
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--out"]]],
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "out_path"]]],
+            0
+          ],
+          0
+        ],
+        [
+          "if",
+          [">", ["bytes.len", "state_dir"], 0],
+          [
+            "begin",
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--state-dir"]]],
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "state_dir"]]],
+            0
+          ],
+          0
+        ],
+        [
+          "if",
+          [">", ["bytes.len", "now_tok"], 0],
+          [
+            "begin",
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--now-unix-ms"]]],
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "now_tok"]]],
+            0
+          ],
+          0
+        ],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--json"]]],
+        ["let", "argv_b", ["std.vec.as_bytes", "argv"]],
+        ["let", "out", ["lp.cli.main_v1.run_v1", ["bytes.view", "argv_b"]]],
+        ["std.mcp.tool.result.ok_text_v1", ["bytes.view", "out"]]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "mcp.user._tool_change_validate_v1",
+      "params": [
+        { "name": "args_json", "ty": "bytes_view" }
+      ],
+      "result": "bytes",
+      "body": [
+        "begin",
+        ["let", "doc_b", ["mcp.user._parse_args_doc_v1", "args_json"]],
+        [
+          "if",
+          ["=", ["bytes.len", "doc_b"], 0],
+          ["return", ["mcp.user._err_invalid_args_v1", ["bytes.lit", "invalid arguments JSON"]]],
+          0
+        ],
+        ["let", "doc", ["bytes.view", "doc_b"]],
+        ["let", "root", ["ext.data_model.root_offset", "doc"]],
+        ["let", "in_path", ["mcp.user._req_string_v1", "doc", "root", ["bytes.view_lit", "in"]]],
+        [
+          "if",
+          ["=", ["bytes.len", "in_path"], 0],
+          ["return", ["mcp.user._err_invalid_args_v1", ["bytes.lit", "missing in argument"]]],
+          0
+        ],
+        ["let", "state_dir", ["mcp.user._opt_string_v1", "doc", "root", ["bytes.view_lit", "state_dir"]]],
+        ["let", "now_tok", ["mcp.user._opt_dec_token_v1", "doc", "root", ["bytes.view_lit", "now_unix_ms"]]],
+        ["let", "argc", 6],
+        ["if", [">", ["bytes.len", "state_dir"], 0], ["set", "argc", ["+", "argc", 2]], 0],
+        ["if", [">", ["bytes.len", "now_tok"], 0], ["set", "argc", ["+", "argc", 2]], 0],
+        ["let", "argc_b", ["std.codec.write_u32_le", "argc"]],
+        ["let", "argv", ["std.vec.with_capacity", 256]],
+        ["set", "argv", ["std.vec.extend_bytes", "argv", ["bytes.view", "argc_b"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "x07lp"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "change"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "validate"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--in"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "in_path"]]],
+        [
+          "if",
+          [">", ["bytes.len", "state_dir"], 0],
+          [
+            "begin",
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--state-dir"]]],
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "state_dir"]]],
+            0
+          ],
+          0
+        ],
+        [
+          "if",
+          [">", ["bytes.len", "now_tok"], 0],
+          [
+            "begin",
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--now-unix-ms"]]],
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "now_tok"]]],
+            0
+          ],
+          0
+        ],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--json"]]],
+        ["let", "argv_b", ["std.vec.as_bytes", "argv"]],
+        ["let", "out", ["lp.cli.main_v1.run_v1", ["bytes.view", "argv_b"]]],
+        ["std.mcp.tool.result.ok_text_v1", ["bytes.view", "out"]]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "mcp.user._tool_deploy_accept_v1",
+      "params": [
+        { "name": "args_json", "ty": "bytes_view" }
+      ],
+      "result": "bytes",
+      "body": [
+        "begin",
+        ["let", "doc_b", ["mcp.user._parse_args_doc_v1", "args_json"]],
+        [
+          "if",
+          ["=", ["bytes.len", "doc_b"], 0],
+          ["return", ["mcp.user._err_invalid_args_v1", ["bytes.lit", "invalid arguments JSON"]]],
+          0
+        ],
+        ["let", "doc", ["bytes.view", "doc_b"]],
+        ["let", "root", ["ext.data_model.root_offset", "doc"]],
+        ["let", "pack_dir", ["mcp.user._req_string_v1", "doc", "root", ["bytes.view_lit", "pack_dir"]]],
+        ["let", "pack_manifest", ["mcp.user._req_string_v1", "doc", "root", ["bytes.view_lit", "pack_manifest"]]],
+        [
+          "if",
+          ["|", ["=", ["bytes.len", "pack_dir"], 0], ["=", ["bytes.len", "pack_manifest"], 0]],
+          ["return", ["mcp.user._err_invalid_args_v1", ["bytes.lit", "missing required args: pack_dir/pack_manifest"]]],
+          0
+        ],
+        ["let", "change_path", ["mcp.user._opt_string_v1", "doc", "root", ["bytes.view_lit", "change"]]],
+        ["let", "ops_profile", ["mcp.user._opt_string_v1", "doc", "root", ["bytes.view_lit", "ops_profile"]]],
+        ["let", "state_dir", ["mcp.user._opt_string_v1", "doc", "root", ["bytes.view_lit", "state_dir"]]],
+        [
+          "if",
+          ["=", ["bytes.len", "state_dir"], 0],
+          ["set", "state_dir", ["bytes.lit", "out/x07lp_state"]],
+          0
+        ],
+        ["let", "now_tok", ["mcp.user._opt_dec_token_v1", "doc", "root", ["bytes.view_lit", "now_unix_ms"]]],
+        ["let", "argc", 8],
+        ["if", [">", ["bytes.len", "change_path"], 0], ["set", "argc", ["+", "argc", 2]], 0],
+        ["if", [">", ["bytes.len", "ops_profile"], 0], ["set", "argc", ["+", "argc", 2]], 0],
+        ["if", [">", ["bytes.len", "state_dir"], 0], ["set", "argc", ["+", "argc", 2]], 0],
+        ["if", [">", ["bytes.len", "now_tok"], 0], ["set", "argc", ["+", "argc", 2]], 0],
+        ["let", "argc_b", ["std.codec.write_u32_le", "argc"]],
+        ["let", "argv", ["std.vec.with_capacity", 512]],
+        ["set", "argv", ["std.vec.extend_bytes", "argv", ["bytes.view", "argc_b"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "x07lp"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "deploy"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "accept"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--pack-dir"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "pack_dir"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--pack-manifest"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "pack_manifest"]]],
+        [
+          "if",
+          [">", ["bytes.len", "change_path"], 0],
+          [
+            "begin",
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--change"]]],
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "change_path"]]],
+            0
+          ],
+          0
+        ],
+        [
+          "if",
+          [">", ["bytes.len", "ops_profile"], 0],
+          [
+            "begin",
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--ops-profile"]]],
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "ops_profile"]]],
+            0
+          ],
+          0
+        ],
+        [
+          "if",
+          [">", ["bytes.len", "state_dir"], 0],
+          [
+            "begin",
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--state-dir"]]],
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "state_dir"]]],
+            0
+          ],
+          0
+        ],
+        [
+          "if",
+          [">", ["bytes.len", "now_tok"], 0],
+          [
+            "begin",
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--now-unix-ms"]]],
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "now_tok"]]],
+            0
+          ],
+          0
+        ],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--json"]]],
+        ["let", "argv_b", ["std.vec.as_bytes", "argv"]],
+        ["let", "out", ["lp.cli.main_v1.run_v1", ["bytes.view", "argv_b"]]],
+        ["std.mcp.tool.result.ok_text_v1", ["bytes.view", "out"]]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "mcp.user._tool_deploy_status_v1",
+      "params": [
+        { "name": "args_json", "ty": "bytes_view" }
+      ],
+      "result": "bytes",
+      "body": [
+        "begin",
+        ["let", "doc_b", ["mcp.user._parse_args_doc_v1", "args_json"]],
+        [
+          "if",
+          ["=", ["bytes.len", "doc_b"], 0],
+          ["return", ["mcp.user._err_invalid_args_v1", ["bytes.lit", "invalid arguments JSON"]]],
+          0
+        ],
+        ["let", "doc", ["bytes.view", "doc_b"]],
+        ["let", "root", ["ext.data_model.root_offset", "doc"]],
+        ["let", "deployment_id", ["mcp.user._req_string_v1", "doc", "root", ["bytes.view_lit", "deployment_id"]]],
+        [
+          "if",
+          ["=", ["bytes.len", "deployment_id"], 0],
+          ["return", ["mcp.user._err_invalid_args_v1", ["bytes.lit", "missing deployment_id argument"]]],
+          0
+        ],
+        ["let", "state_dir", ["mcp.user._opt_string_v1", "doc", "root", ["bytes.view_lit", "state_dir"]]],
+        [
+          "if",
+          ["=", ["bytes.len", "state_dir"], 0],
+          ["set", "state_dir", ["bytes.lit", "out/x07lp_state"]],
+          0
+        ],
+        ["let", "argc", 6],
+        ["if", [">", ["bytes.len", "state_dir"], 0], ["set", "argc", ["+", "argc", 2]], 0],
+        ["let", "argc_b", ["std.codec.write_u32_le", "argc"]],
+        ["let", "argv", ["std.vec.with_capacity", 256]],
+        ["set", "argv", ["std.vec.extend_bytes", "argv", ["bytes.view", "argc_b"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "x07lp"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "deploy"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "status"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--deployment-id"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "deployment_id"]]],
+        [
+          "if",
+          [">", ["bytes.len", "state_dir"], 0],
+          [
+            "begin",
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--state-dir"]]],
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "state_dir"]]],
+            0
+          ],
+          0
+        ],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--json"]]],
+        ["let", "argv_b", ["std.vec.as_bytes", "argv"]],
+        ["let", "out", ["lp.cli.main_v1.run_v1", ["bytes.view", "argv_b"]]],
+        ["std.mcp.tool.result.ok_text_v1", ["bytes.view", "out"]]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "mcp.user._tool_deploy_stop_or_rollback_v1",
+      "params": [
+        { "name": "action", "ty": "bytes_view" },
+        { "name": "args_json", "ty": "bytes_view" }
+      ],
+      "result": "bytes",
+      "body": [
+        "begin",
+        ["let", "doc_b", ["mcp.user._parse_args_doc_v1", "args_json"]],
+        [
+          "if",
+          ["=", ["bytes.len", "doc_b"], 0],
+          ["return", ["mcp.user._err_invalid_args_v1", ["bytes.lit", "invalid arguments JSON"]]],
+          0
+        ],
+        ["let", "doc", ["bytes.view", "doc_b"]],
+        ["let", "root", ["ext.data_model.root_offset", "doc"]],
+        ["let", "deployment_id", ["mcp.user._req_string_v1", "doc", "root", ["bytes.view_lit", "deployment_id"]]],
+        ["let", "reason", ["mcp.user._req_string_v1", "doc", "root", ["bytes.view_lit", "reason"]]],
+        [
+          "if",
+          ["|", ["=", ["bytes.len", "deployment_id"], 0], ["=", ["bytes.len", "reason"], 0]],
+          ["return", ["mcp.user._err_invalid_args_v1", ["bytes.lit", "missing required args: deployment_id/reason"]]],
+          0
+        ],
+        ["let", "state_dir", ["mcp.user._opt_string_v1", "doc", "root", ["bytes.view_lit", "state_dir"]]],
+        [
+          "if",
+          ["=", ["bytes.len", "state_dir"], 0],
+          ["set", "state_dir", ["bytes.lit", "out/x07lp_state"]],
+          0
+        ],
+        ["let", "now_tok", ["mcp.user._opt_dec_token_v1", "doc", "root", ["bytes.view_lit", "now_unix_ms"]]],
+        ["let", "argc", 8],
+        ["if", [">", ["bytes.len", "state_dir"], 0], ["set", "argc", ["+", "argc", 2]], 0],
+        ["if", [">", ["bytes.len", "now_tok"], 0], ["set", "argc", ["+", "argc", 2]], 0],
+        ["let", "argc_b", ["std.codec.write_u32_le", "argc"]],
+        ["let", "argv", ["std.vec.with_capacity", 512]],
+        ["set", "argv", ["std.vec.extend_bytes", "argv", ["bytes.view", "argc_b"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "x07lp"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "deploy"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", "action"]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--deployment-id"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "deployment_id"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--reason"]]],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "reason"]]],
+        [
+          "if",
+          [">", ["bytes.len", "state_dir"], 0],
+          [
+            "begin",
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--state-dir"]]],
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "state_dir"]]],
+            0
+          ],
+          0
+        ],
+        [
+          "if",
+          [">", ["bytes.len", "now_tok"], 0],
+          [
+            "begin",
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--now-unix-ms"]]],
+            ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view", "now_tok"]]],
+            0
+          ],
+          0
+        ],
+        ["set", "argv", ["mcp.user._argv_push_token_v1", "argv", ["bytes.view_lit", "--json"]]],
+        ["let", "argv_b", ["std.vec.as_bytes", "argv"]],
+        ["let", "out", ["lp.cli.main_v1.run_v1", ["bytes.view", "argv_b"]]],
+        ["std.mcp.tool.result.ok_text_v1", ["bytes.view", "out"]]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "mcp.user.call_tool_v1",
+      "params": [
+        { "name": "tool_name", "ty": "bytes_view" },
+        { "name": "ctx_json", "ty": "bytes_view" },
+        { "name": "args_json", "ty": "bytes_view" }
+      ],
+      "result": "bytes",
+      "body": [
+        "begin",
+        ["let", "t_change_new", ["bytes.lit", "lp.change.new"]],
+        ["let", "t_change_validate", ["bytes.lit", "lp.change.validate"]],
+        ["let", "t_deploy_accept", ["bytes.lit", "lp.deploy.accept"]],
+        ["let", "t_deploy_status", ["bytes.lit", "lp.deploy.status"]],
+        ["let", "t_deploy_stop", ["bytes.lit", "lp.deploy.stop"]],
+        ["let", "t_deploy_rollback", ["bytes.lit", "lp.deploy.rollback"]],
+        [
+          "if",
+          ["=", ["bytes.eq", "tool_name", ["bytes.view", "t_change_new"]], 1],
+          ["return", ["mcp.user._tool_change_new_v1", "args_json"]],
+          0
+        ],
+        [
+          "if",
+          ["=", ["bytes.eq", "tool_name", ["bytes.view", "t_change_validate"]], 1],
+          ["return", ["mcp.user._tool_change_validate_v1", "args_json"]],
+          0
+        ],
+        [
+          "if",
+          ["=", ["bytes.eq", "tool_name", ["bytes.view", "t_deploy_accept"]], 1],
+          ["return", ["mcp.user._tool_deploy_accept_v1", "args_json"]],
+          0
+        ],
+        [
+          "if",
+          ["=", ["bytes.eq", "tool_name", ["bytes.view", "t_deploy_status"]], 1],
+          ["return", ["mcp.user._tool_deploy_status_v1", "args_json"]],
+          0
+        ],
+        [
+          "if",
+          ["=", ["bytes.eq", "tool_name", ["bytes.view", "t_deploy_stop"]], 1],
+          ["return", ["mcp.user._tool_deploy_stop_or_rollback_v1", ["bytes.view_lit", "stop"], "args_json"]],
+          0
+        ],
+        [
+          "if",
+          ["=", ["bytes.eq", "tool_name", ["bytes.view", "t_deploy_rollback"]], 1],
+          ["return", ["mcp.user._tool_deploy_stop_or_rollback_v1", ["bytes.view_lit", "rollback"], "args_json"]],
+          0
+        ],
+        ["mcp.user._err_invalid_args_v1", ["bytes.lit", "unknown tool"]]
+      ]
+    }
+  ]
+}
