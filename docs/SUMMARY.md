@@ -7,6 +7,7 @@
 - [Routing](routing_local.md)
 - [Plan Execution](deploy_plan_exec.md)
 - [Query](query.md)
+- [Deploy Loop Compatibility](phaseB.md)
 - [Contracts](contracts.md)
 - [MCP gateway](mcp.md)
 - [CI gates](ci.md)
