@@ -1,0 +1,34 @@
+{
+  "schema_version": "lp.cli.report@0.1.0",
+  "command": "deploy pause",
+  "ok": true,
+  "exit_code": 0,
+  "diagnostics": [],
+  "meta": {
+    "tool": "x07lp",
+    "version": "__ANY__",
+    "run_id": "__ANY__"
+  },
+  "result": {
+    "schema_version": "lp.control.action.result@0.1.0",
+    "action_id": "__ANY__",
+    "kind": "deploy.pause.manual",
+    "scope": "deployment",
+    "ok": true,
+    "approval_state": "not_required",
+    "created_unix_ms": "__ANY__",
+    "target": {
+      "deployment_id": "__ANY__"
+    },
+    "decision": {
+      "decision_id": "__ANY__",
+      "signature_status": "__ANY__"
+    },
+    "state_after": {
+      "status": "__ANY__",
+      "control_state": "paused",
+      "kill_scope": "__ANY__",
+      "kill_latched": "__ANY__"
+    }
+  }
+}

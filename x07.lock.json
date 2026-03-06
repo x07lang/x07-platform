@@ -360,6 +360,27 @@
         "ext.yaml.tests": "3b25f2eb094d815c0669f35395d5ff9b1af9c6be5a7089cb50f66639784a0d1e"
       },
       "yanked": false
+    },
+    {
+      "name": "std-web-ui",
+      "version": "0.1.5",
+      "path": ".x07/deps/std-web-ui/0.1.5",
+      "package_manifest_sha256": "fee6b1121b2cd698f3d7275047ce07d051ba84212c2c1f3c8d30d167fad4ad77",
+      "module_root": "modules",
+      "modules_sha256": {
+        "std.web_ui.effects.http": "33930dd86b1452aacd796cbfab43611853b3b97a0247082aa370df35cfa42871",
+        "std.web_ui.effects.nav": "092676e77a6f1cba9f5250ae4b16903c1b94c7dea5fb9c993f7aabd9affeb085",
+        "std.web_ui.effects.storage": "af3a49b19d12d6e30cc3eeb98477164a677497db66148c1f350453a6d5c3f3b1",
+        "std.web_ui.effects.timer": "08d5c5b9eb9af6d19eb68d4f1c9a952c4771cffb0ac38eaf5e91ce863b6e6283",
+        "std.web_ui.patch": "194420e5ed2c322c34b597aab09f9938d9dd510dd79be22ccd8017d14da7607e",
+        "std.web_ui.runtime": "30d03026093195edb7437343288f8ebfebf5bdf5a4dd05f55f332ee16af62f07",
+        "std.web_ui.schema": "786569f4876db2db0414a0fb8e3852affe2db200dd55f6ad77b604d5cdc32ff8",
+        "std.web_ui.test": "23cc23f7e08e49413d10848f273bc48107dc315a2388155f6a37fce41e242cdd",
+        "std.web_ui.tests": "ed9b143d078b395a54a81531fef920bc8a948925cf99f9c0ad0dd27880a66033",
+        "std.web_ui.trace": "c376b1550395cee67327c918ef7039921dcd78682825afe2a2d16eb8c8f617ec",
+        "std.web_ui.vdom": "2be8650af27d75bac169a79c93350fbf94c2ec09447c943a4b8c572bc0dceaeb"
+      },
+      "yanked": false
     }
   ]
 }

@@ -1,0 +1,11 @@
+{
+  "schema_version": "x07.project@0.3.0",
+  "world": "solve-pure",
+  "entry": "src/main.x07.json",
+  "module_roots": [
+    "src",
+    "vendor/std-web-ui"
+  ],
+  "lockfile": "x07.lock.json",
+  "dependencies": []
+}

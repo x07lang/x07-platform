@@ -1,0 +1,164 @@
+{
+  "kind": "x07.web_ui.trace",
+  "meta": {
+    "name": "command_center",
+    "steps": 4
+  },
+  "steps": [
+    {
+      "env": {
+        "event": {
+          "type": "init"
+        },
+        "kind": "x07.web_ui.dispatch",
+        "state": null,
+        "v": 1
+      },
+      "frame": {
+        "effects": [],
+        "kind": "x07.web_ui.frame",
+        "patches": [],
+        "state": {},
+        "telemetry": {},
+        "ui": {
+          "kind": "x07.web_ui.tree",
+          "root": null,
+          "v": 1
+        },
+        "v": 1
+      }
+    },
+    {
+      "env": {
+        "event": {
+          "target": "poll",
+          "type": "timer"
+        },
+        "kind": "x07.web_ui.dispatch",
+        "state": {
+          "__x07_http": {
+            "response": {
+              "body": {
+                "bytes_len": 20,
+                "text": "[{\"app_id\":\"app_min\"}]"
+              },
+              "headers": [],
+              "request_id": "apps.list",
+              "schema_version": "x07.http.response.envelope@0.1.0",
+              "status": 200
+            }
+          },
+          "__x07_timer": {
+            "set": {
+              "delay_ms": 5000,
+              "id": "poll",
+              "ok": true
+            }
+          },
+          "apps_body": "Waiting for /api/apps",
+          "incident_body": "Open an incident to inspect details",
+          "last_status": 0,
+          "route": "/apps",
+          "status_label": "loading apps"
+        },
+        "v": 1
+      },
+      "frame": {
+        "effects": [],
+        "kind": "x07.web_ui.frame",
+        "patches": [],
+        "state": {},
+        "telemetry": {},
+        "ui": {
+          "kind": "x07.web_ui.tree",
+          "root": null,
+          "v": 1
+        },
+        "v": 1
+      }
+    },
+    {
+      "env": {
+        "event": {
+          "target": "btn_incident",
+          "type": "click"
+        },
+        "kind": "x07.web_ui.dispatch",
+        "state": {
+          "apps_body": "[{\"app_id\":\"app_min\"}]",
+          "incident_body": "Open an incident to inspect details",
+          "last_status": 200,
+          "route": "/apps",
+          "status_label": "apps ready"
+        },
+        "v": 1
+      },
+      "frame": {
+        "effects": [],
+        "kind": "x07.web_ui.frame",
+        "patches": [],
+        "state": {},
+        "telemetry": {},
+        "ui": {
+          "kind": "x07.web_ui.tree",
+          "root": null,
+          "v": 1
+        },
+        "v": 1
+      }
+    },
+    {
+      "env": {
+        "event": {
+          "target": "poll",
+          "type": "timer"
+        },
+        "kind": "x07.web_ui.dispatch",
+        "state": {
+          "__x07_http": {
+            "response": {
+              "body": {
+                "bytes_len": 25,
+                "text": "{\"incident_id\":\"inc-001\"}"
+              },
+              "headers": [],
+              "request_id": "incident.detail",
+              "schema_version": "x07.http.response.envelope@0.1.0",
+              "status": 200
+            }
+          },
+          "__x07_nav": {
+            "href": "/incidents/inc-001",
+            "op": "push"
+          },
+          "__x07_timer": {
+            "set": {
+              "delay_ms": 5000,
+              "id": "poll",
+              "ok": true
+            }
+          },
+          "apps_body": "[{\"app_id\":\"app_min\"}]",
+          "incident_body": "Open an incident to inspect details",
+          "last_status": 200,
+          "route": "/incidents/inc-001",
+          "status_label": "loading incident"
+        },
+        "v": 1
+      },
+      "frame": {
+        "effects": [],
+        "kind": "x07.web_ui.frame",
+        "patches": [],
+        "state": {},
+        "telemetry": {},
+        "ui": {
+          "kind": "x07.web_ui.tree",
+          "root": null,
+          "v": 1
+        },
+        "v": 1
+      }
+    }
+  ]
+}

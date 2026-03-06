@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CRATE_DIR="$ROOT_DIR/tools/x07lp-driver"
+BIN_PATH="$CRATE_DIR/target/debug/x07lp-driver"
+
+cargo build --manifest-path "$CRATE_DIR/Cargo.toml" >/dev/null
+
+exec "$BIN_PATH" "$@"

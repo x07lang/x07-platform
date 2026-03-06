@@ -589,6 +589,56 @@
         "begin",
         [
           "let",
+          "home",
+          [
+            "std.os.env.get",
+            [
+              "bytes.lit",
+              "HOME"
+            ]
+          ]
+        ],
+        [
+          "if",
+          [
+            ">",
+            [
+              "bytes.len",
+              "home"
+            ],
+            0
+          ],
+          [
+            "return",
+            [
+              "std.bytes.concat",
+              [
+                "bytes.view",
+                "home"
+              ],
+              [
+                "bytes.view_lit",
+                "/.x07/bin/x07-wasm"
+              ]
+            ]
+          ],
+          0
+        ],
+        [
+          "bytes.lit",
+          "x07-wasm"
+        ]
+      ],
+      "kind": "defn",
+      "name": "lp.impl.validators.x07_wasm_cli_v1._x07_wasm_bin_v1",
+      "params": [],
+      "result": "bytes"
+    },
+    {
+      "body": [
+        "begin",
+        [
+          "let",
           "req",
           [
             "std.os.process.req_v1.new",
@@ -605,8 +655,7 @@
             "std.os.process.req_v1.arg",
             "req",
             [
-              "bytes.lit",
-              "x07-wasm"
+              "lp.impl.validators.x07_wasm_cli_v1._x07_wasm_bin_v1"
             ]
           ]
         ],
@@ -1091,8 +1140,7 @@
             "std.os.process.req_v1.arg",
             "req",
             [
-              "bytes.lit",
-              "x07-wasm"
+              "lp.impl.validators.x07_wasm_cli_v1._x07_wasm_bin_v1"
             ]
           ]
         ],

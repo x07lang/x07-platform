@@ -1,0 +1,15 @@
+{
+  "schema_version": "x07.app.trace@0.1.0",
+  "request_id": "lpreq_fixture_01",
+  "trace_id": "lptrace_fixture_01",
+  "spans": [
+    {
+      "name": "http.request",
+      "dur_ms": 7,
+      "attrs": {
+        "route": "/api/health",
+        "status_code": 500
+      }
+    }
+  ]
+}

@@ -12,6 +12,7 @@ echo "ok: lockfile"
 
 ./scripts/ci/check_phaseA_golden.sh
 ./scripts/ci/phaseB.sh
+./scripts/ci/phaseC.sh
 
 (cd gateway/mcp && x07 arch check --manifest arch/manifest.x07arch.json >/dev/null)
 echo "ok: mcp arch"

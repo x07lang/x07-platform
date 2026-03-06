@@ -8,9 +8,9 @@ Run all local checks:
 
 This covers:
 
-- Schema index drift (`scripts/gen_schema_index.py --check`)
+- Schema index drift (`./scripts/gen_schema_index.sh --check`)
 - Lockfile drift (`x07 pkg lock --check`)
 - accept-path goldens using fixture packs under `spec/fixtures/`
-- local deploy execution + query coverage using the deploy gate under `scripts/ci/`
+- local deploy execution + query coverage using the deploy gates under `scripts/ci/` (`phaseB.sh`, `phaseC.sh`)
 - MCP architecture manifest lock + checks (`gateway/mcp/arch/manifest.x07arch.json`)
 - MCP smoke tests (`x07 test --manifest gateway/mcp/tests/tests.json`)

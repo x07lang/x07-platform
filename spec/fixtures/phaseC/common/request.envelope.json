@@ -1,0 +1,10 @@
+{
+  "schema_version": "x07.http.request.envelope@0.1.0",
+  "method": "GET",
+  "path": "/api/health",
+  "headers": {
+    "accept": "application/json",
+    "x-lp-route-key": "ci-phasec-route-01"
+  },
+  "body": null
+}

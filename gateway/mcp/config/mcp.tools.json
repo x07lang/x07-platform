@@ -7,13 +7,37 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["app_id", "env", "intent"],
+        "required": [
+          "app_id",
+          "env",
+          "intent"
+        ],
         "properties": {
-          "app_id": { "type": "string", "minLength": 1, "maxLength": 256 },
-          "env": { "type": "string", "minLength": 1, "maxLength": 64 },
-          "intent": { "type": "string", "minLength": 1, "maxLength": 64 },
-          "out": { "type": "string", "minLength": 1, "maxLength": 1024 },
-          "state_dir": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "app_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "env": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "intent": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "out": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
           "now_unix_ms": {
             "type": "string",
             "minLength": 1,
@@ -26,11 +50,29 @@
         "impl": "lp.mcp.deploy_run_v1.call_tool_v1",
         "limits_profile": "mcp_tool_standard_v1",
         "sandbox": {
-          "fs": { "read_roots": ["."], "write_roots": ["out"] },
-          "net": { "allow_dns": false, "allow_hosts": [] },
-          "env": { "allow_keys": ["X07LP_STATE_DIR"] }
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR"
+            ]
+          }
         },
-        "auth": { "required_scopes": ["lp.change.write"] }
+        "auth": {
+          "required_scopes": [
+            "lp.change.write"
+          ]
+        }
       }
     },
     {
@@ -39,10 +81,20 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["in"],
+        "required": [
+          "in"
+        ],
         "properties": {
-          "in": { "type": "string", "minLength": 1, "maxLength": 1024 },
-          "state_dir": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "in": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
           "now_unix_ms": {
             "type": "string",
             "minLength": 1,
@@ -55,11 +107,25 @@
         "impl": "lp.mcp.deploy_query_v1.call_tool_v1",
         "limits_profile": "mcp_tool_standard_v1",
         "sandbox": {
-          "fs": { "read_roots": ["."], "write_roots": [] },
-          "net": { "allow_dns": false, "allow_hosts": [] },
-          "env": { "allow_keys": [] }
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": []
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": []
+          }
         },
-        "auth": { "required_scopes": ["lp.change.read"] }
+        "auth": {
+          "required_scopes": [
+            "lp.change.read"
+          ]
+        }
       }
     },
     {
@@ -68,13 +134,36 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["pack_dir", "pack_manifest"],
+        "required": [
+          "pack_dir",
+          "pack_manifest"
+        ],
         "properties": {
-          "pack_dir": { "type": "string", "minLength": 1, "maxLength": 1024 },
-          "pack_manifest": { "type": "string", "minLength": 1, "maxLength": 1024 },
-          "change": { "type": "string", "minLength": 1, "maxLength": 1024 },
-          "ops_profile": { "type": "string", "minLength": 1, "maxLength": 1024 },
-          "state_dir": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "pack_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "pack_manifest": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "change": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "ops_profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
           "now_unix_ms": {
             "type": "string",
             "minLength": 1,
@@ -87,11 +176,33 @@
         "impl": "mcp.user.call_tool_v1",
         "limits_profile": "mcp_tool_expensive_v1",
         "sandbox": {
-          "fs": { "read_roots": ["."], "write_roots": [".x07lp", "_tmp", "out"] },
-          "net": { "allow_dns": false, "allow_hosts": [] },
-          "env": { "allow_keys": ["X07LP_STATE_DIR", "PATH", "HOME"] }
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR",
+              "PATH",
+              "HOME"
+            ]
+          }
         },
-        "auth": { "required_scopes": ["lp.deploy.write"] }
+        "auth": {
+          "required_scopes": [
+            "lp.deploy.write"
+          ]
+        }
       }
     },
     {
@@ -100,13 +211,36 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["deployment_id"],
+        "required": [
+          "deployment_id"
+        ],
         "properties": {
-          "deployment_id": { "type": "string", "minLength": 1, "maxLength": 256 },
-          "plan": { "type": "string", "minLength": 1, "maxLength": 1024 },
-          "metrics_dir": { "type": "string", "minLength": 1, "maxLength": 1024 },
-          "pause_scale": { "type": ["string", "number"] },
-          "state_dir": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "deployment_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "plan": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "metrics_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "pause_scale": {
+            "type": [
+              "string",
+              "number"
+            ]
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
           "now_unix_ms": {
             "type": "string",
             "minLength": 1,
@@ -119,11 +253,33 @@
         "impl": "mcp.user.call_tool_v1",
         "limits_profile": "mcp_tool_expensive_v1",
         "sandbox": {
-          "fs": { "read_roots": ["."], "write_roots": [".x07lp", "_tmp", "out"] },
-          "net": { "allow_dns": false, "allow_hosts": [] },
-          "env": { "allow_keys": ["X07LP_STATE_DIR", "PATH", "HOME"] }
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR",
+              "PATH",
+              "HOME"
+            ]
+          }
         },
-        "auth": { "required_scopes": ["lp.deploy.write"] }
+        "auth": {
+          "required_scopes": [
+            "lp.deploy.write"
+          ]
+        }
       }
     },
     {
@@ -132,21 +288,47 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["deployment_id"],
+        "required": [
+          "deployment_id"
+        ],
         "properties": {
-          "deployment_id": { "type": "string", "minLength": 1, "maxLength": 256 },
-          "state_dir": { "type": "string", "minLength": 1, "maxLength": 1024 }
+          "deployment_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          }
         }
       },
       "x07": {
         "impl": "mcp.user.call_tool_v1",
         "limits_profile": "mcp_tool_standard_v1",
         "sandbox": {
-          "fs": { "read_roots": ["."], "write_roots": [] },
-          "net": { "allow_dns": false, "allow_hosts": [] },
-          "env": { "allow_keys": ["X07LP_STATE_DIR"] }
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": []
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR"
+            ]
+          }
         },
-        "auth": { "required_scopes": ["lp.deploy.read"] }
+        "auth": {
+          "required_scopes": [
+            "lp.deploy.read"
+          ]
+        }
       }
     },
     {
@@ -156,25 +338,74 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "deployment_id": { "type": "string", "minLength": 1, "maxLength": 256 },
-          "app_id": { "type": "string", "minLength": 1, "maxLength": 256 },
-          "env": { "type": "string", "minLength": 1, "maxLength": 64 },
-          "view": { "type": "string", "minLength": 1, "maxLength": 64 },
-          "limit": { "type": ["string", "number"] },
-          "state_dir": { "type": "string", "minLength": 1, "maxLength": 1024 },
-          "latest": { "type": "boolean" },
-          "rebuild_index": { "type": "boolean" }
+          "deployment_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "app_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "env": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "view": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "limit": {
+            "type": [
+              "string",
+              "number"
+            ]
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "latest": {
+            "type": "boolean"
+          },
+          "rebuild_index": {
+            "type": "boolean"
+          }
         }
       },
       "x07": {
         "impl": "mcp.user.call_tool_v1",
         "limits_profile": "mcp_tool_standard_v1",
         "sandbox": {
-          "fs": { "read_roots": ["."], "write_roots": [".x07lp", "_tmp", "out"] },
-          "net": { "allow_dns": false, "allow_hosts": [] },
-          "env": { "allow_keys": ["X07LP_STATE_DIR"] }
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR"
+            ]
+          }
         },
-        "auth": { "required_scopes": ["lp.deploy.read"] }
+        "auth": {
+          "required_scopes": [
+            "lp.deploy.read"
+          ]
+        }
       }
     },
     {
@@ -183,11 +414,26 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["deployment_id", "reason"],
+        "required": [
+          "deployment_id",
+          "reason"
+        ],
         "properties": {
-          "deployment_id": { "type": "string", "minLength": 1, "maxLength": 256 },
-          "reason": { "type": "string", "minLength": 1, "maxLength": 4096 },
-          "state_dir": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "deployment_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
           "now_unix_ms": {
             "type": "string",
             "minLength": 1,
@@ -200,11 +446,31 @@
         "impl": "mcp.user.call_tool_v1",
         "limits_profile": "mcp_tool_standard_v1",
         "sandbox": {
-          "fs": { "read_roots": ["."], "write_roots": [".x07lp", "_tmp", "out"] },
-          "net": { "allow_dns": false, "allow_hosts": [] },
-          "env": { "allow_keys": ["X07LP_STATE_DIR"] }
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR"
+            ]
+          }
         },
-        "auth": { "required_scopes": ["lp.deploy.write"] }
+        "auth": {
+          "required_scopes": [
+            "lp.deploy.write"
+          ]
+        }
       }
     },
     {
@@ -213,11 +479,26 @@
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["deployment_id", "reason"],
+        "required": [
+          "deployment_id",
+          "reason"
+        ],
         "properties": {
-          "deployment_id": { "type": "string", "minLength": 1, "maxLength": 256 },
-          "reason": { "type": "string", "minLength": 1, "maxLength": 4096 },
-          "state_dir": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "deployment_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
           "now_unix_ms": {
             "type": "string",
             "minLength": 1,
@@ -230,11 +511,790 @@
         "impl": "mcp.user.call_tool_v1",
         "limits_profile": "mcp_tool_standard_v1",
         "sandbox": {
-          "fs": { "read_roots": ["."], "write_roots": [".x07lp", "_tmp", "out"] },
-          "net": { "allow_dns": false, "allow_hosts": [] },
-          "env": { "allow_keys": ["X07LP_STATE_DIR"] }
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR"
+            ]
+          }
         },
-        "auth": { "required_scopes": ["lp.deploy.write"] }
+        "auth": {
+          "required_scopes": [
+            "lp.deploy.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.incident.list",
+      "description": "List incidents from the local platform state, optionally filtered by deployment or app/environment.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "deployment_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "app_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "env": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "classification": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "status": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "limit": {
+            "type": [
+              "string",
+              "number"
+            ]
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "rebuild_index": {
+            "type": "boolean"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.incident.read"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.incident.get",
+      "description": "Get one incident bundle detail by incident_id.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "incident_id"
+        ],
+        "properties": {
+          "incident_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "rebuild_index": {
+            "type": "boolean"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.incident.read"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.incident.capture",
+      "description": "Capture a platform incident and persist lp.incident.bundle artifacts from explicit request/response/trace evidence or control/runtime context.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "deployment_id",
+          "reason"
+        ],
+        "properties": {
+          "deployment_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "request": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "response": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "trace": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "classification": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "source": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.incident.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.regress.from_incident",
+      "description": "Generate regression fixtures from a captured incident using the Phase C regression adapter.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "incident_id"
+        ],
+        "properties": {
+          "incident_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "out_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "dry_run": {
+            "type": "boolean"
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_expensive_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR",
+              "PATH",
+              "HOME"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.regression.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.app.list",
+      "description": "List apps/environments with their latest deployment, incident, and kill-switch summary.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "app_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "env": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "limit": {
+            "type": [
+              "string",
+              "number"
+            ]
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "rebuild_index": {
+            "type": "boolean"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.app.read"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.deploy.pause",
+      "description": "Pause a deployment at the next deterministic boundary and emit a signed manual control decision.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "deployment_id",
+          "reason"
+        ],
+        "properties": {
+          "deployment_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.deploy.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.deploy.rerun",
+      "description": "Create a new deployment execution as a rerun of a prior deployment, optionally from a specific step index.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "deployment_id",
+          "reason"
+        ],
+        "properties": {
+          "deployment_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "from_step": {
+            "type": [
+              "string",
+              "number"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.deploy.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.app.kill",
+      "description": "Latch the app-level kill switch and stop serving all active executions for one app/environment.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "app_id",
+          "env",
+          "reason"
+        ],
+        "properties": {
+          "app_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "env": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.app.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.app.unkill",
+      "description": "Clear the app-level kill latch for one app/environment and emit a signed control decision.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "app_id",
+          "env",
+          "reason"
+        ],
+        "properties": {
+          "app_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "env": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.app.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.platform.kill",
+      "description": "Latch the global platform kill switch and stop serving all active executions.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.platform.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.platform.unkill",
+      "description": "Clear the global platform kill latch and emit a signed control decision.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.platform.write"
+          ]
+        }
       }
     }
   ]

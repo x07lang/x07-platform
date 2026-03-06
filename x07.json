@@ -120,6 +120,11 @@
       "name": "ext-yaml-rs",
       "path": ".x07/deps/ext-yaml-rs/0.1.4",
       "version": "0.1.4"
+    },
+    {
+      "name": "std-web-ui",
+      "path": ".x07/deps/std-web-ui/0.1.5",
+      "version": "0.1.5"
     }
   ],
   "entry": "cli/src/main.x07.json",

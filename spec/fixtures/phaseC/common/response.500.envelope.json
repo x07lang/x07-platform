@@ -1,0 +1,11 @@
+{
+  "schema_version": "x07.http.response.envelope@0.1.0",
+  "status": 500,
+  "headers": {
+    "content-type": "application/json"
+  },
+  "body": {
+    "code": "E_FIXTURE",
+    "message": "fixture error"
+  }
+}
