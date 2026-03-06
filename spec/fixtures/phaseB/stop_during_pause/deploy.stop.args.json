@@ -1,0 +1,7 @@
+{
+  "deployment_id": "__ANY__",
+  "json": true,
+  "now_unix_ms": "1762147205000",
+  "reason": "manual_stop_during_pause",
+  "state_dir": "__ANY__"
+}

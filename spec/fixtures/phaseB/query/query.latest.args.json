@@ -1,0 +1,8 @@
+{
+  "app_id": "app_min",
+  "env": "staging",
+  "json": true,
+  "latest": true,
+  "state_dir": "__ANY__",
+  "view": "full"
+}

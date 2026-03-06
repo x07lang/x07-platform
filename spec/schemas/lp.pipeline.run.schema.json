@@ -58,9 +58,9 @@
     "state": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["phase", "status", "current_step"],
+      "required": ["stage", "status", "current_step"],
       "properties": {
-        "phase": { "$ref": "#/$defs/run_phase" },
+        "stage": { "$ref": "#/$defs/run_stage" },
         "status": { "$ref": "#/$defs/run_status" },
         "current_step": {
           "type": ["string", "null"],
@@ -127,7 +127,7 @@
       "description": "Well-known step kinds. Platform may add new kinds in later versions."
     },
     "step_status": { "type": "string", "enum": ["ok", "error", "skipped", "running"] },
-    "run_phase": { "type": "string", "enum": ["intake", "deploy", "observe", "incident", "regression"] },
+    "run_stage": { "type": "string", "enum": ["intake", "deploy", "observe", "incident", "regression"] },
     "run_status": {
       "type": "string",
       "enum": ["running", "succeeded", "failed", "stopped", "rolled_back"]

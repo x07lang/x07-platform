@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://x07.io/spec/lp.deploy.execution.schema.json",
   "title": "lp.deploy.execution@0.1.0",
-  "description": "Run record for executing an x07.deploy.plan. In Phase A it may be emitted as a stub/no-op, but the schema is forward-compatible for Phase B+.",
+  "description": "Run record for executing an x07.deploy.plan and recording its execution state.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "exec_id", "run_id", "created_unix_ms", "status"],
@@ -65,7 +65,7 @@
       "additionalProperties": false,
       "required": ["kind", "digest"],
       "properties": {
-        "kind": { "const": "x07.deploy.plan@0.1.0" },
+        "kind": { "const": "x07.deploy.plan@0.2.0" },
         "digest": { "$ref": "#/$defs/digest_ref" }
       }
     },
@@ -76,10 +76,26 @@
       "properties": {
         "idx": { "type": "integer", "minimum": 0 },
         "name": { "type": "string", "maxLength": 128 },
+        "kind": { "type": "string", "maxLength": 128 },
         "status": { "type": "string", "enum": ["ok", "error", "skipped", "running"] },
         "started_unix_ms": { "$ref": "#/$defs/unix_ms" },
         "ended_unix_ms": {
           "oneOf": [{ "$ref": "#/$defs/unix_ms" }, { "type": "null" }],
+          "default": null
+        },
+        "attempt": { "type": "integer", "minimum": 1, "default": 1 },
+        "latest_weight_pct": {
+          "oneOf": [
+            { "type": "integer", "minimum": 0, "maximum": 100 },
+            { "type": "null" }
+          ],
+          "default": null
+        },
+        "analysis_decision": {
+          "oneOf": [
+            { "type": "string", "enum": ["promote", "rollback", "inconclusive"] },
+            { "type": "null" }
+          ],
           "default": null
         },
         "decisions": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/id" }, "default": [] },

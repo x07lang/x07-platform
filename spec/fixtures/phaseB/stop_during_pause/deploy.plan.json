@@ -1,0 +1,69 @@
+{
+  "id": "plan_phaseb_canary_v1",
+  "ops_profile": {
+    "bytes_len": 612,
+    "path": "ops_release.json",
+    "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "outputs": [
+    {
+      "bytes_len": 128,
+      "path": "rollout.local.json",
+      "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+    }
+  ],
+  "pack_manifest": {
+    "bytes_len": 2911,
+    "path": "app.pack.json",
+    "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "policy_cards": [],
+  "schema_version": "x07.deploy.plan@0.2.0",
+  "slo_profile": {
+    "bytes_len": 321,
+    "path": "slo_min.json",
+    "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "strategy": {
+    "blue_green": null,
+    "canary": {
+      "steps": [
+        {
+          "set_weight": 5
+        },
+        {
+          "pause_s": 10
+        },
+        {
+          "analysis": {
+            "kind": "slo.eval",
+            "require_decision": "promote"
+          }
+        },
+        {
+          "set_weight": 50
+        },
+        {
+          "pause_s": 30
+        },
+        {
+          "analysis": {
+            "kind": "slo.eval",
+            "require_decision": "promote"
+          }
+        },
+        {
+          "set_weight": 100
+        },
+        {
+          "analysis": {
+            "kind": "slo.eval",
+            "require_decision": "promote"
+          }
+        }
+      ]
+    },
+    "type": "canary"
+  },
+  "v": 1
+}

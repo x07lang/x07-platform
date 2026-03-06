@@ -1,0 +1,385 @@
+{
+  "schema_version": "lp.cli.report@0.1.0",
+  "command": "deploy query",
+  "ok": true,
+  "exit_code": 0,
+  "diagnostics": [],
+  "meta": {
+    "tool": "x07lp",
+    "version": "__ANY__",
+    "run_id": "__ANY__"
+  },
+  "result": {
+    "schema_version": "lp.deploy.query.result@0.1.0",
+    "view": "full",
+    "deployment_id": "__ANY__",
+    "run_id": "__ANY__",
+    "target": {
+      "app_id": "app_min",
+      "environment": "staging"
+    },
+    "resolution": {
+      "by": "latest",
+      "requested_target": {
+        "app_id": "app_min",
+        "environment": "staging"
+      }
+    },
+    "index": {
+      "used": true,
+      "rebuilt": "__ANY__",
+      "db_path": "__ANY__"
+    },
+    "status": "completed",
+    "outcome": "promoted",
+    "created_unix_ms": "__ANY__",
+    "updated_unix_ms": "__ANY__",
+    "current_weight_pct": 100,
+    "public_listener": "__ANY__",
+    "latest_decision_id": "__ANY__",
+    "plan_digest": {
+      "sha256": "__ANY__",
+      "bytes_len": "__ANY__"
+    },
+    "stable_revision": {
+      "sha256": "__ANY__",
+      "bytes_len": "__ANY__"
+    },
+    "candidate_revision": {
+      "sha256": "__ANY__",
+      "bytes_len": "__ANY__"
+    },
+    "steps": [
+      {
+        "idx": 0,
+        "name": "prepare",
+        "kind": "deploy.prepare",
+        "status": "ok",
+        "started_unix_ms": "__ANY__",
+        "ended_unix_ms": "__ANY__",
+        "decisions": [
+          "__ANY__"
+        ]
+      },
+      {
+        "idx": 1,
+        "name": "start_candidate",
+        "kind": "deploy.runtime.start_candidate",
+        "status": "ok",
+        "started_unix_ms": "__ANY__",
+        "ended_unix_ms": "__ANY__",
+        "decisions": [
+          "__ANY__"
+        ]
+      },
+      {
+        "idx": 2,
+        "name": "set_weight_5",
+        "kind": "deploy.route.set_weight",
+        "status": "ok",
+        "started_unix_ms": "__ANY__",
+        "ended_unix_ms": "__ANY__",
+        "latest_weight_pct": 5,
+        "decisions": [
+          "__ANY__"
+        ]
+      },
+      {
+        "idx": 3,
+        "name": "pause_10",
+        "kind": "deploy.pause",
+        "status": "ok",
+        "started_unix_ms": "__ANY__",
+        "ended_unix_ms": "__ANY__",
+        "decisions": [
+          "__ANY__"
+        ]
+      },
+      {
+        "idx": 4,
+        "name": "analysis_1",
+        "kind": "deploy.analysis.slo",
+        "status": "ok",
+        "started_unix_ms": "__ANY__",
+        "ended_unix_ms": "__ANY__",
+        "analysis_decision": "promote",
+        "decisions": [
+          "__ANY__"
+        ]
+      }
+    ],
+    "decisions": [
+      {
+        "decision_id": "__ANY__",
+        "created_unix_ms": "__ANY__",
+        "step_idx": 0,
+        "kind": "deploy.prepare.plan",
+        "outcome": "allow",
+        "reasons": [
+          {
+            "code": "LP_PLAN_READY",
+            "message": "__ANY__"
+          }
+        ],
+        "evidence": [
+          {
+            "role": "deploy_plan",
+            "ord": 0,
+            "kind": "x07.deploy.plan@0.2.0",
+            "digest": {
+              "sha256": "__ANY__",
+              "bytes_len": "__ANY__"
+            },
+            "media_type": "application/json",
+            "logical_name": "deploy.plan",
+            "store_uri": "__ANY__"
+          }
+        ],
+        "record": {
+          "kind": "lp.decision.record@0.1.0",
+          "digest": {
+            "sha256": "__ANY__",
+            "bytes_len": "__ANY__"
+          },
+          "store_uri": "__ANY__",
+          "media_type": "application/json"
+        }
+      },
+      {
+        "decision_id": "__ANY__",
+        "created_unix_ms": "__ANY__",
+        "step_idx": 1,
+        "kind": "deploy.runtime.start_candidate",
+        "outcome": "allow",
+        "reasons": [
+          {
+            "code": "LP_RUNTIME_HEALTHCHECK_OK",
+            "message": "__ANY__"
+          }
+        ],
+        "evidence": [
+          {
+            "role": "runtime_probe",
+            "ord": 0,
+            "kind": "__ANY__",
+            "digest": {
+              "sha256": "__ANY__",
+              "bytes_len": "__ANY__"
+            },
+            "media_type": "__ANY__",
+            "logical_name": "__ANY__",
+            "store_uri": "__ANY__"
+          }
+        ],
+        "record": {
+          "kind": "lp.decision.record@0.1.0",
+          "digest": {
+            "sha256": "__ANY__",
+            "bytes_len": "__ANY__"
+          },
+          "store_uri": "__ANY__",
+          "media_type": "application/json"
+        }
+      },
+      {
+        "decision_id": "__ANY__",
+        "created_unix_ms": "__ANY__",
+        "step_idx": 4,
+        "kind": "deploy.analysis.slo",
+        "outcome": "allow",
+        "reasons": [
+          {
+            "code": "LP_SLO_PROMOTE",
+            "message": "__ANY__"
+          }
+        ],
+        "evidence": [
+          {
+            "role": "metrics_snapshot",
+            "ord": 0,
+            "kind": "x07.metrics.snapshot@0.1.0",
+            "digest": {
+              "sha256": "__ANY__",
+              "bytes_len": "__ANY__"
+            },
+            "media_type": "application/json",
+            "logical_name": "analysis.1.json",
+            "store_uri": "__ANY__"
+          },
+          {
+            "role": "slo_eval_report",
+            "ord": 0,
+            "kind": "__ANY__",
+            "digest": {
+              "sha256": "__ANY__",
+              "bytes_len": "__ANY__"
+            },
+            "media_type": "__ANY__",
+            "logical_name": "__ANY__",
+            "store_uri": "__ANY__"
+          }
+        ],
+        "record": {
+          "kind": "lp.decision.record@0.1.0",
+          "digest": {
+            "sha256": "__ANY__",
+            "bytes_len": "__ANY__"
+          },
+          "store_uri": "__ANY__",
+          "media_type": "application/json"
+        }
+      }
+    ],
+    "artifacts": [
+      {
+        "role": "decision_record",
+        "ord": 0,
+        "kind": "lp.decision.record@0.1.0",
+        "digest": {
+          "sha256": "__ANY__",
+          "bytes_len": "__ANY__"
+        },
+        "media_type": "application/json",
+        "logical_name": "decision.record",
+        "store_uri": "__ANY__"
+      },
+      {
+        "role": "deploy_execution",
+        "ord": 0,
+        "kind": "lp.deploy.execution@0.1.0",
+        "digest": {
+          "sha256": "__ANY__",
+          "bytes_len": "__ANY__"
+        },
+        "media_type": "application/json",
+        "logical_name": "deploy.execution",
+        "store_uri": "__ANY__"
+      },
+      {
+        "role": "deploy_plan",
+        "ord": 0,
+        "kind": "x07.deploy.plan@0.2.0",
+        "digest": {
+          "sha256": "__ANY__",
+          "bytes_len": "__ANY__"
+        },
+        "media_type": "application/json",
+        "logical_name": "deploy.plan",
+        "store_uri": "__ANY__"
+      },
+      {
+        "role": "metrics_snapshot",
+        "ord": 0,
+        "kind": "x07.metrics.snapshot@0.1.0",
+        "digest": {
+          "sha256": "__ANY__",
+          "bytes_len": "__ANY__"
+        },
+        "media_type": "application/json",
+        "logical_name": "analysis.1.json",
+        "store_uri": "__ANY__"
+      },
+      {
+        "role": "slo_eval_report",
+        "ord": 0,
+        "kind": "__ANY__",
+        "digest": {
+          "sha256": "__ANY__",
+          "bytes_len": "__ANY__"
+        },
+        "media_type": "__ANY__",
+        "logical_name": "__ANY__",
+        "store_uri": "__ANY__"
+      }
+    ],
+    "execution": {
+      "schema_version": "lp.deploy.execution@0.1.0",
+      "exec_id": "__ANY__",
+      "run_id": "__ANY__",
+      "created_unix_ms": "__ANY__",
+      "status": "completed",
+      "plan": {
+        "kind": "x07.deploy.plan@0.2.0",
+        "digest": {
+          "sha256": "__ANY__",
+          "bytes_len": "__ANY__"
+        }
+      },
+      "meta": {
+        "schema_version": "lp.deploy.execution.meta.local@0.1.0",
+        "mode": "local",
+        "artifact_kind": "x07.app.pack@0.1.0",
+        "target": {
+          "app_id": "app_min",
+          "environment": "staging"
+        },
+        "outcome": "promoted",
+        "started_unix_ms": "__ANY__",
+        "updated_unix_ms": "__ANY__",
+        "ended_unix_ms": "__ANY__",
+        "latest_decision_id": "__ANY__",
+        "plan": {
+          "kind": "x07.deploy.plan@0.2.0",
+          "digest": {
+            "sha256": "__ANY__",
+            "bytes_len": "__ANY__"
+          }
+        },
+        "runtime": {
+          "stable": {
+            "revision_digest": {
+              "sha256": "__ANY__",
+              "bytes_len": "__ANY__"
+            },
+            "bind_addr": "__ANY__",
+            "status": "stopped",
+            "started_unix_ms": "__ANY__",
+            "ended_unix_ms": "__ANY__",
+            "health": {
+              "ok": true,
+              "last_probe_unix_ms": "__ANY__",
+              "last_report": "__ANY__"
+            },
+            "workdir": "__ANY__"
+          },
+          "candidate": {
+            "revision_digest": {
+              "sha256": "__ANY__",
+              "bytes_len": "__ANY__"
+            },
+            "bind_addr": "__ANY__",
+            "status": "healthy",
+            "started_unix_ms": "__ANY__",
+            "ended_unix_ms": null,
+            "health": {
+              "ok": true,
+              "last_probe_unix_ms": "__ANY__",
+              "last_report": "__ANY__"
+            },
+            "workdir": "__ANY__"
+          }
+        },
+        "routing": {
+          "public_listener": "__ANY__",
+          "listener_addr": "__ANY__",
+          "candidate_weight_pct": 100,
+          "algorithm": "hash_bucket_v1",
+          "route_key_header": "X-LP-Route-Key",
+          "last_updated_step_idx": "__ANY__",
+          "router_state": "__ANY__"
+        },
+        "analysis": {
+          "last_slo_decision": "promote",
+          "last_snapshot": "__ANY__",
+          "last_slo_report": "__ANY__",
+          "last_analysis_step_idx": "__ANY__"
+        },
+        "retry_budget": {
+          "max_attempts_per_step": 3,
+          "consumed": {}
+        },
+        "ext": {}
+      }
+    }
+  }
+}

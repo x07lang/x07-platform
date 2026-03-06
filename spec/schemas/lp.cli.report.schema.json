@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://x07.io/spec/lp.cli.report.schema.json",
   "title": "lp.cli.report@0.1.0",
-  "description": "Stable report envelope for x07-platform CLI commands and MCP tools (Phase A).",
+  "description": "Stable report envelope for x07-platform CLI commands and MCP tools.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "command", "ok", "exit_code", "diagnostics", "result"],

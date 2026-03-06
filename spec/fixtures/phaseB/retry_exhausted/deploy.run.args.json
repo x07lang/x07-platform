@@ -1,0 +1,9 @@
+{
+  "deployment_id": "__ANY__",
+  "json": true,
+  "metrics_dir": "spec/fixtures/phaseB/retry_exhausted",
+  "now_unix_ms": "1762147200000",
+  "pause_scale": 0,
+  "plan": "spec/fixtures/phaseB/retry_exhausted/deploy.plan.json",
+  "state_dir": "__ANY__"
+}

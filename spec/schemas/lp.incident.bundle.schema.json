@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://x07.io/spec/lp.incident.bundle.schema.json",
   "title": "lp.incident.bundle@0.1.0",
-  "description": "Portable bundle of incident evidence captured by the platform. In Phase A this may be minimally populated; later phases harden capture fields.",
+  "description": "Portable bundle of incident evidence captured by the platform.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "incident_id", "created_unix_ms", "app_id", "environment", "window", "refs"],

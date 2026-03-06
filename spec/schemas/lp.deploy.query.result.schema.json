@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://x07.io/spec/lp.deploy.query.result.schema.json",
+  "title": "lp.deploy.query.result@0.1.0",
+  "description": "Stable query result envelope for deployment history views.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema_version", "view", "deployment_id", "run_id", "target", "resolution", "index"],
+  "properties": {
+    "schema_version": { "const": "lp.deploy.query.result@0.1.0" },
+    "view": {
+      "type": "string",
+      "enum": ["summary", "timeline", "decisions", "artifacts", "full"]
+    },
+    "deployment_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "run_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["app_id", "environment"],
+      "properties": {
+        "app_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "environment": { "type": "string", "minLength": 1, "maxLength": 128 }
+      }
+    },
+    "resolution": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["by"],
+      "properties": {
+        "by": { "type": "string", "enum": ["deployment_id", "latest"] }
+      }
+    },
+    "index": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["used", "rebuilt", "db_path"],
+      "properties": {
+        "used": { "type": "boolean" },
+        "rebuilt": {},
+        "db_path": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      }
+    }
+  }
+}

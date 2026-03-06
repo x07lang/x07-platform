@@ -13,8 +13,16 @@
       "path": "lp.decision.record.schema.json"
     },
     {
+      "id": "https://x07.io/spec/lp.deploy.execution.meta.local.schema.json",
+      "path": "lp.deploy.execution.meta.local.schema.json"
+    },
+    {
       "id": "https://x07.io/spec/lp.deploy.execution.schema.json",
       "path": "lp.deploy.execution.schema.json"
+    },
+    {
+      "id": "https://x07.io/spec/lp.deploy.query.result.schema.json",
+      "path": "lp.deploy.query.result.schema.json"
     },
     {
       "id": "https://x07.io/spec/lp.incident.bundle.schema.json",

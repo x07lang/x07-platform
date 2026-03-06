@@ -64,7 +64,7 @@
     },
     {
       "name": "lp.deploy.accept",
-      "description": "Accept a pack and emit run + decision + deploy execution artifacts (Phase A local mode).",
+      "description": "Accept a pack and emit run, decision, and deployment execution artifacts.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -87,7 +87,39 @@
         "impl": "mcp.user.call_tool_v1",
         "limits_profile": "mcp_tool_expensive_v1",
         "sandbox": {
-          "fs": { "read_roots": ["."], "write_roots": ["out"] },
+          "fs": { "read_roots": ["."], "write_roots": [".x07lp", "_tmp", "out"] },
+          "net": { "allow_dns": false, "allow_hosts": [] },
+          "env": { "allow_keys": ["X07LP_STATE_DIR", "PATH", "HOME"] }
+        },
+        "auth": { "required_scopes": ["lp.deploy.write"] }
+      }
+    },
+    {
+      "name": "lp.deploy.run",
+      "description": "Execute a local deployment plan and persist routing and decision state.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["deployment_id"],
+        "properties": {
+          "deployment_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "plan": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "metrics_dir": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "pause_scale": { "type": ["string", "number"] },
+          "state_dir": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_expensive_v1",
+        "sandbox": {
+          "fs": { "read_roots": ["."], "write_roots": [".x07lp", "_tmp", "out"] },
           "net": { "allow_dns": false, "allow_hosts": [] },
           "env": { "allow_keys": ["X07LP_STATE_DIR", "PATH", "HOME"] }
         },
@@ -96,7 +128,7 @@
     },
     {
       "name": "lp.deploy.status",
-      "description": "Get the status of a deployment execution (Phase A local state).",
+      "description": "Get the current status of a deployment execution.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -118,8 +150,36 @@
       }
     },
     {
+      "name": "lp.deploy.query",
+      "description": "Query deployment history by deployment id or latest app/environment target.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "deployment_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "app_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "env": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "view": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "limit": { "type": ["string", "number"] },
+          "state_dir": { "type": "string", "minLength": 1, "maxLength": 1024 },
+          "latest": { "type": "boolean" },
+          "rebuild_index": { "type": "boolean" }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": { "read_roots": ["."], "write_roots": [".x07lp", "_tmp", "out"] },
+          "net": { "allow_dns": false, "allow_hosts": [] },
+          "env": { "allow_keys": ["X07LP_STATE_DIR"] }
+        },
+        "auth": { "required_scopes": ["lp.deploy.read"] }
+      }
+    },
+    {
       "name": "lp.deploy.stop",
-      "description": "Stop a deployment deterministically (Phase A: state transition + decision record).",
+      "description": "Stop a deployment deterministically and record the final decision.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -140,7 +200,7 @@
         "impl": "mcp.user.call_tool_v1",
         "limits_profile": "mcp_tool_standard_v1",
         "sandbox": {
-          "fs": { "read_roots": ["."], "write_roots": ["out"] },
+          "fs": { "read_roots": ["."], "write_roots": [".x07lp", "_tmp", "out"] },
           "net": { "allow_dns": false, "allow_hosts": [] },
           "env": { "allow_keys": ["X07LP_STATE_DIR"] }
         },
@@ -149,7 +209,7 @@
     },
     {
       "name": "lp.deploy.rollback",
-      "description": "Rollback a deployment deterministically (Phase A: state transition + decision record).",
+      "description": "Rollback a deployment deterministically and record the final decision.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -170,7 +230,7 @@
         "impl": "mcp.user.call_tool_v1",
         "limits_profile": "mcp_tool_standard_v1",
         "sandbox": {
-          "fs": { "read_roots": ["."], "write_roots": ["out"] },
+          "fs": { "read_roots": ["."], "write_roots": [".x07lp", "_tmp", "out"] },
           "net": { "allow_dns": false, "allow_hosts": [] },
           "env": { "allow_keys": ["X07LP_STATE_DIR"] }
         },

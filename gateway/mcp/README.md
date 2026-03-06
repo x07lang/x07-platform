@@ -1,4 +1,4 @@
-# MCP Server (stdio) — x07 Platform (Phase A)
+# MCP Server (stdio) — x07 Platform
 
 This is an MCP **stdio** server with a router/worker split:
 

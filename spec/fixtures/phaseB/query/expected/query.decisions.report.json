@@ -1,0 +1,153 @@
+{
+  "schema_version": "lp.cli.report@0.1.0",
+  "command": "deploy query",
+  "ok": true,
+  "exit_code": 0,
+  "diagnostics": [],
+  "meta": {
+    "tool": "x07lp",
+    "version": "__ANY__",
+    "run_id": "__ANY__"
+  },
+  "result": {
+    "schema_version": "lp.deploy.query.result@0.1.0",
+    "view": "decisions",
+    "deployment_id": "__ANY__",
+    "run_id": "__ANY__",
+    "target": {
+      "app_id": "app_min",
+      "environment": "staging"
+    },
+    "resolution": {
+      "by": "deployment_id",
+      "requested_deployment_id": "__ANY__"
+    },
+    "index": {
+      "used": true,
+      "rebuilt": "__ANY__",
+      "db_path": "__ANY__"
+    },
+    "decisions": [
+      {
+        "decision_id": "__ANY__",
+        "created_unix_ms": "__ANY__",
+        "step_idx": 0,
+        "kind": "deploy.prepare.plan",
+        "outcome": "allow",
+        "reasons": [
+          {
+            "code": "LP_PLAN_READY",
+            "message": "__ANY__"
+          }
+        ],
+        "evidence": [
+          {
+            "role": "deploy_plan",
+            "ord": 0,
+            "kind": "x07.deploy.plan@0.2.0",
+            "digest": {
+              "sha256": "__ANY__",
+              "bytes_len": "__ANY__"
+            },
+            "media_type": "application/json",
+            "logical_name": "deploy.plan",
+            "store_uri": "__ANY__"
+          }
+        ],
+        "record": {
+          "kind": "lp.decision.record@0.1.0",
+          "digest": {
+            "sha256": "__ANY__",
+            "bytes_len": "__ANY__"
+          },
+          "store_uri": "__ANY__",
+          "media_type": "application/json"
+        }
+      },
+      {
+        "decision_id": "__ANY__",
+        "created_unix_ms": "__ANY__",
+        "step_idx": 1,
+        "kind": "deploy.runtime.start_candidate",
+        "outcome": "allow",
+        "reasons": [
+          {
+            "code": "LP_RUNTIME_HEALTHCHECK_OK",
+            "message": "__ANY__"
+          }
+        ],
+        "evidence": [
+          {
+            "role": "runtime_probe",
+            "ord": 0,
+            "kind": "__ANY__",
+            "digest": {
+              "sha256": "__ANY__",
+              "bytes_len": "__ANY__"
+            },
+            "media_type": "__ANY__",
+            "logical_name": "__ANY__",
+            "store_uri": "__ANY__"
+          }
+        ],
+        "record": {
+          "kind": "lp.decision.record@0.1.0",
+          "digest": {
+            "sha256": "__ANY__",
+            "bytes_len": "__ANY__"
+          },
+          "store_uri": "__ANY__",
+          "media_type": "application/json"
+        }
+      },
+      {
+        "decision_id": "__ANY__",
+        "created_unix_ms": "__ANY__",
+        "step_idx": 4,
+        "kind": "deploy.analysis.slo",
+        "outcome": "allow",
+        "reasons": [
+          {
+            "code": "LP_SLO_PROMOTE",
+            "message": "__ANY__"
+          }
+        ],
+        "evidence": [
+          {
+            "role": "metrics_snapshot",
+            "ord": 0,
+            "kind": "x07.metrics.snapshot@0.1.0",
+            "digest": {
+              "sha256": "__ANY__",
+              "bytes_len": "__ANY__"
+            },
+            "media_type": "application/json",
+            "logical_name": "analysis.1.json",
+            "store_uri": "__ANY__"
+          },
+          {
+            "role": "slo_eval_report",
+            "ord": 0,
+            "kind": "__ANY__",
+            "digest": {
+              "sha256": "__ANY__",
+              "bytes_len": "__ANY__"
+            },
+            "media_type": "__ANY__",
+            "logical_name": "__ANY__",
+            "store_uri": "__ANY__"
+          }
+        ],
+        "record": {
+          "kind": "lp.decision.record@0.1.0",
+          "digest": {
+            "sha256": "__ANY__",
+            "bytes_len": "__ANY__"
+          },
+          "store_uri": "__ANY__",
+          "media_type": "application/json"
+        }
+      }
+    ]
+  }
+}

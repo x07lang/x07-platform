@@ -1,0 +1,24 @@
+{
+  "schema_version": "lp.cli.report@0.1.0",
+  "command": "deploy run",
+  "ok": false,
+  "exit_code": 15,
+  "diagnostics": [
+    {
+      "code": "LP_RETRY_BUDGET_EXHAUSTED"
+    }
+  ],
+  "meta": {
+    "tool": "x07lp",
+    "version": "__ANY__",
+    "run_id": "__ANY__"
+  },
+  "result": {
+    "deployment_id": "__ANY__",
+    "run_id": "__ANY__",
+    "final_decision_id": "__ANY__",
+    "outcome": "failed",
+    "latest_weight_pct": 5,
+    "public_listener": "__ANY__"
+  }
+}

@@ -1,4 +1,4 @@
-# MCP gateway (Phase A)
+# MCP gateway
 
 Gateway files:
 
@@ -17,7 +17,8 @@ The tool manifest exposes:
 - `lp.change.new`
 - `lp.change.validate`
 - `lp.deploy.accept`
+- `lp.deploy.run`
+- `lp.deploy.query`
 - `lp.deploy.status`
 - `lp.deploy.stop`
 - `lp.deploy.rollback`
-
