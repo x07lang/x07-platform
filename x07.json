@@ -129,7 +129,8 @@
     "cli/modules",
     "engine/modules",
     "adapters/modules",
-    "gateway/mcp/src"
+    "gateway/mcp/src",
+    "gateway/mcp/modules"
   ],
   "patch": {
     "ext-crypto-rs": {

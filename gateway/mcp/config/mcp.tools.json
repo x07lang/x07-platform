@@ -23,7 +23,7 @@
         }
       },
       "x07": {
-        "impl": "mcp.user.call_tool_v1",
+        "impl": "lp.mcp.deploy_run_v1.call_tool_v1",
         "limits_profile": "mcp_tool_standard_v1",
         "sandbox": {
           "fs": { "read_roots": ["."], "write_roots": ["out"] },
@@ -52,7 +52,7 @@
         }
       },
       "x07": {
-        "impl": "mcp.user.call_tool_v1",
+        "impl": "lp.mcp.deploy_query_v1.call_tool_v1",
         "limits_profile": "mcp_tool_standard_v1",
         "sandbox": {
           "fs": { "read_roots": ["."], "write_roots": [] },

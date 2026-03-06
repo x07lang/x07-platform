@@ -19,6 +19,7 @@ WORKSPACE = ROOT.parent
 DEFAULT_STATE_DIR = Path("out/x07lp_state")
 DDL_PATH = ROOT / "adapters" / "sql" / "phaseB_index.sqlite.sql"
 TOOL_VERSION = "0.1.0-dev"
+VALID_QUERY_VIEWS = {"summary", "timeline", "decisions", "artifacts", "full"}
 
 
 def canon_json(data: Any) -> bytes:
@@ -42,11 +43,11 @@ def digest_ref_from_bytes(data: bytes) -> dict[str, Any]:
     return {"sha256": sha256_hex(data), "bytes_len": len(data)}
 
 
-def result_diag(code: str, stage: str, message: str) -> dict[str, Any]:
+def result_diag(code: str, stage: str, message: str, severity: str = "error") -> dict[str, Any]:
     stage_value = "parse" if stage == "parse" else "run"
     return {
         "code": code,
-        "severity": "error",
+        "severity": severity,
         "stage": stage_value,
         "message": message,
     }
@@ -210,6 +211,16 @@ def materialize_pack_dir(state_dir: Path, run_doc: dict[str, Any], out_dir: Path
     bundle = manifest.get("bundle_manifest")
     if bundle:
         digest_specs.append(bundle)
+        bundle_sha = bundle.get("sha256")
+        if isinstance(bundle_sha, str) and len(bundle_sha) == 64:
+            bundle_bytes = load_cas_blob(state_dir, bundle_sha)
+            (out_dir / "app.bundle.json").write_bytes(bundle_bytes)
+            bundle_doc = json.loads(bundle_bytes)
+            backend_artifact = ((bundle_doc.get("backend") or {}).get("artifact")) or {}
+            if backend_artifact:
+                digest_specs.append(backend_artifact)
+            for artifact in ((bundle_doc.get("frontend") or {}).get("artifacts") or []):
+                digest_specs.append(artifact)
     backend = (manifest.get("backend") or {}).get("component")
     if backend:
         digest_specs.append(backend)
@@ -294,6 +305,22 @@ def run_capture(argv: list[str], cwd: Path | None = None) -> tuple[int, bytes, b
     return proc.returncode, proc.stdout, proc.stderr
 
 
+def resolve_tool_cwd_and_path(path: Path | None) -> tuple[Path, str | None]:
+    if path is None:
+        return ROOT, None
+    resolved = path.resolve()
+    tool_cwd = ROOT
+    for parent in resolved.parents:
+        if (parent / "arch").is_dir():
+            tool_cwd = parent
+            break
+    try:
+        path_arg = str(resolved.relative_to(tool_cwd))
+    except ValueError:
+        path_arg = str(resolved)
+    return tool_cwd, path_arg
+
+
 def synth_runtime_probe(exec_id: str, work_dir: Path) -> dict[str, Any]:
     return {
         "schema_version": "lp.runtime.probe.synthetic@0.1.0",
@@ -309,20 +336,63 @@ def synth_runtime_probe(exec_id: str, work_dir: Path) -> dict[str, Any]:
     }
 
 
+def failed_runtime_probe(exec_id: str, work_dir: Path, exit_code: int, message: str) -> dict[str, Any]:
+    return {
+        "schema_version": "lp.runtime.probe.synthetic@0.1.0",
+        "command": "lp.runtime.probe.synthetic",
+        "ok": False,
+        "exit_code": exit_code,
+        "diagnostics": [result_diag("LP_RUNTIME_HEALTHCHECK_FAILED", "run", message)],
+        "result": {
+            "exec_id": exec_id,
+            "work_dir": str(work_dir),
+            "status": "unhealthy",
+        },
+    }
+
+
+def runtime_probe_ok(report: dict[str, Any]) -> bool:
+    if report.get("ok") is False:
+        return False
+    if report.get("ok") is True:
+        return True
+    status = str(((report.get("result") or {}).get("status")) or "unknown")
+    return status in {"healthy", "ok", "running"}
+
+
+def runtime_probe_message(report: dict[str, Any]) -> str:
+    diagnostics = report.get("diagnostics") or []
+    if diagnostics and diagnostics[0].get("message"):
+        return str(diagnostics[0]["message"])
+    status = ((report.get("result") or {}).get("status")) or "unknown"
+    return f"candidate runtime probe reported status={status}"
+
+
 def run_runtime_probe(exec_id: str, work_dir: Path, ops_path: Path | None) -> dict[str, Any]:
     x07_wasm = shutil.which("x07-wasm")
     if not x07_wasm:
         return synth_runtime_probe(exec_id, work_dir)
+    probe_cwd, ops_arg = resolve_tool_cwd_and_path(ops_path)
     argv = [x07_wasm, "app", "serve", "--dir", str(work_dir), "--mode", "smoke", "--json"]
-    if ops_path is not None:
-        argv.extend(["--ops", str(ops_path)])
-    code, stdout, _stderr = run_capture(argv, cwd=ROOT)
+    if ops_arg is not None:
+        argv.extend(["--ops", ops_arg])
+    code, stdout, stderr = run_capture(argv, cwd=probe_cwd)
     if code == 0:
         try:
             return json.loads(stdout.decode("utf-8"))
         except Exception:
-            pass
-    return synth_runtime_probe(exec_id, work_dir)
+            return failed_runtime_probe(exec_id, work_dir, 1, "candidate runtime probe returned invalid JSON")
+    # If the pack doesn't support `app serve` (e.g. no bundle manifest),
+    # fall back to synthetic probe — expected for minimal packs.
+    try:
+        err_doc = json.loads(stdout.decode("utf-8"))
+        err_code = (err_doc.get("diagnostics") or [{}])[0].get("code", "")
+        if err_code in ("X07WASM_APP_BUNDLE_MISSING", "X07WASM_APP_NOT_SERVABLE"):
+            return synth_runtime_probe(exec_id, work_dir)
+    except Exception:
+        pass
+    message = stderr.decode("utf-8", errors="replace").strip() or "candidate runtime probe failed"
+    return failed_runtime_probe(exec_id, work_dir, code or 1, message)
 
 
 def synth_slo_eval(profile_path: Path, metrics_path: Path, decision: str) -> dict[str, Any]:
@@ -381,8 +451,9 @@ def run_slo_eval(profile_path: Path | None, metrics_path: Path) -> tuple[str, di
     inferred = infer_slo_decision(metrics_doc)
     x07_wasm = shutil.which("x07-wasm")
     if x07_wasm and profile_path is not None and profile_path.exists():
-        argv = [x07_wasm, "slo", "eval", "--profile", str(profile_path), "--metrics", str(metrics_path), "--json"]
-        code, stdout, _stderr = run_capture(argv, cwd=ROOT)
+        slo_cwd, profile_arg = resolve_tool_cwd_and_path(profile_path)
+        argv = [x07_wasm, "slo", "eval", "--profile", str(profile_arg), "--metrics", str(metrics_path.resolve()), "--json"]
+        code, stdout, _stderr = run_capture(argv, cwd=slo_cwd)
         if code == 0:
             try:
                 report = json.loads(stdout.decode("utf-8"))
@@ -407,6 +478,46 @@ def runtime_state_paths(state_dir: Path, exec_id: str, slot: str) -> dict[str, P
     }
 
 
+def write_runtime_terminal_report(state_dir: Path, exec_id: str, slot: str, status: str, outcome: str, now_unix_ms: int) -> None:
+    paths = runtime_state_paths(state_dir, exec_id, slot)
+    paths["reports"].mkdir(parents=True, exist_ok=True)
+    write_json(
+        paths["reports"] / "terminal.json",
+        {
+            "schema_version": "lp.runtime.terminal.report@0.1.0",
+            "exec_id": exec_id,
+            "slot": slot,
+            "status": status,
+            "outcome": outcome,
+            "updated_unix_ms": now_unix_ms,
+        },
+    )
+
+
+def prepare_runtime_terminal_state(state_dir: Path, exec_doc: dict[str, Any], meta: dict[str, Any], outcome: str, now_unix_ms: int) -> dict[str, Any]:
+    runtime_meta = dict(meta.get("runtime") or {})
+    stable_paths = runtime_state_paths(state_dir, exec_doc["exec_id"], "stable")
+    candidate_paths = runtime_state_paths(state_dir, exec_doc["exec_id"], "candidate")
+    stable = dict(runtime_meta.get("stable") or {})
+    candidate = dict(runtime_meta.get("candidate") or {})
+    stable.setdefault("work_dir", str(stable_paths["work"]))
+    candidate.setdefault("work_dir", str(candidate_paths["work"]))
+    stable["ended_unix_ms"] = now_unix_ms
+    candidate["ended_unix_ms"] = now_unix_ms
+    if outcome == "rolled_back":
+        stable["status"] = "healthy"
+        candidate["status"] = "stopped"
+    else:
+        stable["status"] = "stopped"
+        candidate["status"] = "stopped"
+    write_runtime_terminal_report(state_dir, exec_doc["exec_id"], "stable", str(stable["status"]), outcome, now_unix_ms)
+    write_runtime_terminal_report(state_dir, exec_doc["exec_id"], "candidate", str(candidate["status"]), outcome, now_unix_ms)
+    runtime_meta["stable"] = stable
+    runtime_meta["candidate"] = candidate
+    meta["runtime"] = runtime_meta
+    return meta
+
+
 def router_state_path(state_dir: Path, exec_id: str) -> Path:
     return state_dir / ".x07lp" / "router" / exec_id / "state.json"
 
@@ -427,6 +538,17 @@ def write_router_state(state_dir: Path, exec_id: str, stable_addr: str, candidat
     write_json(router_state_path(state_dir, exec_id), state)
     counters = {"candidate_requests": 0, "stable_requests": 0}
     write_json(router_counters_path(state_dir, exec_id), counters)
+
+
+def prepare_router_terminal_state(state_dir: Path, exec_doc: dict[str, Any], meta: dict[str, Any]) -> None:
+    write_router_state(
+        state_dir,
+        exec_doc["exec_id"],
+        deterministic_listener(exec_doc["exec_id"]) + "/stable",
+        deterministic_listener(exec_doc["exec_id"]) + "/candidate",
+        int((meta.get("routing") or {}).get("candidate_weight_pct", 0)),
+        len(exec_doc.get("steps") or []),
+    )
 
 
 def mk_decision_record(
@@ -961,6 +1083,24 @@ def build_query_result(
     return result
 
 
+def validate_query_args(args: argparse.Namespace) -> str | None:
+    have_deployment = bool(args.deployment_id)
+    have_target = bool(args.app_id and args.env and args.latest)
+    if not have_deployment and not have_target:
+        return "query requires --deployment-id or --app-id/--env/--latest"
+    if have_deployment and (args.app_id or args.env or args.latest):
+        return "query accepts either --deployment-id or --app-id/--env/--latest"
+    if args.view not in VALID_QUERY_VIEWS:
+        return f"unsupported query view: {args.view}"
+    if args.limit is not None:
+        try:
+            if int(args.limit) < 0:
+                return "--limit must be >= 0"
+        except ValueError:
+            return "--limit must be an integer"
+    return None
+
+
 def command_status(args: argparse.Namespace) -> dict[str, Any]:
     state_dir = resolve_state_dir(args.state_dir)
     exec_doc = load_exec(state_dir, args.deployment_id)
@@ -976,13 +1116,14 @@ def command_status(args: argparse.Namespace) -> dict[str, Any]:
 def mutate_terminal_execution(state_dir: Path, exec_doc: dict[str, Any], reason: str, outcome: str, now_unix_ms: int, kind: str) -> dict[str, Any]:
     run_doc = load_json(run_path(state_dir, exec_doc["run_id"]))
     meta = ensure_deploy_meta(exec_doc, run_doc, state_dir)
+    reason_code = "LP_DEPLOY_STOPPED" if outcome == "aborted" else "LP_MANUAL_ACTION"
     decision = mk_decision_record(
         state_dir,
         exec_doc,
         None,
         kind,
         "allow",
-        [decision_reason("LP_MANUAL_ACTION", reason)],
+        [decision_reason(reason_code, reason)],
         [],
         now_unix_ms,
     )
@@ -1037,6 +1178,33 @@ def command_stop(args: argparse.Namespace) -> dict[str, Any]:
     state_dir = resolve_state_dir(args.state_dir)
     now_unix_ms = int(args.now_unix_ms or now_ms())
     exec_doc = load_exec(state_dir, args.deployment_id)
+    run_doc = load_json(run_path(state_dir, exec_doc["run_id"]))
+    meta = ensure_deploy_meta(exec_doc, run_doc, state_dir)
+    meta["updated_unix_ms"] = now_unix_ms
+    meta.setdefault("routing", {})["candidate_weight_pct"] = 0
+    try:
+        prepare_runtime_terminal_state(state_dir, exec_doc, meta, "aborted", now_unix_ms)
+    except Exception as exc:
+        return cli_report(
+            "deploy stop",
+            False,
+            24,
+            {},
+            run_id=exec_doc.get("run_id", ""),
+            diagnostics=[result_diag("LP_RUNTIME_STOP_FAILED", "run", str(exc))],
+        )
+    exec_doc["meta"] = meta
+    try:
+        prepare_router_terminal_state(state_dir, exec_doc, meta)
+    except Exception as exc:
+        return cli_report(
+            "deploy stop",
+            False,
+            25,
+            {},
+            run_id=exec_doc.get("run_id", ""),
+            diagnostics=[result_diag("LP_ROUTER_STOP_FAILED", "run", str(exc))],
+        )
     decision = mutate_terminal_execution(state_dir, exec_doc, args.reason, "aborted", now_unix_ms, "deploy.stop.manual")
     exec_doc = load_exec(state_dir, args.deployment_id)
     return cli_report(
@@ -1050,6 +1218,7 @@ def command_stop(args: argparse.Namespace) -> dict[str, Any]:
             "outcome": "aborted",
         },
         run_id=exec_doc.get("run_id", ""),
+        diagnostics=[result_diag("LP_DEPLOY_STOPPED", "run", "deployment stopped", severity="info")],
     )
 
 
@@ -1057,6 +1226,33 @@ def command_rollback(args: argparse.Namespace) -> dict[str, Any]:
     state_dir = resolve_state_dir(args.state_dir)
     now_unix_ms = int(args.now_unix_ms or now_ms())
     exec_doc = load_exec(state_dir, args.deployment_id)
+    run_doc = load_json(run_path(state_dir, exec_doc["run_id"]))
+    meta = ensure_deploy_meta(exec_doc, run_doc, state_dir)
+    meta["updated_unix_ms"] = now_unix_ms
+    meta.setdefault("routing", {})["candidate_weight_pct"] = 0
+    try:
+        prepare_runtime_terminal_state(state_dir, exec_doc, meta, "rolled_back", now_unix_ms)
+    except Exception as exc:
+        return cli_report(
+            "deploy rollback",
+            False,
+            24,
+            {},
+            run_id=exec_doc.get("run_id", ""),
+            diagnostics=[result_diag("LP_RUNTIME_STOP_FAILED", "run", str(exc))],
+        )
+    exec_doc["meta"] = meta
+    try:
+        prepare_router_terminal_state(state_dir, exec_doc, meta)
+    except Exception as exc:
+        return cli_report(
+            "deploy rollback",
+            False,
+            25,
+            {},
+            run_id=exec_doc.get("run_id", ""),
+            diagnostics=[result_diag("LP_ROUTER_STOP_FAILED", "run", str(exc))],
+        )
     decision = mutate_terminal_execution(state_dir, exec_doc, args.reason, "rolled_back", now_unix_ms, "deploy.rollback.manual")
     exec_doc = load_exec(state_dir, args.deployment_id)
     return cli_report(
@@ -1096,6 +1292,7 @@ def generated_plan_from_accepted(state_dir: Path, exec_doc: dict[str, Any], run_
     out_dir = state_dir / ".x07lp" / "generated" / exec_doc["exec_id"] / "plan"
     shutil.rmtree(out_dir, ignore_errors=True)
     out_dir.mkdir(parents=True, exist_ok=True)
+    plan_cwd, ops_arg = resolve_tool_cwd_and_path(ops_path)
     argv = [
         x07_wasm,
         "deploy",
@@ -1103,14 +1300,14 @@ def generated_plan_from_accepted(state_dir: Path, exec_doc: dict[str, Any], run_
         "--pack-manifest",
         str(pack_dir / "app.pack.json"),
         "--ops",
-        str(ops_path),
+        str(ops_arg),
         "--emit-k8s",
         "false",
         "--out-dir",
         str(out_dir),
         "--json",
     ]
-    code, stdout, _stderr = run_capture(argv, cwd=ROOT)
+    code, stdout, _stderr = run_capture(argv, cwd=plan_cwd)
     if code == 0:
         try:
             report = json.loads(stdout.decode("utf-8"))
@@ -1165,11 +1362,21 @@ def command_run(args: argparse.Namespace) -> dict[str, Any]:
     run_doc = load_json(run_path(state_dir, exec_doc["run_id"]))
     meta = ensure_deploy_meta(exec_doc, run_doc, state_dir)
     plan_path = resolve_plan_path(args.plan)
-    if plan_path is not None:
-        plan_doc = normalize_plan(load_json(plan_path))
-        plan_bytes = canon_json(plan_doc)
-    else:
-        plan_doc, plan_bytes = generated_plan_from_accepted(state_dir, exec_doc, run_doc)
+    try:
+        if plan_path is not None:
+            plan_doc = normalize_plan(load_json(plan_path))
+            plan_bytes = canon_json(plan_doc)
+        else:
+            plan_doc, plan_bytes = generated_plan_from_accepted(state_dir, exec_doc, run_doc)
+    except Exception as exc:
+        return cli_report(
+            "deploy run",
+            False,
+            13,
+            {"deployment_id": exec_doc["exec_id"], "run_id": exec_doc["run_id"]},
+            run_id=exec_doc.get("run_id", ""),
+            diagnostics=[result_diag("LP_PLAN_GENERATE_FAILED", "run", str(exc))],
+        )
     plan_artifact = artifact_summary(
         "deploy_plan",
         {
@@ -1207,15 +1414,34 @@ def command_run(args: argparse.Namespace) -> dict[str, Any]:
 
     stable_paths = runtime_state_paths(state_dir, exec_doc["exec_id"], "stable")
     candidate_paths = runtime_state_paths(state_dir, exec_doc["exec_id"], "candidate")
-    shutil.rmtree(stable_paths["base"], ignore_errors=True)
-    shutil.rmtree(candidate_paths["base"], ignore_errors=True)
-    manifest, manifest_raw = materialize_pack_dir(state_dir, run_doc, stable_paths["work"])
-    materialize_pack_dir(state_dir, run_doc, candidate_paths["work"])
-    for paths in [stable_paths, candidate_paths]:
-        paths["logs"].mkdir(parents=True, exist_ok=True)
-        paths["reports"].mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.rmtree(stable_paths["base"], ignore_errors=True)
+        shutil.rmtree(candidate_paths["base"], ignore_errors=True)
+        manifest, manifest_raw = materialize_pack_dir(state_dir, run_doc, stable_paths["work"])
+        materialize_pack_dir(state_dir, run_doc, candidate_paths["work"])
+        for paths in [stable_paths, candidate_paths]:
+            paths["logs"].mkdir(parents=True, exist_ok=True)
+            paths["reports"].mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        return cli_report(
+            "deploy run",
+            False,
+            17,
+            {"deployment_id": exec_doc["exec_id"], "run_id": exec_doc["run_id"], "outcome": "failed"},
+            run_id=exec_doc.get("run_id", ""),
+            diagnostics=[result_diag("LP_RUNTIME_START_FAILED", "run", str(exc))],
+        )
     inputs = resolve_plan_inputs(plan_doc)
     runtime_probe_doc = run_runtime_probe(exec_doc["exec_id"], candidate_paths["work"], inputs["ops"])
+    if not runtime_probe_ok(runtime_probe_doc):
+        return cli_report(
+            "deploy run",
+            False,
+            18,
+            {"deployment_id": exec_doc["exec_id"], "run_id": exec_doc["run_id"], "outcome": "failed"},
+            run_id=exec_doc.get("run_id", ""),
+            diagnostics=[result_diag("LP_RUNTIME_HEALTHCHECK_FAILED", "run", runtime_probe_message(runtime_probe_doc))],
+        )
     runtime_probe_bytes = canon_json(runtime_probe_doc)
     runtime_probe_artifact = artifact_summary(
         "runtime_probe",
@@ -1253,14 +1479,24 @@ def command_run(args: argparse.Namespace) -> dict[str, Any]:
         "stable": {"status": "healthy", "work_dir": str(stable_paths["work"])},
         "candidate": {"status": "healthy", "work_dir": str(candidate_paths["work"])},
     }
-    write_router_state(
-        state_dir,
-        exec_doc["exec_id"],
-        deterministic_listener(exec_doc["exec_id"]) + "/stable",
-        deterministic_listener(exec_doc["exec_id"]) + "/candidate",
-        int((meta.get("routing") or {}).get("candidate_weight_pct", 0)),
-        1,
-    )
+    try:
+        write_router_state(
+            state_dir,
+            exec_doc["exec_id"],
+            deterministic_listener(exec_doc["exec_id"]) + "/stable",
+            deterministic_listener(exec_doc["exec_id"]) + "/candidate",
+            int((meta.get("routing") or {}).get("candidate_weight_pct", 0)),
+            1,
+        )
+    except Exception as exc:
+        return cli_report(
+            "deploy run",
+            False,
+            19,
+            {"deployment_id": exec_doc["exec_id"], "run_id": exec_doc["run_id"], "outcome": "failed"},
+            run_id=exec_doc.get("run_id", ""),
+            diagnostics=[result_diag("LP_ROUTER_BIND_FAILED", "run", str(exc))],
+        )
 
     exec_doc["status"] = "started"
     meta["decisions"] = decisions
@@ -1289,6 +1525,7 @@ def command_run(args: argparse.Namespace) -> dict[str, Any]:
                     "public_listener": (current.get("meta") or {}).get("public_listener"),
                 },
                 run_id=current.get("run_id", ""),
+                diagnostics=[result_diag("LP_DEPLOY_STOPPED", "run", "deployment stopped during execution", severity="info")],
             )
         exec_doc = current
         meta = exec_doc.get("meta") or {}
@@ -1323,14 +1560,24 @@ def command_run(args: argparse.Namespace) -> dict[str, Any]:
             meta.setdefault("routing", {})["candidate_weight_pct"] = weight
             meta["latest_decision_id"] = decision["decision_id"]
             meta["updated_unix_ms"] = now_unix_ms + step_cursor
-            write_router_state(
-                state_dir,
-                exec_doc["exec_id"],
-                deterministic_listener(exec_doc["exec_id"]) + "/stable",
-                deterministic_listener(exec_doc["exec_id"]) + "/candidate",
-                weight,
-                step_cursor,
-            )
+            try:
+                write_router_state(
+                    state_dir,
+                    exec_doc["exec_id"],
+                    deterministic_listener(exec_doc["exec_id"]) + "/stable",
+                    deterministic_listener(exec_doc["exec_id"]) + "/candidate",
+                    weight,
+                    step_cursor,
+                )
+            except Exception as exc:
+                return cli_report(
+                    "deploy run",
+                    False,
+                    20,
+                    {"deployment_id": exec_doc["exec_id"], "run_id": exec_doc["run_id"], "outcome": "failed"},
+                    run_id=exec_doc.get("run_id", ""),
+                    diagnostics=[result_diag("LP_ROUTER_SET_WEIGHT_FAILED", "run", str(exc))],
+                )
             exec_doc["steps"] = steps
             meta["decisions"] = decisions
             exec_doc["meta"] = meta
@@ -1373,6 +1620,7 @@ def command_run(args: argparse.Namespace) -> dict[str, Any]:
                             "public_listener": (current.get("meta") or {}).get("public_listener"),
                         },
                         run_id=current.get("run_id", ""),
+                        diagnostics=[result_diag("LP_DEPLOY_STOPPED", "run", "deployment stopped during execution", severity="info")],
                     )
             exec_doc = load_exec(state_dir, exec_doc["exec_id"])
             meta = exec_doc.get("meta") or {}
@@ -1425,8 +1673,27 @@ def command_run(args: argparse.Namespace) -> dict[str, Any]:
                         run_id=exec_doc.get("run_id", ""),
                         diagnostics=[result_diag("LP_METRICS_SNAPSHOT_MISSING", "deploy", "missing metrics snapshot")],
                     )
-                decision_value, slo_report = run_slo_eval(inputs["slo"], metrics_path)
-                metrics_bytes = metrics_path.read_bytes()
+                try:
+                    decision_value, slo_report = run_slo_eval(inputs["slo"], metrics_path)
+                    metrics_bytes = metrics_path.read_bytes()
+                except Exception as exc:
+                    return cli_report(
+                        "deploy run",
+                        False,
+                        21,
+                        {"deployment_id": exec_doc["exec_id"], "run_id": exec_doc["run_id"], "outcome": "failed"},
+                        run_id=exec_doc.get("run_id", ""),
+                        diagnostics=[result_diag("LP_SLO_EVAL_FAILED", "run", str(exc))],
+                    )
+                if decision_value not in {"promote", "rollback", "inconclusive"}:
+                    return cli_report(
+                        "deploy run",
+                        False,
+                        21,
+                        {"deployment_id": exec_doc["exec_id"], "run_id": exec_doc["run_id"], "outcome": "failed"},
+                        run_id=exec_doc.get("run_id", ""),
+                        diagnostics=[result_diag("LP_SLO_EVAL_FAILED", "run", f"unexpected slo decision: {decision_value}")],
+                    )
                 metrics_artifact = artifact_summary(
                     "metrics_snapshot",
                     {
@@ -1551,6 +1818,16 @@ def command_run(args: argparse.Namespace) -> dict[str, Any]:
                         diagnostics=[result_diag("LP_RETRY_BUDGET_EXHAUSTED", "deploy", "retry budget exhausted")],
                     )
             step_cursor += 1
+            continue
+
+        return cli_report(
+            "deploy run",
+            False,
+            26,
+            {"deployment_id": exec_doc["exec_id"], "run_id": exec_doc["run_id"], "outcome": "failed"},
+            run_id=exec_doc.get("run_id", ""),
+            diagnostics=[result_diag("LP_PLAN_EXEC_STEP_FAILED", "run", f"unsupported plan step: {json.dumps(plan_step, sort_keys=True)}")],
+        )
 
     meta = exec_doc.get("meta") or {}
     meta["outcome"] = "promoted"
@@ -1595,7 +1872,25 @@ def command_run(args: argparse.Namespace) -> dict[str, Any]:
 
 def command_query(args: argparse.Namespace) -> dict[str, Any]:
     state_dir = resolve_state_dir(args.state_dir)
-    db_path, rebuilt = maybe_rebuild_index(state_dir, bool(args.rebuild_index))
+    validation_error = validate_query_args(args)
+    if validation_error is not None:
+        return cli_report(
+            "deploy query",
+            False,
+            2,
+            {},
+            diagnostics=[result_diag("LP_QUERY_INVALID", "parse", validation_error)],
+        )
+    try:
+        db_path, rebuilt = maybe_rebuild_index(state_dir, bool(args.rebuild_index))
+    except Exception as exc:
+        return cli_report(
+            "deploy query",
+            False,
+            22,
+            {},
+            diagnostics=[result_diag("LP_DECISION_INDEX_ERROR", "run", str(exc))],
+        )
     resolution: dict[str, Any]
     exec_id: str | None
     if args.deployment_id:
@@ -1674,13 +1969,14 @@ def main(argv: list[str]) -> int:
         if args.command == "run":
             report = command_run(args)
         elif args.command == "query":
-            if not args.deployment_id and not (args.app_id and args.env and args.latest):
+            query_error = validate_query_args(args)
+            if query_error is not None:
                 report = cli_report(
                     "deploy query",
                     False,
                     2,
                     {},
-                    diagnostics=[result_diag("LP_INVALID_ARGS", "parse", "query requires --deployment-id or --app-id/--env/--latest")],
+                    diagnostics=[result_diag("LP_QUERY_INVALID", "parse", query_error)],
                 )
             else:
                 report = command_query(args)

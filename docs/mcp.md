@@ -22,3 +22,5 @@ The tool manifest exposes:
 - `lp.deploy.status`
 - `lp.deploy.stop`
 - `lp.deploy.rollback`
+
+`lp.deploy.run` and `lp.deploy.query` resolve to dedicated tool modules under `gateway/mcp/modules/lp/mcp/` instead of the generic dispatcher path.

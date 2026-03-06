@@ -20,7 +20,7 @@
       "id": "worker_sandbox",
       "match": {
         "module_prefixes": [],
-        "path_globs": ["src/worker_main.x07.json", "src/mcp/*.x07.json"]
+        "path_globs": ["src/worker_main.x07.json", "src/mcp/*.x07.json", "modules/**/*.x07.json"]
       },
       "world": "run-os-sandboxed",
       "visibility": { "mode": "public", "visible_to": [] },
