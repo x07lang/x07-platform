@@ -82,11 +82,11 @@ import sys
 
 root = pathlib.Path(sys.argv[1]).resolve()
 raw = pathlib.Path(sys.argv[2])
-path = raw.resolve() if raw.is_absolute() else (root / raw).resolve()
+path = raw if raw.is_absolute() else (root / raw)
 try:
-    print(path.relative_to(root).as_posix())
+    print(path.absolute().relative_to(root).as_posix())
 except ValueError:
-    print(path)
+    print(path.absolute())
 PY
 }
 
@@ -187,7 +187,7 @@ validate_cli_report() {
   local cli_path="$1"
   local out_dir="$2"
   check_schema_validate_ok \
-    "spec/schemas/lp.cli.report.schema.json" \
+    "contracts/spec/schemas/lp.cli.report.schema.json" \
     "$cli_path" \
     "$out_dir/cli_report.validate.run_report.json" \
     "$out_dir/cli_report.validate.cli.json"
@@ -351,7 +351,7 @@ prepare_accepted_state() {
   local exec_id
   exec_id="$(extract_report_field "$out_dir/deploy_accept.cli.json" result.exec_id)"
   check_schema_validate_ok \
-    "spec/schemas/lp.deploy.execution.schema.json" \
+    "contracts/spec/schemas/lp.deploy.execution.schema.json" \
     "$state_dir_rel/deploy/${exec_id}.json" \
     "$out_dir/deploy_accept.validate_exec.run_report.json" \
     "$out_dir/deploy_accept.validate_exec.cli.json"
@@ -377,7 +377,7 @@ run_x07lp \
 validate_cli_report "$PROMOTE_DIR/deploy_run.cli.json" "$PROMOTE_DIR"
 assert_report_matches_template "$PROMOTE_DIR/deploy_run.cli.json" "$ROOT_DIR/spec/fixtures/phaseB/promote/expected/deploy.run.report.json"
 check_schema_validate_ok \
-  "spec/schemas/lp.deploy.execution.schema.json" \
+  "contracts/spec/schemas/lp.deploy.execution.schema.json" \
   "$PROMOTE_STATE_REL/deploy/${PROMOTE_EXEC_ID}.json" \
   "$PROMOTE_DIR/validate_exec.run_report.json" \
   "$PROMOTE_DIR/validate_exec.cli.json"
@@ -403,7 +403,7 @@ run_x07lp \
 validate_cli_report "$ROLLBACK_DIR/deploy_run.cli.json" "$ROLLBACK_DIR"
 assert_report_matches_template "$ROLLBACK_DIR/deploy_run.cli.json" "$ROOT_DIR/spec/fixtures/phaseB/rollback/expected/deploy.run.report.json"
 check_schema_validate_ok \
-  "spec/schemas/lp.deploy.execution.schema.json" \
+  "contracts/spec/schemas/lp.deploy.execution.schema.json" \
   "$ROLLBACK_STATE_REL/deploy/${ROLLBACK_EXEC_ID}.json" \
   "$ROLLBACK_DIR/validate_exec.run_report.json" \
   "$ROLLBACK_DIR/validate_exec.cli.json"
@@ -429,7 +429,7 @@ run_x07lp \
 validate_cli_report "$RETRY_DIR/deploy_run.cli.json" "$RETRY_DIR"
 assert_report_matches_template "$RETRY_DIR/deploy_run.cli.json" "$ROOT_DIR/spec/fixtures/phaseB/retry_exhausted/expected/deploy.run.report.json"
 check_schema_validate_ok \
-  "spec/schemas/lp.deploy.execution.schema.json" \
+  "contracts/spec/schemas/lp.deploy.execution.schema.json" \
   "$RETRY_STATE_REL/deploy/${RETRY_EXEC_ID}.json" \
   "$RETRY_DIR/validate_exec.run_report.json" \
   "$RETRY_DIR/validate_exec.cli.json"
@@ -470,7 +470,7 @@ wait "$STOP_RUN_PID" || true
 validate_cli_report "$STOP_DIR/deploy_stop.cli.json" "$STOP_DIR"
 assert_report_matches_template "$STOP_DIR/deploy_stop.cli.json" "$ROOT_DIR/spec/fixtures/phaseB/stop_during_pause/expected/deploy.stop.report.json"
 check_schema_validate_ok \
-  "spec/schemas/lp.deploy.execution.schema.json" \
+  "contracts/spec/schemas/lp.deploy.execution.schema.json" \
   "$STOP_STATE_REL/deploy/${STOP_EXEC_ID}.json" \
   "$STOP_DIR/validate_exec.run_report.json" \
   "$STOP_DIR/validate_exec.cli.json"

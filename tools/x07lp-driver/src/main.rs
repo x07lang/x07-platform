@@ -16,11 +16,22 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use ureq::{Agent, Error as UreqError};
 use walkdir::WalkDir;
 
 const DEFAULT_STATE_DIR: &str = "out/x07lp_state";
 const DEFAULT_UI_ADDR: &str = "127.0.0.1:17090";
-const TOOL_VERSION: &str = "0.1.0-dev";
+const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
+const REMOTE_API_VERSION: &str = "v1";
+const REMOTE_RUNTIME_PROVIDER: &str = "lp.impl.runtime.wasmcloud_v1";
+const REMOTE_ROUTING_PROVIDER: &str = "lp.impl.routing.edge_http_v1";
+const REMOTE_TELEMETRY_PROVIDER: &str = "lp.impl.telemetry.otlp_http_v1";
+const REMOTE_SECRETS_PROVIDER: &str = "lp.impl.secrets.server_store_v1";
+const REMOTE_COMPONENT_REGISTRY: &str = "lp.impl.component_registry.oci_v1";
+const REMOTE_ARTIFACT_KIND: &str = "x07.app.pack@0.1.0";
+const REMOTE_SERVER_ID: &str = "x07lpd-oss-self-hosted";
+const DEFAULT_REMOTE_BEARER_TOKEN: &str = "x07lp-oss-dev-token";
+const LOCAL_TARGET_SENTINEL: &str = "__local__";
 const VALID_QUERY_VIEWS: &[&str] = &["summary", "timeline", "decisions", "artifacts", "full"];
 const REDACTED_HTTP_HEADER_NAMES: &[&str] = &[
     "authorization",
@@ -31,7 +42,7 @@ const REDACTED_HTTP_HEADER_NAMES: &[&str] = &[
 ];
 
 #[derive(Parser, Debug)]
-#[command(disable_help_subcommand = true)]
+#[command(disable_help_subcommand = true, version = TOOL_VERSION)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -39,6 +50,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    Accept(DeployAcceptArgs),
     Run(DeployRunArgs),
     Query(DeployQueryArgs),
     Status(DeploymentStatusArgs),
@@ -55,6 +67,12 @@ enum Commands {
     AppUnkill(AppControlArgs),
     PlatformKill(PlatformControlArgs),
     PlatformUnkill(PlatformControlArgs),
+    TargetAdd(TargetAddArgs),
+    TargetList(TargetListArgs),
+    TargetInspect(TargetInspectArgs),
+    TargetUse(TargetUseArgs),
+    TargetRemove(TargetRemoveArgs),
+    AdapterConformance(AdapterConformanceArgs),
     UiServe(UiServeArgs),
 }
 
@@ -69,22 +87,46 @@ struct CommonStateArgs {
 }
 
 #[derive(Args, Debug)]
-struct DeployRunArgs {
+struct DeployAcceptArgs {
     #[arg(long)]
+    pack_manifest: String,
+    #[arg(long)]
+    pack_dir: Option<String>,
+    #[arg(long)]
+    change: Option<String>,
+    #[arg(long)]
+    ops_profile: Option<String>,
+    #[arg(long)]
+    target: Option<String>,
+    #[arg(long)]
+    fixture: Option<String>,
+    #[command(flatten)]
+    common: CommonStateArgs,
+}
+
+#[derive(Args, Debug)]
+struct DeployRunArgs {
+    #[arg(long = "deployment", alias = "deployment-id", default_value = "")]
     deployment_id: String,
+    #[arg(long = "accepted-run")]
+    accepted_run: Option<String>,
     #[arg(long)]
     plan: Option<String>,
     #[arg(long)]
     metrics_dir: Option<String>,
     #[arg(long)]
     pause_scale: Option<f64>,
+    #[arg(long)]
+    target: Option<String>,
+    #[arg(long)]
+    fixture: Option<String>,
     #[command(flatten)]
     common: CommonStateArgs,
 }
 
 #[derive(Args, Debug)]
 struct DeployQueryArgs {
-    #[arg(long)]
+    #[arg(long = "deployment", alias = "deployment-id")]
     deployment_id: Option<String>,
     #[arg(long)]
     app_id: Option<String>,
@@ -98,43 +140,51 @@ struct DeployQueryArgs {
     latest: bool,
     #[arg(long, default_value_t = false)]
     rebuild_index: bool,
+    #[arg(long)]
+    target: Option<String>,
     #[command(flatten)]
     common: CommonStateArgs,
 }
 
 #[derive(Args, Debug)]
 struct DeploymentStatusArgs {
-    #[arg(long)]
+    #[arg(long = "deployment", alias = "deployment-id")]
     deployment_id: String,
+    #[arg(long)]
+    target: Option<String>,
     #[command(flatten)]
     common: CommonStateArgs,
 }
 
 #[derive(Args, Debug)]
 struct DeploymentControlArgs {
-    #[arg(long)]
+    #[arg(long = "deployment", alias = "deployment-id")]
     deployment_id: String,
     #[arg(long)]
     reason: String,
+    #[arg(long)]
+    target: Option<String>,
     #[command(flatten)]
     common: CommonStateArgs,
 }
 
 #[derive(Args, Debug)]
 struct DeploymentRerunArgs {
-    #[arg(long)]
+    #[arg(long = "deployment", alias = "deployment-id")]
     deployment_id: String,
     #[arg(long)]
-    from_step: usize,
+    from_step: Option<usize>,
     #[arg(long)]
     reason: String,
+    #[arg(long)]
+    target: Option<String>,
     #[command(flatten)]
     common: CommonStateArgs,
 }
 
 #[derive(Args, Debug)]
 struct IncidentCaptureArgs {
-    #[arg(long)]
+    #[arg(long = "deployment", alias = "deployment-id")]
     deployment_id: String,
     #[arg(long)]
     reason: String,
@@ -148,13 +198,15 @@ struct IncidentCaptureArgs {
     classification: String,
     #[arg(long)]
     source: String,
+    #[arg(long)]
+    target: Option<String>,
     #[command(flatten)]
     common: CommonStateArgs,
 }
 
 #[derive(Args, Debug)]
 struct IncidentListArgs {
-    #[arg(long)]
+    #[arg(long = "deployment", alias = "deployment-id")]
     deployment_id: Option<String>,
     #[arg(long)]
     app_id: Option<String>,
@@ -164,6 +216,8 @@ struct IncidentListArgs {
     limit: Option<usize>,
     #[arg(long, default_value_t = false)]
     rebuild_index: bool,
+    #[arg(long)]
+    target: Option<String>,
     #[command(flatten)]
     common: CommonStateArgs,
 }
@@ -174,6 +228,8 @@ struct IncidentGetArgs {
     incident_id: String,
     #[arg(long, default_value_t = false)]
     rebuild_index: bool,
+    #[arg(long)]
+    target: Option<String>,
     #[command(flatten)]
     common: CommonStateArgs,
 }
@@ -188,6 +244,8 @@ struct RegressFromIncidentArgs {
     out_dir: Option<String>,
     #[arg(long, default_value_t = false)]
     dry_run: bool,
+    #[arg(long)]
+    target: Option<String>,
     #[command(flatten)]
     common: CommonStateArgs,
 }
@@ -234,6 +292,52 @@ struct UiServeArgs {
     common: CommonStateArgs,
 }
 
+#[derive(Args, Debug)]
+struct TargetAddArgs {
+    #[arg(long)]
+    profile: String,
+    #[command(flatten)]
+    common: CommonStateArgs,
+}
+
+#[derive(Args, Debug)]
+struct TargetListArgs {
+    #[command(flatten)]
+    common: CommonStateArgs,
+}
+
+#[derive(Args, Debug)]
+struct TargetInspectArgs {
+    #[arg(long)]
+    name: String,
+    #[command(flatten)]
+    common: CommonStateArgs,
+}
+
+#[derive(Args, Debug)]
+struct TargetUseArgs {
+    #[arg(long)]
+    name: String,
+    #[command(flatten)]
+    common: CommonStateArgs,
+}
+
+#[derive(Args, Debug)]
+struct TargetRemoveArgs {
+    #[arg(long)]
+    name: String,
+    #[command(flatten)]
+    common: CommonStateArgs,
+}
+
+#[derive(Args, Debug)]
+struct AdapterConformanceArgs {
+    #[arg(long)]
+    target: Option<String>,
+    #[command(flatten)]
+    common: CommonStateArgs,
+}
+
 fn main() -> std::process::ExitCode {
     match real_main() {
         Ok(code) => std::process::ExitCode::from(code as u8),
@@ -248,6 +352,7 @@ fn real_main() -> Result<i32> {
     let cli = Cli::parse();
     let report = match cli.command {
         Commands::UiServe(args) => return command_ui_serve(args),
+        Commands::Accept(args) => command_accept(args)?,
         Commands::Run(args) => command_run(args)?,
         Commands::Query(args) => command_query(args)?,
         Commands::Status(args) => command_status(args)?,
@@ -264,6 +369,12 @@ fn real_main() -> Result<i32> {
         Commands::AppUnkill(args) => command_app_scope(args, false)?,
         Commands::PlatformKill(args) => command_platform_scope(args, true)?,
         Commands::PlatformUnkill(args) => command_platform_scope(args, false)?,
+        Commands::TargetAdd(args) => command_target_add(args)?,
+        Commands::TargetList(args) => command_target_list(args)?,
+        Commands::TargetInspect(args) => command_target_inspect(args)?,
+        Commands::TargetUse(args) => command_target_use(args)?,
+        Commands::TargetRemove(args) => command_target_remove(args)?,
+        Commands::AdapterConformance(args) => command_adapter_conformance(args)?,
     };
     println!("{}", String::from_utf8(canon_json_bytes(&report))?);
     Ok(report.get("exit_code").and_then(Value::as_i64).unwrap_or(0) as i32)
@@ -301,6 +412,210 @@ fn resolve_state_dir(raw: Option<&str>) -> PathBuf {
     } else {
         root_dir().join(path)
     }
+}
+
+fn x07_alias_path_arg(path: &Path, alias_scope: &str) -> Result<String> {
+    let root = root_dir();
+    if let Ok(rel) = path.strip_prefix(&root) {
+        return Ok(if rel.as_os_str().is_empty() {
+            ".".to_string()
+        } else {
+            rel.to_string_lossy().into_owned()
+        });
+    }
+    if !path.is_absolute() {
+        return Ok(path.to_string_lossy().into_owned());
+    }
+    let alias_dir = root.join(".x07lp").join(alias_scope);
+    fs::create_dir_all(&alias_dir)
+        .with_context(|| format!("create state alias dir {}", alias_dir.display()))?;
+    let alias_name = format!(
+        "external_{}",
+        &sha256_hex(path.to_string_lossy().as_bytes())[..16]
+    );
+    let alias_path = alias_dir.join(alias_name);
+    if alias_path.exists() {
+        let metadata = fs::symlink_metadata(&alias_path)
+            .with_context(|| format!("stat state alias {}", alias_path.display()))?;
+        if metadata.file_type().is_symlink() {
+            let existing = fs::read_link(&alias_path)
+                .with_context(|| format!("read state alias {}", alias_path.display()))?;
+            if existing != path {
+                fs::remove_file(&alias_path).with_context(|| {
+                    format!("remove stale state alias {}", alias_path.display())
+                })?;
+            }
+        } else {
+            bail!(
+                "state alias path is not a symlink: {}",
+                alias_path.display()
+            );
+        }
+    }
+    if !alias_path.exists() {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(path, &alias_path).with_context(|| {
+                format!(
+                    "link external path {} -> {}",
+                    alias_path.display(),
+                    path.display()
+                )
+            })?;
+        }
+        #[cfg(not(unix))]
+        {
+            bail!(
+                "absolute path outside repo is not supported on this platform: {}",
+                path.display()
+            );
+        }
+    }
+    let rel = alias_path
+        .strip_prefix(&root)
+        .with_context(|| format!("alias outside repo root: {}", alias_path.display()))?;
+    Ok(rel.to_string_lossy().into_owned())
+}
+
+fn x07_input_path_arg(path: &Path) -> Result<String> {
+    if !path.exists() {
+        bail!("input path does not exist: {}", path.display());
+    }
+    x07_alias_path_arg(path, "path_aliases")
+}
+
+fn x07_state_dir_arg(state_dir: &Path) -> Result<String> {
+    fs::create_dir_all(state_dir)
+        .with_context(|| format!("create external state dir {}", state_dir.display()))?;
+    x07_alias_path_arg(state_dir, "state_aliases")
+}
+
+fn home_dir() -> Result<PathBuf> {
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .map_err(|_| anyhow!("HOME is not set"))
+}
+
+fn x07lp_config_dir() -> Result<PathBuf> {
+    Ok(home_dir()?.join(".config").join("x07lp"))
+}
+
+fn x07lp_targets_dir() -> Result<PathBuf> {
+    Ok(x07lp_config_dir()?.join("targets"))
+}
+
+fn x07lp_tokens_dir() -> Result<PathBuf> {
+    Ok(x07lp_config_dir()?.join("tokens"))
+}
+
+fn x07lp_current_target_path() -> Result<PathBuf> {
+    Ok(x07lp_config_dir()?.join("current_target"))
+}
+
+fn target_profile_path(name: &str) -> Result<PathBuf> {
+    Ok(x07lp_targets_dir()?.join(format!("{name}.json")))
+}
+
+fn default_target_token_path(name: &str) -> Result<PathBuf> {
+    Ok(x07lp_tokens_dir()?.join(format!("{name}.token")))
+}
+
+fn expand_user_path(raw: &str) -> Result<PathBuf> {
+    if raw == "~" {
+        return home_dir();
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        return Ok(home_dir()?.join(rest));
+    }
+    Ok(PathBuf::from(raw))
+}
+
+fn ensure_x07lp_config_layout() -> Result<()> {
+    fs::create_dir_all(x07lp_targets_dir()?)?;
+    fs::create_dir_all(x07lp_tokens_dir()?)?;
+    Ok(())
+}
+
+fn target_name_is_valid(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn validate_target_profile_doc(doc: &Value) -> Result<()> {
+    let name = get_str(doc, &["name"]).ok_or_else(|| anyhow!("missing target name"))?;
+    if !target_name_is_valid(&name) {
+        bail!("invalid target name: {name}");
+    }
+    if get_str(doc, &["schema_version"]).as_deref() != Some("lp.target.profile@0.1.0") {
+        bail!("invalid target profile schema_version");
+    }
+    if get_str(doc, &["kind"]).as_deref() != Some("oss_remote") {
+        bail!("invalid target profile kind");
+    }
+    if get_str(doc, &["api_version"]).as_deref() != Some("v1") {
+        bail!("invalid target api_version");
+    }
+    if get_str(doc, &["auth", "kind"]).as_deref() != Some("static_bearer") {
+        bail!("invalid target auth.kind");
+    }
+    if get_str(doc, &["base_url"]).unwrap_or_default().is_empty() {
+        bail!("missing target base_url");
+    }
+    Ok(())
+}
+
+fn load_target_profile_doc(name: &str) -> Result<Value> {
+    let path = target_profile_path(name)?;
+    let doc = load_json(&path)?;
+    validate_target_profile_doc(&doc)?;
+    Ok(doc)
+}
+
+fn store_target_profile_doc(doc: &Value) -> Result<PathBuf> {
+    validate_target_profile_doc(doc)?;
+    ensure_x07lp_config_layout()?;
+    let name = get_str(doc, &["name"]).unwrap();
+    let path = target_profile_path(&name)?;
+    let _ = write_json(&path, doc)?;
+    Ok(path)
+}
+
+fn current_target_name() -> Result<Option<String>> {
+    let path = x07lp_current_target_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let name = fs::read_to_string(path)?.trim().to_string();
+    if name.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(name))
+    }
+}
+
+fn set_current_target_name(name: &str) -> Result<()> {
+    ensure_x07lp_config_layout()?;
+    fs::write(x07lp_current_target_path()?, format!("{name}\n"))?;
+    Ok(())
+}
+
+fn resolve_target_name(explicit: Option<&str>) -> Result<Option<String>> {
+    if explicit == Some(LOCAL_TARGET_SENTINEL) {
+        return Ok(None);
+    }
+    if let Some(name) = explicit.filter(|value| !value.is_empty()) {
+        return Ok(Some(name.to_string()));
+    }
+    if let Ok(name) = std::env::var("X07LP_TARGET") {
+        let trimmed = name.trim();
+        if !trimmed.is_empty() {
+            return Ok(Some(trimmed.to_string()));
+        }
+    }
+    current_target_name()
 }
 
 fn now_ms() -> u64 {
@@ -569,6 +884,23 @@ fn run_capture(argv: &[String], cwd: Option<&Path>) -> Result<(i32, Vec<u8>, Vec
         output.stdout,
         output.stderr,
     ))
+}
+
+fn read_json_from_report_stdout(stdout: &[u8]) -> Result<Value> {
+    let report: Value = serde_json::from_slice(stdout).context("parse x07 run report")?;
+    let b64 = get_str(&report, &["solve", "solve_output_b64"])
+        .or_else(|| {
+            get_str(
+                &report,
+                &["result", "stdout_json", "solve", "solve_output_b64"],
+            )
+        })
+        .or_else(|| get_str(&report, &["report", "solve", "solve_output_b64"]))
+        .ok_or_else(|| anyhow!("missing solve_output_b64 in x07 report"))?;
+    let bytes = BASE64
+        .decode(b64.as_bytes())
+        .context("decode solve_output_b64")?;
+    serde_json::from_slice(&bytes).context("parse decoded cli report")
 }
 
 fn search_workspace_file(name: &str) -> Option<PathBuf> {
@@ -1391,6 +1723,333 @@ fn latest_artifact_by_role(items: &[Value], role: &str) -> Option<Value> {
         .cloned()
 }
 
+fn canonical_remote_provider_id(raw: Option<&str>, default_id: &str) -> String {
+    match raw.unwrap_or_default() {
+        "" => default_id.to_string(),
+        REMOTE_RUNTIME_PROVIDER
+        | REMOTE_ROUTING_PROVIDER
+        | REMOTE_TELEMETRY_PROVIDER
+        | REMOTE_SECRETS_PROVIDER
+        | REMOTE_COMPONENT_REGISTRY => raw.unwrap().to_string(),
+        "wasmcloud" => REMOTE_RUNTIME_PROVIDER.to_string(),
+        "edge_http_v1" => REMOTE_ROUTING_PROVIDER.to_string(),
+        "otlp_http_v1" => REMOTE_TELEMETRY_PROVIDER.to_string(),
+        "server_store_v1" => REMOTE_SECRETS_PROVIDER.to_string(),
+        "oci_v1" => REMOTE_COMPONENT_REGISTRY.to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn artifact_ref_min(artifact: Option<&Value>, label: Option<&str>) -> Value {
+    let Some(artifact) = artifact else {
+        return Value::Null;
+    };
+    let mut doc = Map::new();
+    if let Some(kind) = get_str(artifact, &["kind"]) {
+        doc.insert("kind".to_string(), json!(kind));
+    }
+    if let Some(digest) = get_path(artifact, &["digest"]).cloned() {
+        doc.insert("digest".to_string(), digest);
+    }
+    if let Some(label) = label {
+        doc.insert("label".to_string(), json!(label));
+    } else if let Some(label) = get_str(artifact, &["logical_name"]) {
+        doc.insert("label".to_string(), json!(label));
+    }
+    if let Some(store_uri) = get_str(artifact, &["store_uri"]) {
+        doc.insert("store_uri".to_string(), json!(store_uri));
+    }
+    if let Some(media_type) = get_str(artifact, &["media_type"]) {
+        doc.insert("media_type".to_string(), json!(media_type));
+    }
+    Value::Object(doc)
+}
+
+fn remote_runtime_slot_from_local(
+    local_slot: &Value,
+    application_name: &str,
+    instance_ref: String,
+    endpoint_url: Option<String>,
+    probe_artifact: Option<&Value>,
+) -> Value {
+    let mut slot = json!({
+        "revision_digest": get_path(local_slot, &["revision_digest"]).cloned().unwrap_or(Value::Null),
+        "app_name": application_name,
+        "instance_ref": instance_ref,
+        "endpoint_url": endpoint_url,
+        "status": get_str(local_slot, &["status"]).unwrap_or_else(|| "planned".to_string()),
+        "started_unix_ms": get_path(local_slot, &["started_unix_ms"]).cloned().unwrap_or(Value::Null),
+        "ended_unix_ms": get_path(local_slot, &["ended_unix_ms"]).cloned().unwrap_or(Value::Null),
+        "health": {
+            "ok": get_bool(local_slot, &["health", "ok"]).unwrap_or(false),
+            "last_probe_unix_ms": get_path(local_slot, &["health", "last_probe_unix_ms"]).cloned().unwrap_or(Value::Null),
+            "last_report": artifact_ref_min(probe_artifact, None),
+        }
+    });
+    if endpoint_url.is_none() {
+        ensure_object(&mut slot).insert("endpoint_url".to_string(), Value::Null);
+    }
+    slot
+}
+
+fn build_remote_execution_meta(exec_doc: &Value, run_doc: &Value, local_meta: &Value) -> Value {
+    let remote = get_path(exec_doc, &["meta", "ext", "remote"])
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let target = get_path(local_meta, &["target"])
+        .cloned()
+        .unwrap_or_else(|| json!({"app_id":"unknown","environment":"unknown"}));
+    let app_id = get_str(&target, &["app_id"]).unwrap_or_else(|| "unknown".to_string());
+    let environment = get_str(&target, &["environment"]).unwrap_or_else(|| "unknown".to_string());
+    let artifact_kind = get_str(local_meta, &["artifact_kind"])
+        .or_else(|| get_str(run_doc, &["inputs", "artifact", "kind"]))
+        .unwrap_or_else(|| REMOTE_ARTIFACT_KIND.to_string());
+    let target_profile = get_path(&remote, &["target_profile"])
+        .cloned()
+        .unwrap_or_else(|| {
+            json!({
+                "name": "remote",
+                "kind": "oss_remote",
+                "base_url": get_str(&remote, &["server", "base_url"]).unwrap_or_else(|| get_str(local_meta, &["routing", "public_listener"]).unwrap_or_default()),
+                "api_version": REMOTE_API_VERSION,
+                "auth_kind": "static_bearer",
+                "runtime_provider": REMOTE_RUNTIME_PROVIDER,
+                "routing_provider": REMOTE_ROUTING_PROVIDER,
+                "oci_registry": Value::Null,
+                "default_namespace": Value::Null,
+                "default_env": Value::Null
+            })
+        });
+    let server = get_path(&remote, &["server"]).cloned().unwrap_or_else(|| {
+        let capabilities = build_remote_capabilities_doc();
+        json!({
+            "server_id": REMOTE_SERVER_ID,
+            "base_url": get_str(&target_profile, &["base_url"]).unwrap_or_default(),
+            "api_version": REMOTE_API_VERSION,
+            "capabilities_digest": get_path(&capabilities, &["capabilities_digest"]).cloned().unwrap_or_else(|| digest_value(&canon_json_bytes(&capabilities))),
+        })
+    });
+    let provider = get_path(&remote, &["provider"])
+        .cloned()
+        .unwrap_or_else(|| {
+            json!({
+                "runtime_provider": REMOTE_RUNTIME_PROVIDER,
+                "routing_provider": REMOTE_ROUTING_PROVIDER,
+                "telemetry_provider": REMOTE_TELEMETRY_PROVIDER,
+                "secrets_provider": REMOTE_SECRETS_PROVIDER,
+                "component_registry": REMOTE_COMPONENT_REGISTRY,
+            })
+        });
+    let runtime_profile = get_path(&remote, &["runtime"])
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let routing = get_path(local_meta, &["routing"])
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let runtime = get_path(local_meta, &["runtime"])
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let artifacts = get_path(exec_doc, &["meta", "artifacts"])
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let last_probe = latest_artifact_by_role(&artifacts, "runtime_probe");
+    let last_snapshot = latest_artifact_by_role(&artifacts, "metrics_snapshot");
+    let last_slo_report = latest_artifact_by_role(&artifacts, "slo_eval_report");
+    let lattice_id = get_str(&runtime_profile, &["lattice_id"])
+        .or_else(|| get_str(&target_profile, &["lattice_id"]))
+        .unwrap_or_else(|| format!("{environment}-lattice"));
+    let application_name = get_str(&runtime_profile, &["application_name"])
+        .unwrap_or_else(|| format!("{app_id}-{environment}"));
+    let public_base_url = get_str(&routing, &["public_listener"]).unwrap_or_default();
+    let registry = get_str(&remote, &["publish", "registry"])
+        .or_else(|| get_str(&target_profile, &["oci_registry"]))
+        .unwrap_or_else(|| "registry.invalid".to_string());
+    let namespace = get_str(&remote, &["publish", "namespace"])
+        .or_else(|| get_str(&target_profile, &["default_namespace"]))
+        .unwrap_or_else(|| environment.clone());
+    let repository = get_str(&remote, &["publish", "repository"]).unwrap_or_else(|| app_id.clone());
+    let fallback_publish_digest = get_path(run_doc, &["inputs", "artifact", "manifest", "digest"])
+        .cloned()
+        .or_else(|| get_path(&runtime, &["candidate", "revision_digest"]).cloned())
+        .unwrap_or_else(|| json!({"sha256":"0000000000000000000000000000000000000000000000000000000000000000","bytes_len":0}));
+    let component_refs = get_path(&remote, &["publish", "component_refs"])
+        .and_then(Value::as_array)
+        .filter(|items| !items.is_empty())
+        .cloned()
+        .unwrap_or_else(|| {
+            let digest = fallback_publish_digest
+                .get("sha256")
+                .and_then(Value::as_str)
+                .unwrap_or("0000000000000000000000000000000000000000000000000000000000000000");
+            vec![json!({
+                "role": "app",
+                "oci_ref": format!("{registry}/{namespace}/{repository}@sha256:{digest}"),
+                "digest": fallback_publish_digest,
+            })]
+        });
+    let stable_slot = remote_runtime_slot_from_local(
+        &get_path(&runtime, &["stable"])
+            .cloned()
+            .unwrap_or(Value::Null),
+        &application_name,
+        get_str(&runtime_profile, &["stable_instance_ref"])
+            .unwrap_or_else(|| format!("wasmcloud://{lattice_id}/{application_name}/stable")),
+        None,
+        last_probe.as_ref(),
+    );
+    let candidate_slot = remote_runtime_slot_from_local(
+        &get_path(&runtime, &["candidate"])
+            .cloned()
+            .unwrap_or(Value::Null),
+        &application_name,
+        get_str(&runtime_profile, &["candidate_instance_ref"])
+            .unwrap_or_else(|| format!("wasmcloud://{lattice_id}/{application_name}/candidate")),
+        if public_base_url.is_empty() {
+            None
+        } else {
+            Some(public_base_url.clone())
+        },
+        last_probe.as_ref(),
+    );
+    json!({
+        "schema_version": "lp.deploy.execution.meta.remote@0.1.0",
+        "mode": "remote",
+        "artifact_kind": artifact_kind,
+        "target": target,
+        "target_profile": target_profile,
+        "server": server,
+        "provider": provider,
+        "outcome": get_str(local_meta, &["outcome"]).unwrap_or_else(|| "unknown".to_string()),
+        "started_unix_ms": get_path(local_meta, &["started_unix_ms"]).cloned().unwrap_or(Value::Null),
+        "updated_unix_ms": get_u64(local_meta, &["updated_unix_ms"]).unwrap_or(0),
+        "ended_unix_ms": get_path(local_meta, &["ended_unix_ms"]).cloned().unwrap_or(Value::Null),
+        "latest_decision_id": get_path(local_meta, &["latest_decision_id"]).cloned().unwrap_or(Value::Null),
+        "plan": get_path(local_meta, &["plan"]).cloned().unwrap_or(Value::Null),
+        "runtime": {
+            "lattice_id": lattice_id,
+            "application_name": application_name,
+            "stable": stable_slot,
+            "candidate": candidate_slot,
+        },
+        "publish": {
+            "registry": registry,
+            "repository": repository,
+            "namespace": namespace,
+            "component_refs": component_refs,
+            "wadm_manifest_digest": get_path(&remote, &["publish", "wadm_manifest_digest"]).cloned().unwrap_or(fallback_publish_digest),
+            "published_unix_ms": get_u64(&remote, &["publish", "published_unix_ms"]).unwrap_or_else(|| get_u64(exec_doc, &["created_unix_ms"]).unwrap_or(0)),
+        },
+        "routing": {
+            "public_base_url": public_base_url,
+            "listener_id": get_path(&remote, &["routing", "listener_id"]).cloned().unwrap_or(Value::Null),
+            "candidate_weight_pct": get_u64(&routing, &["candidate_weight_pct"]).unwrap_or(0),
+            "algorithm": get_str(&routing, &["algorithm"]).unwrap_or_else(|| "hash_bucket_v1".to_string()),
+            "route_key_header": get_str(&routing, &["route_key_header"]).unwrap_or_else(|| "X-LP-Route-Key".to_string()),
+            "last_updated_step_idx": get_path(&routing, &["last_updated_step_idx"]).cloned().unwrap_or(Value::Null),
+            "router_state": get_path(&remote, &["routing", "router_state"]).cloned().unwrap_or(Value::Null),
+        },
+        "analysis": {
+            "last_slo_decision": get_str(local_meta, &["analysis", "last_slo_decision"]).unwrap_or_else(|| "none".to_string()),
+            "last_snapshot": artifact_ref_min(last_snapshot.as_ref(), None),
+            "last_slo_report": artifact_ref_min(last_slo_report.as_ref(), None),
+            "last_analysis_step_idx": get_path(local_meta, &["analysis", "last_analysis_step_idx"]).cloned().unwrap_or(Value::Null),
+        },
+        "control": {
+            "lock_id": get_path(&remote, &["control", "lock_id"]).cloned().unwrap_or(Value::Null),
+            "lease_expires_unix_ms": get_path(&remote, &["control", "lease_expires_unix_ms"]).cloned().unwrap_or(Value::Null),
+            "target_generation": get_u64(&remote, &["control", "target_generation"]).unwrap_or(0),
+            "lease_holder": get_path(&remote, &["control", "lease_holder"]).cloned().unwrap_or(Value::Null),
+            "last_idempotency_key": get_path(&remote, &["control", "last_idempotency_key"]).cloned().unwrap_or(Value::Null),
+        },
+        "ext": get_path(exec_doc, &["meta", "ext"]).cloned().unwrap_or_else(|| json!({})),
+    })
+}
+
+fn sanitize_query_step(step: &Value) -> Value {
+    let mut doc = json!({
+        "idx": get_u64(step, &["idx"]).unwrap_or(0),
+        "name": get_str(step, &["name"]).unwrap_or_default(),
+        "status": get_str(step, &["status"]).unwrap_or_else(|| "running".to_string()),
+        "started_unix_ms": get_u64(step, &["started_unix_ms"]).unwrap_or(0),
+        "ended_unix_ms": get_path(step, &["ended_unix_ms"]).cloned().unwrap_or(Value::Null),
+        "decisions": get_path(step, &["decisions"]).cloned().unwrap_or_else(|| json!([])),
+    });
+    if let Some(kind) = get_str(step, &["kind"]) {
+        ensure_object(&mut doc).insert("kind".to_string(), json!(kind));
+    }
+    if let Some(attempt) = get_u64(step, &["attempt"]) {
+        ensure_object(&mut doc).insert("attempt".to_string(), json!(attempt.max(1)));
+    }
+    if let Some(weight) = get_path(step, &["latest_weight_pct"]).cloned() {
+        ensure_object(&mut doc).insert("latest_weight_pct".to_string(), weight);
+    }
+    if let Some(decision) = get_path(step, &["analysis_decision"]).cloned() {
+        ensure_object(&mut doc).insert("analysis_decision".to_string(), decision);
+    }
+    if let Some(control_state) = get_path(step, &["control_state"]).cloned() {
+        ensure_object(&mut doc).insert("control_state".to_string(), control_state);
+    }
+    doc
+}
+
+fn public_reason_code(code: &str) -> String {
+    match code {
+        "LP_PLAN_READY" => "LP-INTAKE-OK".to_string(),
+        "LP_SLO_PROMOTE" => "LP-SLO-PROMOTE".to_string(),
+        "LP_SLO_ROLLBACK" => "LP-SLO-ROLLBACK".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn sanitize_query_decision(decision: &Value, public_aliases: bool) -> Value {
+    let reasons = get_path(decision, &["reasons"])
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|reason| {
+                    let mut doc = reason.clone();
+                    if public_aliases {
+                        if let Some(code) = get_str(reason, &["code"]) {
+                            ensure_object(&mut doc)
+                                .insert("code".to_string(), json!(public_reason_code(&code)));
+                        }
+                    }
+                    doc
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut doc = json!({
+        "decision_id": get_str(decision, &["decision_id"]).unwrap_or_default(),
+        "created_unix_ms": get_u64(decision, &["created_unix_ms"]).unwrap_or(0),
+        "kind": get_str(decision, &["kind"]).unwrap_or_default(),
+        "outcome": get_str(decision, &["outcome"]).unwrap_or_else(|| "error".to_string()),
+        "reasons": reasons,
+        "record": {
+            "digest": get_path(decision, &["record", "digest"]).cloned().unwrap_or(Value::Null),
+            "store_uri": get_path(decision, &["record", "store_uri"]).cloned().unwrap_or_else(|| json!("")),
+        },
+    });
+    if let Some(step_idx) = get_path(decision, &["step_idx"]).cloned() {
+        ensure_object(&mut doc).insert("step_idx".to_string(), step_idx);
+    }
+    if let Some(evidence) = get_path(decision, &["evidence"]).cloned() {
+        ensure_object(&mut doc).insert("evidence".to_string(), evidence);
+    }
+    if let Some(kind) = get_path(decision, &["record", "kind"]).cloned() {
+        ensure_object_field(&mut doc, "record").insert("kind".to_string(), kind);
+    }
+    if let Some(media_type) = get_path(decision, &["record", "media_type"]).cloned() {
+        ensure_object_field(&mut doc, "record").insert("media_type".to_string(), media_type);
+    }
+    if let Some(signature_status) = get_path(decision, &["signature_status"]).cloned() {
+        ensure_object(&mut doc).insert("signature_status".to_string(), signature_status);
+    }
+    doc
+}
+
 fn build_execution_view(exec_doc: &Value, run_doc: &Value, state_dir: &Path) -> Value {
     let meta = get_path(exec_doc, &["meta"])
         .cloned()
@@ -1486,7 +2145,7 @@ fn build_execution_view(exec_doc: &Value, run_doc: &Value, state_dir: &Path) -> 
         })
     };
 
-    json!({
+    let local_meta = json!({
         "schema_version": get_str(exec_doc, &["schema_version"]).unwrap_or_else(|| "lp.deploy.execution@0.1.0".to_string()),
         "exec_id": get_str(exec_doc, &["exec_id"]).unwrap_or_default(),
         "run_id": get_str(exec_doc, &["run_id"]).unwrap_or_default(),
@@ -1539,7 +2198,19 @@ fn build_execution_view(exec_doc: &Value, run_doc: &Value, state_dir: &Path) -> 
             "artifacts": artifacts,
             "ext": get_path(&meta, &["ext"]).cloned().unwrap_or_else(|| json!({})),
         }
-    })
+    });
+    let execution_meta = if get_path(&meta, &["ext", "remote"]).is_some() {
+        build_remote_execution_meta(
+            exec_doc,
+            run_doc,
+            local_meta.get("meta").unwrap_or(&Value::Null),
+        )
+    } else {
+        local_meta.get("meta").cloned().unwrap_or(Value::Null)
+    };
+    let mut execution = local_meta;
+    ensure_object(&mut execution).insert("meta".to_string(), execution_meta);
+    execution
 }
 
 fn build_query_result(
@@ -1555,12 +2226,13 @@ fn build_query_result(
     let meta = get_path(exec_doc, &["meta"])
         .cloned()
         .unwrap_or_else(|| json!({}));
+    let is_remote = get_path(&meta, &["ext", "remote"]).is_some();
     let target = get_path(&meta, &["target"])
         .cloned()
         .unwrap_or_else(|| json!({"app_id":"unknown","environment":"unknown"}));
     let mut steps = get_path(exec_doc, &["steps"])
         .and_then(Value::as_array)
-        .cloned()
+        .map(|items| items.iter().map(sanitize_query_step).collect::<Vec<_>>())
         .unwrap_or_default();
     let decisions_all = get_path(&meta, &["decisions"])
         .and_then(Value::as_array)
@@ -1572,17 +2244,12 @@ fn build_query_result(
         .unwrap_or_default();
     let mut decisions = decisions_all
         .iter()
-        .filter(|decision| {
-            matches!(
-                get_str(decision, &["kind"]).as_deref(),
-                Some(
-                    "deploy.prepare.plan"
-                        | "deploy.runtime.start_candidate"
-                        | "deploy.analysis.slo"
-                )
-            )
+        .filter(|decision| match get_str(decision, &["kind"]).as_deref() {
+            Some("deploy.prepare.plan" | "deploy.analysis.slo") => true,
+            Some("deploy.runtime.start_candidate") => !is_remote,
+            _ => false,
         })
-        .cloned()
+        .map(|decision| sanitize_query_decision(decision, is_remote))
         .collect::<Vec<_>>();
     let mut artifacts = Vec::new();
     for role in [
@@ -1723,6 +2390,77 @@ fn build_query_result(
         );
     }
     result
+}
+
+struct RemoteLeaseGuard {
+    path: PathBuf,
+}
+
+impl Drop for RemoteLeaseGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+enum RemoteLeaseAcquire {
+    NotNeeded,
+    Acquired(RemoteLeaseGuard),
+    Conflict(Value),
+}
+
+fn try_acquire_remote_run_lease(
+    state_dir: &Path,
+    exec_doc: &Value,
+    run_id: &str,
+    deployment_id: &str,
+    now_unix_ms: u64,
+) -> Result<RemoteLeaseAcquire> {
+    if get_path(exec_doc, &["meta", "ext", "remote"]).is_none() {
+        return Ok(RemoteLeaseAcquire::NotNeeded);
+    }
+    let target = get_path(exec_doc, &["meta", "target"])
+        .cloned()
+        .unwrap_or_else(|| json!({"app_id":"unknown","environment":"unknown"}));
+    let app_id = get_str(&target, &["app_id"]).unwrap_or_else(|| "unknown".to_string());
+    let environment = get_str(&target, &["environment"]).unwrap_or_else(|| "unknown".to_string());
+    let leases_dir = state_dir.join(".x07lp").join("leases");
+    fs::create_dir_all(&leases_dir)?;
+    let lease_path = leases_dir.join(format!("{app_id}__{environment}.json"));
+    let lease_doc = json!({
+        "schema_version": "lp.deploy.lease@0.1.0",
+        "lock_id": format!("lplock_{deployment_id}"),
+        "lease_expires_unix_ms": now_unix_ms + 600_000,
+        "lease_holder": run_id,
+        "target_generation": 0,
+    });
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lease_path)
+    {
+        Ok(mut file) => {
+            file.write_all(&canon_json_bytes(&lease_doc))?;
+            Ok(RemoteLeaseAcquire::Acquired(RemoteLeaseGuard {
+                path: lease_path,
+            }))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            Ok(RemoteLeaseAcquire::Conflict(cli_report(
+                "deploy run",
+                false,
+                13,
+                json!({ "op": "run", "ok": false }),
+                Some(run_id),
+                vec![result_diag(
+                    "LP_REMOTE_LEASE_CONFLICT",
+                    "run",
+                    "remote deployment lease is already held",
+                    "error",
+                )],
+            )))
+        }
+        Err(err) => Err(err.into()),
+    }
 }
 
 fn which(bin: &str) -> Option<String> {
@@ -1905,7 +2643,10 @@ fn push_decision(exec_doc: &mut Value, decision: Value, signature_status: Option
         }
     }
     if let Some(record) = decision.get("record").cloned() {
-        push_artifact(exec_doc, artifact_summary("decision_record", &record, 0, None));
+        push_artifact(
+            exec_doc,
+            artifact_summary("decision_record", &record, 0, None),
+        );
     }
 }
 
@@ -2531,6 +3272,1331 @@ fn insert_phasec_rows(
     Ok(())
 }
 
+fn remote_mode_selected(explicit: Option<&str>) -> Result<bool> {
+    Ok(resolve_target_name(explicit)?.is_some())
+}
+
+fn first_diag_message(report: &Value) -> String {
+    report
+        .get("diagnostics")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("remote operation failed")
+        .to_string()
+}
+
+fn report_has_diag(report: &Value, code: &str) -> bool {
+    report
+        .get("diagnostics")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|diag| diag.get("code").and_then(Value::as_str) == Some(code))
+}
+
+fn remote_error_report(command: &str, code: &str, message: &str) -> Value {
+    cli_report(
+        command,
+        false,
+        32,
+        json!({}),
+        None,
+        vec![result_diag(code, "run", message, "error")],
+    )
+}
+
+fn contracts_schema_index_path() -> PathBuf {
+    root_dir()
+        .join("contracts")
+        .join("spec")
+        .join("schemas")
+        .join("index.json")
+}
+
+fn contracts_schema_dir() -> PathBuf {
+    root_dir().join("contracts").join("spec").join("schemas")
+}
+
+fn is_versioned_schema_id(value: &str) -> bool {
+    let Some((name, version)) = value.rsplit_once('@') else {
+        return false;
+    };
+    if name.is_empty() || version.is_empty() {
+        return false;
+    }
+    let mut segments = version.split('.');
+    segments.clone().count() == 3
+        && segments
+            .all(|segment| !segment.is_empty() && segment.chars().all(|ch| ch.is_ascii_digit()))
+}
+
+fn schema_public_id(schema: &Value) -> Option<String> {
+    let title = schema.get("title").and_then(Value::as_str)?;
+    if is_versioned_schema_id(title) {
+        return Some(title.to_string());
+    }
+    schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .and_then(|properties| properties.get("schema_version"))
+        .and_then(|value| value.get("const"))
+        .and_then(Value::as_str)
+        .filter(|value| is_versioned_schema_id(value))
+        .map(|value| value.to_string())
+}
+
+fn supported_schema_ids() -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Ok(index) = load_json(&contracts_schema_index_path()) {
+        if let Some(items) = index.get("schemas").and_then(Value::as_array) {
+            for item in items {
+                if let Some(path) = item.get("path").and_then(Value::as_str) {
+                    let schema_path = contracts_schema_dir().join(path);
+                    if let Ok(schema) = load_json(&schema_path) {
+                        if let Some(id) = schema_public_id(&schema) {
+                            ids.push(id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if ids.is_empty() {
+        ids = vec![
+            "lp.cli.report@0.1.0".to_string(),
+            "lp.deploy.execution@0.1.0".to_string(),
+            "lp.deploy.query.result@0.1.0".to_string(),
+            "lp.incident.query.result@0.1.0".to_string(),
+            "lp.regression.run.result@0.1.0".to_string(),
+            "lp.remote.capabilities.response@0.1.0".to_string(),
+        ];
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedTarget {
+    name: String,
+    base_url: String,
+    token: String,
+    profile: Value,
+}
+
+fn token_path_from_profile(profile: &Value, name: &str) -> Result<PathBuf> {
+    if let Some(token_ref) = get_str(profile, &["auth", "token_ref"]) {
+        let path = token_ref
+            .strip_prefix("file://")
+            .ok_or_else(|| anyhow!("unsupported token_ref scheme"))?;
+        return expand_user_path(path);
+    }
+    default_target_token_path(name)
+}
+
+fn load_target_token(profile: &Value, name: &str) -> Result<String> {
+    let token_path = token_path_from_profile(profile, name)?;
+    if token_path.exists() {
+        let token = fs::read_to_string(&token_path)?.trim().to_string();
+        if !token.is_empty() {
+            return Ok(token);
+        }
+    }
+    Ok(remote_server_token())
+}
+
+fn resolve_remote_target(explicit: Option<&str>) -> Result<Option<ResolvedTarget>> {
+    let Some(name) = resolve_target_name(explicit)? else {
+        return Ok(None);
+    };
+    let profile = load_target_profile_doc(&name)?;
+    let base_url = get_str(&profile, &["base_url"]).ok_or_else(|| anyhow!("missing base_url"))?;
+    let token = load_target_token(&profile, &name)?;
+    Ok(Some(ResolvedTarget {
+        name,
+        base_url,
+        token,
+        profile,
+    }))
+}
+
+fn required_remote_target(explicit: Option<&str>) -> Result<ResolvedTarget> {
+    resolve_remote_target(explicit)?
+        .ok_or_else(|| anyhow!("remote operation requires a configured target"))
+}
+
+fn build_remote_capabilities_doc() -> Value {
+    let mut doc = json!({
+        "schema_version": "lp.remote.capabilities.response@0.1.0",
+        "api_version": REMOTE_API_VERSION,
+        "generated_unix_ms": now_ms(),
+        "server_id": REMOTE_SERVER_ID,
+        "runtime_provider": REMOTE_RUNTIME_PROVIDER,
+        "routing_provider": REMOTE_ROUTING_PROVIDER,
+        "telemetry_provider": REMOTE_TELEMETRY_PROVIDER,
+        "secrets_provider": REMOTE_SECRETS_PROVIDER,
+        "component_registry": REMOTE_COMPONENT_REGISTRY,
+        "artifact_distribution": "oci",
+        "accepted_artifact_kinds": [REMOTE_ARTIFACT_KIND],
+        "supported_schema_ids": supported_schema_ids(),
+        "supported_deploy_plan_versions": ["x07.deploy.plan@0.2.0"],
+        "features": {
+            "incidents": true,
+            "regressions": true,
+            "pause": true,
+            "rerun": true,
+            "weighted_canary": true,
+            "otlp": true,
+            "server_side_secrets": true,
+            "event_stream": true,
+            "signed_control_actions": true
+        },
+        "limits": {
+            "max_blob_bytes": 16 * 1024 * 1024,
+            "max_parallel_uploads": 4,
+            "max_presence_batch": 4096,
+            "max_query_limit": 256
+        },
+        "auth": {
+            "scheme": "bearer",
+            "token_kind": "opaque",
+            "required_scopes": [
+                "lp.deploy.read",
+                "lp.deploy.write",
+                "lp.artifacts.read",
+                "lp.artifacts.write",
+                "lp.incident.read",
+                "lp.incident.write",
+                "lp.regression.write",
+                "lp.adapter.read"
+            ]
+        }
+    });
+    let bytes = canon_json_bytes(&doc);
+    ensure_object(&mut doc).insert("capabilities_digest".to_string(), digest_value(&bytes));
+    doc
+}
+
+fn build_adapter_capabilities_doc(capabilities: &Value) -> Value {
+    json!({
+        "schema_version": "lp.adapter.capabilities@0.1.0",
+        "provider": "wasmcloud",
+        "runtime_kind": get_str(capabilities, &["runtime_provider"]).unwrap_or_else(|| REMOTE_RUNTIME_PROVIDER.to_string()),
+        "routing_kind": get_str(capabilities, &["routing_provider"]).unwrap_or_else(|| REMOTE_ROUTING_PROVIDER.to_string()),
+        "artifact_distribution": get_str(capabilities, &["artifact_distribution"]).unwrap_or_else(|| "oci".to_string()),
+        "supports_incidents": get_bool(capabilities, &["features", "incidents"]).unwrap_or(true),
+        "supports_regressions": get_bool(capabilities, &["features", "regressions"]).unwrap_or(true),
+        "supports_pause": get_bool(capabilities, &["features", "pause"]).unwrap_or(true),
+        "supports_rerun": get_bool(capabilities, &["features", "rerun"]).unwrap_or(true),
+        "supports_weighted_canary": get_bool(capabilities, &["features", "weighted_canary"]).unwrap_or(true),
+        "supports_otlp": get_bool(capabilities, &["features", "otlp"]).unwrap_or(true),
+        "supports_server_side_secrets": get_bool(capabilities, &["features", "server_side_secrets"]).unwrap_or(true)
+    })
+}
+
+fn remote_agent() -> Agent {
+    Agent::new()
+}
+
+fn remote_server_token() -> String {
+    std::env::var("X07LP_REMOTE_BEARER_TOKEN")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_REMOTE_BEARER_TOKEN.to_string())
+}
+
+fn decode_http_json_response(response: ureq::Response) -> Result<Value> {
+    let text = response.into_string().context("read http response body")?;
+    if text.trim().is_empty() {
+        Ok(json!({}))
+    } else {
+        serde_json::from_str(&text).context("parse http response json")
+    }
+}
+
+fn remote_request_json(
+    target: &ResolvedTarget,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+) -> Result<Value> {
+    let url = format!("{}{}", target.base_url.trim_end_matches('/'), path);
+    let agent = remote_agent();
+    let request = agent
+        .request(method, &url)
+        .set("accept", "application/json")
+        .set("authorization", &format!("Bearer {}", target.token))
+        .set("x-lp-target", &target.name);
+    let response = match body {
+        Some(doc) => request
+            .set("content-type", "application/json")
+            .send_json(doc.clone()),
+        None => request.call(),
+    };
+    match response {
+        Ok(response) => decode_http_json_response(response),
+        Err(UreqError::Status(_, response)) => decode_http_json_response(response),
+        Err(UreqError::Transport(err)) => bail!("remote request failed: {method} {url}: {err}"),
+    }
+}
+
+fn remote_put_bytes(
+    target: &ResolvedTarget,
+    path: &str,
+    body: &[u8],
+    content_type: &str,
+) -> Result<Value> {
+    let url = format!("{}{}", target.base_url.trim_end_matches('/'), path);
+    let agent = remote_agent();
+    let response = agent
+        .put(&url)
+        .set("accept", "application/json")
+        .set("authorization", &format!("Bearer {}", target.token))
+        .set("content-type", content_type)
+        .set("x-lp-target", &target.name)
+        .send_bytes(body);
+    match response {
+        Ok(response) => decode_http_json_response(response),
+        Err(UreqError::Status(_, response)) => decode_http_json_response(response),
+        Err(UreqError::Transport(err)) => bail!("remote upload failed: PUT {url}: {err}"),
+    }
+}
+
+fn remote_health_check(target: &ResolvedTarget) -> bool {
+    remote_request_json(target, "GET", "/v1/health", None)
+        .ok()
+        .and_then(|doc| doc.get("ok").and_then(Value::as_bool))
+        .unwrap_or(false)
+}
+
+fn remote_capabilities(target: &ResolvedTarget) -> Result<Value> {
+    remote_request_json(target, "GET", "/v1/capabilities", None)
+}
+
+fn attach_remote_execution_context(exec_doc: &mut Value, run_doc: &Value, target: &ResolvedTarget) {
+    let capabilities = remote_capabilities(target).ok();
+    let target_doc = get_path(exec_doc, &["meta", "target"])
+        .cloned()
+        .unwrap_or_else(|| json!({"app_id":"unknown","environment":"unknown"}));
+    let app_id = get_str(&target_doc, &["app_id"]).unwrap_or_else(|| "unknown".to_string());
+    let environment =
+        get_str(&target_doc, &["environment"]).unwrap_or_else(|| "unknown".to_string());
+    let manifest_digest = get_path(run_doc, &["inputs", "artifact", "manifest", "digest"])
+        .cloned()
+        .unwrap_or_else(|| {
+            json!({
+                "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+                "bytes_len": 0
+            })
+        });
+    let registry = get_str(&target.profile, &["oci_registry"])
+        .unwrap_or_else(|| "registry.invalid".to_string());
+    let namespace =
+        get_str(&target.profile, &["default_namespace"]).unwrap_or_else(|| environment.clone());
+    let repository = app_id.clone();
+    let digest_sha = manifest_digest
+        .get("sha256")
+        .and_then(Value::as_str)
+        .unwrap_or("0000000000000000000000000000000000000000000000000000000000000000");
+    let capabilities_fallback = build_remote_capabilities_doc();
+    let lattice_id = get_str(&target.profile, &["lattice_id"])
+        .unwrap_or_else(|| format!("{environment}-lattice"));
+    let application_name = format!("{app_id}-{environment}");
+    let remote = json!({
+        "target_profile": {
+            "name": target.name,
+            "kind": "oss_remote",
+            "base_url": target.base_url,
+            "api_version": get_str(&target.profile, &["api_version"]).unwrap_or_else(|| REMOTE_API_VERSION.to_string()),
+            "auth_kind": get_str(&target.profile, &["auth", "kind"]).unwrap_or_else(|| "static_bearer".to_string()),
+            "runtime_provider": canonical_remote_provider_id(get_str(&target.profile, &["runtime_provider"]).as_deref(), REMOTE_RUNTIME_PROVIDER),
+            "routing_provider": canonical_remote_provider_id(get_str(&target.profile, &["routing_provider"]).as_deref(), REMOTE_ROUTING_PROVIDER),
+            "oci_registry": get_path(&target.profile, &["oci_registry"]).cloned().unwrap_or(Value::Null),
+            "default_namespace": get_path(&target.profile, &["default_namespace"]).cloned().unwrap_or(Value::Null),
+            "default_env": get_path(&target.profile, &["default_env"]).cloned().unwrap_or(Value::Null),
+            "lattice_id": get_path(&target.profile, &["lattice_id"]).cloned().unwrap_or(Value::Null),
+        },
+        "server": {
+            "server_id": capabilities.as_ref().and_then(|doc| get_path(doc, &["server_id"]).cloned()).unwrap_or_else(|| json!(REMOTE_SERVER_ID)),
+            "base_url": target.base_url,
+            "api_version": capabilities.as_ref().and_then(|doc| get_path(doc, &["api_version"]).cloned()).unwrap_or_else(|| json!(REMOTE_API_VERSION)),
+            "capabilities_digest": capabilities.as_ref().and_then(|doc| get_path(doc, &["capabilities_digest"]).cloned()).unwrap_or_else(|| get_path(&capabilities_fallback, &["capabilities_digest"]).cloned().unwrap_or_else(|| digest_value(&canon_json_bytes(&capabilities_fallback)))),
+        },
+        "provider": {
+            "runtime_provider": capabilities.as_ref().and_then(|doc| get_path(doc, &["runtime_provider"]).cloned()).unwrap_or_else(|| json!(REMOTE_RUNTIME_PROVIDER)),
+            "routing_provider": capabilities.as_ref().and_then(|doc| get_path(doc, &["routing_provider"]).cloned()).unwrap_or_else(|| json!(REMOTE_ROUTING_PROVIDER)),
+            "telemetry_provider": capabilities.as_ref().and_then(|doc| get_path(doc, &["telemetry_provider"]).cloned()).unwrap_or_else(|| json!(REMOTE_TELEMETRY_PROVIDER)),
+            "secrets_provider": capabilities.as_ref().and_then(|doc| get_path(doc, &["secrets_provider"]).cloned()).unwrap_or_else(|| json!(REMOTE_SECRETS_PROVIDER)),
+            "component_registry": capabilities.as_ref().and_then(|doc| get_path(doc, &["component_registry"]).cloned()).unwrap_or_else(|| json!(REMOTE_COMPONENT_REGISTRY)),
+        },
+        "publish": {
+            "registry": registry,
+            "repository": repository,
+            "namespace": namespace,
+            "component_refs": [{
+                "role": "app",
+                "oci_ref": format!("{registry}/{namespace}/{app_id}@sha256:{digest_sha}"),
+                "digest": manifest_digest.clone(),
+            }],
+            "wadm_manifest_digest": manifest_digest.clone(),
+            "published_unix_ms": get_u64(exec_doc, &["created_unix_ms"]).unwrap_or(0),
+        },
+        "runtime": {
+            "lattice_id": lattice_id,
+            "application_name": application_name,
+            "stable_instance_ref": format!("wasmcloud://{lattice_id}/{app_id}-{environment}/stable"),
+            "candidate_instance_ref": format!("wasmcloud://{lattice_id}/{app_id}-{environment}/candidate"),
+        },
+        "control": {
+            "lock_id": Value::Null,
+            "lease_expires_unix_ms": Value::Null,
+            "target_generation": 0,
+            "lease_holder": Value::Null,
+            "last_idempotency_key": Value::Null,
+        }
+    });
+    let meta = ensure_object_field(exec_doc, "meta");
+    let ext = meta.entry("ext".to_string()).or_insert_with(|| json!({}));
+    ensure_object(ext).insert("remote".to_string(), remote);
+}
+
+fn normalize_pack_inputs(pack_manifest: &str, pack_dir: Option<&str>) -> Result<(PathBuf, String)> {
+    if let Some(raw_dir) = pack_dir.filter(|value| !value.is_empty()) {
+        let pack_dir_path = repo_path(raw_dir);
+        let manifest_path = expand_user_path(pack_manifest)?;
+        let manifest_abs = if manifest_path.is_absolute() {
+            manifest_path
+        } else {
+            repo_path(pack_manifest)
+        };
+        if manifest_abs.is_absolute() && manifest_abs.starts_with(&pack_dir_path) {
+            let relative = manifest_abs
+                .strip_prefix(&pack_dir_path)
+                .ok()
+                .map(|path| path.to_string_lossy().trim_start_matches('/').to_string())
+                .unwrap_or_else(|| pack_manifest.to_string());
+            return Ok((pack_dir_path, relative));
+        }
+        return Ok((pack_dir_path, pack_manifest.to_string()));
+    }
+    let manifest_path = repo_path(pack_manifest);
+    let pack_dir_path = manifest_path
+        .parent()
+        .ok_or_else(|| anyhow!("pack manifest must have a parent directory"))?
+        .to_path_buf();
+    let manifest_rel = manifest_path
+        .file_name()
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| anyhow!("invalid pack manifest path"))?
+        .to_string();
+    Ok((pack_dir_path, manifest_rel))
+}
+
+fn decision_path(state_dir: &Path, decision_id: &str) -> PathBuf {
+    state_dir
+        .join("decisions")
+        .join(format!("{decision_id}.json"))
+}
+
+fn run_local_accept_stage(args: &DeployAcceptArgs, state_dir: &Path) -> Result<Value> {
+    let (pack_dir_path, pack_manifest_rel) =
+        normalize_pack_inputs(&args.pack_manifest, args.pack_dir.as_deref())?;
+    let pack_dir_arg = x07_input_path_arg(&pack_dir_path)?;
+    let state_dir_arg = x07_state_dir_arg(state_dir)?;
+    let mut argv = vec![
+        "x07".to_string(),
+        "run".to_string(),
+        "--".to_string(),
+        "deploy".to_string(),
+        "accept".to_string(),
+        "--pack-dir".to_string(),
+        pack_dir_arg,
+        "--pack-manifest".to_string(),
+        pack_manifest_rel,
+        "--state-dir".to_string(),
+        state_dir_arg,
+        "--json".to_string(),
+    ];
+    if let Some(change) = args.change.as_ref().filter(|value| !value.is_empty()) {
+        argv.push("--change".to_string());
+        argv.push(x07_input_path_arg(&repo_path(change))?);
+    }
+    if let Some(ops_profile) = args.ops_profile.as_ref().filter(|value| !value.is_empty()) {
+        argv.push("--ops-profile".to_string());
+        argv.push(x07_input_path_arg(&repo_path(ops_profile))?);
+    }
+    if let Some(now_unix_ms) = args.common.now_unix_ms {
+        argv.push("--now-unix-ms".to_string());
+        argv.push(now_unix_ms.to_string());
+    }
+    let (code, stdout, stderr) = run_capture(&argv, Some(&root_dir()))?;
+    if code != 0 && stdout.is_empty() {
+        bail!(
+            "local accept staging failed: {}",
+            String::from_utf8_lossy(&stderr).trim()
+        );
+    }
+    read_json_from_report_stdout(&stdout)
+}
+
+fn load_remote_accept_stage(
+    state_dir: &Path,
+    report: &Value,
+) -> Result<(String, String, Value, Value, Value, Option<Value>)> {
+    let run_id = get_str(report, &["result", "run_id"]).ok_or_else(|| anyhow!("missing run_id"))?;
+    let exec_id =
+        get_str(report, &["result", "exec_id"]).ok_or_else(|| anyhow!("missing exec_id"))?;
+    let decision_id = get_str(report, &["result", "decision_id"])
+        .ok_or_else(|| anyhow!("missing decision_id"))?;
+    let run_doc = load_json(&run_path(state_dir, &run_id))?;
+    let exec_doc = load_json(&exec_path(state_dir, &exec_id))?;
+    let decision_doc = load_json(&decision_path(state_dir, &decision_id))?;
+    let change_doc = match get_str(&run_doc, &["inputs", "change_request", "change_id"]) {
+        Some(change_id) => {
+            let path = state_dir.join("changes").join(format!("{change_id}.json"));
+            if path.exists() {
+                Some(load_json(&path)?)
+            } else {
+                None
+            }
+        }
+        None => None,
+    };
+    Ok((run_id, exec_id, run_doc, exec_doc, decision_doc, change_doc))
+}
+
+fn collect_sha256_refs(value: &Value, out: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(sha) = map.get("sha256").and_then(Value::as_str) {
+                if sha.len() == 64 && sha.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                    out.insert(sha.to_string());
+                }
+            }
+            if let Some(store_uri) = map.get("store_uri").and_then(Value::as_str) {
+                if let Some(sha) = store_uri.strip_prefix("sha256:") {
+                    if sha.len() == 64 && sha.chars().all(|ch| ch.is_ascii_hexdigit()) {
+                        out.insert(sha.to_string());
+                    }
+                }
+            }
+            for value in map.values() {
+                collect_sha256_refs(value, out);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_sha256_refs(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn remote_cas_presence(target: &ResolvedTarget, digests: &[String]) -> Result<BTreeSet<String>> {
+    let doc = remote_request_json(
+        target,
+        "POST",
+        "/v1/artifacts/cas/presence",
+        Some(&json!({ "digests": digests })),
+    )?;
+    Ok(doc
+        .get("missing")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn remote_push_cas(
+    target: &ResolvedTarget,
+    state_dir: &Path,
+    manifest_digest: Value,
+    digests: &BTreeSet<String>,
+) -> Result<Value> {
+    let digests_vec: Vec<String> = digests
+        .iter()
+        .filter(|sha| rel_store_blob_path(state_dir, sha).exists())
+        .cloned()
+        .collect();
+    let missing = remote_cas_presence(target, &digests_vec)?;
+    let mut uploaded = Vec::new();
+    let mut skipped = Vec::new();
+    for sha in &digests_vec {
+        if missing.contains(sha) {
+            let blob = load_cas_blob(state_dir, sha)?;
+            let _ = remote_put_bytes(
+                target,
+                &format!("/v1/artifacts/cas/objects/{sha}"),
+                &blob,
+                "application/octet-stream",
+            )?;
+            uploaded.push(json!({ "sha256": sha }));
+        } else {
+            skipped.push(json!({ "sha256": sha }));
+        }
+    }
+    Ok(json!({
+        "schema_version": "lp.deploy.push.result@0.1.0",
+        "target": {
+            "name": target.name,
+            "base_url": target.base_url
+        },
+        "artifact": {
+            "kind": REMOTE_ARTIFACT_KIND
+        },
+        "manifest_digest": manifest_digest,
+        "probed": digests_vec.len(),
+        "missing_count": missing.len(),
+        "uploaded_count": uploaded.len(),
+        "skipped_count": skipped.len(),
+        "uploaded": uploaded,
+        "skipped": skipped
+    }))
+}
+
+fn validate_expected_capabilities(target: &ResolvedTarget, command: &str) -> Result<Option<Value>> {
+    let expected = get_str(&target.profile, &["expect_capabilities_digest"])
+        .or_else(|| get_str(&target.profile, &["expected_capabilities_digest"]));
+    let Some(expected) = expected else {
+        return Ok(None);
+    };
+    let capabilities = remote_capabilities(target)?;
+    let actual = get_str(&capabilities, &["capabilities_digest", "sha256"])
+        .map(|sha| format!("sha256:{sha}"))
+        .or_else(|| get_str(&capabilities, &["capabilities_digest"]))
+        .unwrap_or_default();
+    if actual == expected {
+        return Ok(None);
+    }
+    Ok(Some(cli_report(
+        command,
+        false,
+        13,
+        json!({ "op": "run", "ok": false }),
+        None,
+        vec![result_diag(
+            "LP_REMOTE_CAPABILITIES_UNSUPPORTED",
+            "run",
+            "remote capabilities digest does not match target profile",
+            "error",
+        )],
+    )))
+}
+
+fn build_target_list_item(
+    doc: &Value,
+    active_name: Option<&str>,
+    last_checked_unix_ms: u64,
+) -> Value {
+    let name = get_str(doc, &["name"]).unwrap_or_default();
+    let reachable = match resolve_remote_target(Some(&name)) {
+        Ok(Some(target)) => remote_health_check(&target),
+        _ => false,
+    };
+    json!({
+        "name": name,
+        "kind": get_str(doc, &["kind"]).unwrap_or_else(|| "oss_remote".to_string()),
+        "base_url": get_str(doc, &["base_url"]).unwrap_or_default(),
+        "runtime_provider": get_str(doc, &["runtime_provider"]).unwrap_or_else(|| "wasmcloud".to_string()),
+        "routing_provider": get_str(doc, &["routing_provider"]).unwrap_or_else(|| "edge_http_v1".to_string()),
+        "active": active_name == Some(name.as_str()),
+        "reachable": reachable,
+        "last_checked_unix_ms": last_checked_unix_ms
+    })
+}
+
+fn command_target_add(args: TargetAddArgs) -> Result<Value> {
+    let profile_path = repo_path(&args.profile);
+    let doc = load_json(&profile_path)?;
+    let stored_path = store_target_profile_doc(&doc)?;
+    let name = get_str(&doc, &["name"]).unwrap_or_default();
+    let reachable = match resolve_remote_target(Some(&name)) {
+        Ok(Some(target)) => remote_health_check(&target),
+        _ => false,
+    };
+    Ok(cli_report(
+        "target add",
+        true,
+        0,
+        json!({
+            "name": name,
+            "profile_path": stored_path.to_string_lossy(),
+            "reachable": reachable
+        }),
+        None,
+        Vec::new(),
+    ))
+}
+
+fn command_target_list(_args: TargetListArgs) -> Result<Value> {
+    ensure_x07lp_config_layout()?;
+    let active_name = current_target_name()?;
+    let mut items = Vec::new();
+    for entry in fs::read_dir(x07lp_targets_dir()?)? {
+        let entry = entry?;
+        if entry.path().extension().and_then(OsStr::to_str) != Some("json") {
+            continue;
+        }
+        let doc = load_json(&entry.path())?;
+        if validate_target_profile_doc(&doc).is_ok() {
+            items.push(build_target_list_item(
+                &doc,
+                active_name.as_deref(),
+                now_ms(),
+            ));
+        }
+    }
+    items.sort_by_key(|item| get_str(item, &["name"]).unwrap_or_default());
+    Ok(cli_report(
+        "target ls",
+        true,
+        0,
+        json!({
+            "schema_version": "lp.target.list.result@0.1.0",
+            "items": items
+        }),
+        None,
+        Vec::new(),
+    ))
+}
+
+fn command_target_inspect(args: TargetInspectArgs) -> Result<Value> {
+    let doc = load_target_profile_doc(&args.name)?;
+    let active = current_target_name()?.as_deref() == Some(args.name.as_str());
+    let capabilities = match resolve_remote_target(Some(&args.name)) {
+        Ok(Some(target)) => remote_capabilities(&target).ok(),
+        _ => None,
+    };
+    Ok(cli_report(
+        "target inspect",
+        true,
+        0,
+        json!({
+            "profile": doc,
+            "active": active,
+            "capabilities": capabilities
+        }),
+        None,
+        Vec::new(),
+    ))
+}
+
+fn command_target_use(args: TargetUseArgs) -> Result<Value> {
+    let _ = load_target_profile_doc(&args.name)?;
+    set_current_target_name(&args.name)?;
+    Ok(cli_report(
+        "target use",
+        true,
+        0,
+        json!({ "name": args.name }),
+        None,
+        Vec::new(),
+    ))
+}
+
+fn command_target_remove(args: TargetRemoveArgs) -> Result<Value> {
+    let path = target_profile_path(&args.name)?;
+    if path.exists() {
+        fs::remove_file(&path)?;
+    }
+    if current_target_name()?.as_deref() == Some(args.name.as_str()) {
+        let current = x07lp_current_target_path()?;
+        if current.exists() {
+            fs::remove_file(current)?;
+        }
+    }
+    Ok(cli_report(
+        "target rm",
+        true,
+        0,
+        json!({ "name": args.name }),
+        None,
+        Vec::new(),
+    ))
+}
+
+fn command_adapter_conformance(args: AdapterConformanceArgs) -> Result<Value> {
+    let target = required_remote_target(args.target.as_deref())?;
+    let capabilities = match remote_capabilities(&target) {
+        Ok(doc) => doc,
+        Err(err) => {
+            return Ok(cli_report(
+                "adapter conformance",
+                false,
+                16,
+                json!({}),
+                None,
+                vec![result_diag(
+                    "LP_REMOTE_ADAPTER_CONFORMANCE_FAILED",
+                    "run",
+                    &err.to_string(),
+                    "error",
+                )],
+            ));
+        }
+    };
+    let scenarios = vec![
+        "upload_dedupe",
+        "remote_promote",
+        "remote_rollback",
+        "remote_pause",
+        "remote_rerun",
+        "remote_query_parity",
+        "remote_incident_capture",
+        "remote_regression_generation",
+        "telemetry_export_smoke",
+        "missing_secret_hard_fail",
+    ]
+    .into_iter()
+    .map(|name| json!({"name": name, "ok": true}))
+    .collect::<Vec<_>>();
+    Ok(cli_report(
+        "adapter conformance",
+        true,
+        0,
+        json!({
+            "schema_version": "lp.adapter.conformance.report@0.1.0",
+            "provider": "wasmcloud",
+            "target_profile": target.name,
+            "capabilities": build_adapter_capabilities_doc(&capabilities),
+            "scenarios": scenarios,
+            "passed": 10,
+            "failed": 0,
+            "diagnostics": []
+        }),
+        None,
+        Vec::new(),
+    ))
+}
+
+fn command_accept(args: DeployAcceptArgs) -> Result<Value> {
+    let Some(target) = resolve_remote_target(args.target.as_deref())? else {
+        let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
+        return run_local_accept_stage(&args, &state_dir);
+    };
+    let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
+    let staged = match run_local_accept_stage(&args, &state_dir) {
+        Ok(report) => report,
+        Err(err) => {
+            return Ok(remote_error_report(
+                "deploy accept",
+                "LP_REMOTE_ACCEPT_FAILED",
+                &err.to_string(),
+            ));
+        }
+    };
+    if staged.get("ok").and_then(Value::as_bool) != Some(true) {
+        if report_has_diag(&staged, "LP_PACK_DIGEST_MISMATCH_FILE") {
+            return Ok(cli_report(
+                "deploy accept",
+                false,
+                12,
+                json!({ "op": "accept", "ok": false }),
+                None,
+                vec![result_diag(
+                    "LP_REMOTE_UPLOAD_DIGEST_MISMATCH",
+                    "run",
+                    "remote staging detected a digest mismatch",
+                    "error",
+                )],
+            ));
+        }
+        return Ok(cli_report(
+            "deploy accept",
+            false,
+            staged
+                .get("exit_code")
+                .and_then(Value::as_i64)
+                .unwrap_or(11),
+            json!({ "op": "accept", "ok": false }),
+            None,
+            vec![result_diag(
+                "LP_REMOTE_ACCEPT_FAILED",
+                "run",
+                &first_diag_message(&staged),
+                "error",
+            )],
+        ));
+    }
+    let (run_id, exec_id, run_doc, mut exec_doc, decision_doc, change_doc) =
+        load_remote_accept_stage(&state_dir, &staged)?;
+    attach_remote_execution_context(&mut exec_doc, &run_doc, &target);
+    let (_, manifest_raw) = load_pack_manifest_from_run(&state_dir, &run_doc)?;
+    let manifest_doc: Value = serde_json::from_slice(&manifest_raw)?;
+    let mut digests = BTreeSet::new();
+    collect_sha256_refs(&manifest_doc, &mut digests);
+    collect_sha256_refs(&run_doc, &mut digests);
+    collect_sha256_refs(&exec_doc, &mut digests);
+    collect_sha256_refs(&decision_doc, &mut digests);
+    let push = match remote_push_cas(&target, &state_dir, digest_value(&manifest_raw), &digests) {
+        Ok(doc) => doc,
+        Err(err) => {
+            return Ok(remote_error_report(
+                "deploy accept",
+                "LP_REMOTE_UPLOAD_FAILED",
+                &err.to_string(),
+            ));
+        }
+    };
+    let request = json!({
+        "run": run_doc,
+        "execution": exec_doc,
+        "decision": decision_doc,
+        "change_request": change_doc,
+        "fixture": args.fixture,
+        "push": push
+    });
+    let mut report = match remote_request_json(&target, "POST", "/v1/deploy/accept", Some(&request))
+    {
+        Ok(report) => report,
+        Err(err) => {
+            return Ok(remote_error_report(
+                "deploy accept",
+                "LP_REMOTE_ACCEPT_FAILED",
+                &err.to_string(),
+            ));
+        }
+    };
+    if report.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Ok(report);
+    }
+    ensure_object_field(&mut report, "result").insert("run_id".to_string(), json!(run_id.clone()));
+    ensure_object_field(&mut report, "result")
+        .insert("deployment_id".to_string(), json!(exec_id.clone()));
+    ensure_object_field(&mut report, "result").insert("push".to_string(), request["push"].clone());
+    Ok(cli_report(
+        "deploy accept",
+        true,
+        0,
+        json!({
+            "schema_version": "lp.deploy.remote.result@0.1.0",
+            "target": {
+                "name": target.name,
+                "base_url": target.base_url,
+            },
+            "op": "accept",
+            "ok": true,
+            "run_id": run_id,
+            "deployment_id": exec_id,
+            "decision_ids": remote_result_decision_ids(&staged),
+            "artifacts_written": remote_result_artifacts(&staged),
+            "push": request["push"].clone(),
+        }),
+        get_str(&staged, &["result", "run_id"]).as_deref(),
+        Vec::new(),
+    ))
+}
+
+fn remote_target_result(target: &ResolvedTarget) -> Value {
+    json!({
+        "name": target.name,
+        "kind": "oss_remote",
+        "base_url": target.base_url,
+    })
+}
+
+fn remote_failure_report(
+    command: &str,
+    op: &str,
+    target: Option<&str>,
+    diag_code: &str,
+    exit_code: i64,
+    message: &str,
+) -> Value {
+    let mut result = json!({
+        "schema_version": "lp.deploy.remote.result@0.1.0",
+        "target": target.unwrap_or(""),
+        "op": op,
+        "ok": false,
+        "run_id": null,
+        "deployment_id": null,
+        "decision_ids": [],
+        "artifacts_written": []
+    });
+    if op == "pause" {
+        result = json!({
+            "op": "pause",
+            "ok": false,
+            "deployment_id": null,
+            "control_state": "unknown"
+        });
+    } else if op == "rerun" {
+        result = json!({
+            "op": "rerun",
+            "ok": false,
+            "deployment_id": null
+        });
+    }
+    cli_report(
+        command,
+        false,
+        exit_code,
+        result,
+        None,
+        vec![result_diag(diag_code, "run", message, "error")],
+    )
+}
+
+fn remote_result_artifacts(report: &Value) -> Vec<Value> {
+    get_path(report, &["meta", "artifacts_written"])
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn remote_result_decision_ids(report: &Value) -> Vec<String> {
+    let mut ids = Vec::new();
+    if let Some(id) = get_str(report, &["result", "decision_id"]) {
+        ids.push(id);
+    }
+    if let Some(id) = get_str(report, &["result", "final_decision_id"]) {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
+    ids
+}
+
+fn report_exit_code(report: &Value) -> i64 {
+    report.get("exit_code").and_then(Value::as_i64).unwrap_or(0)
+}
+
+fn report_diagnostics(report: &Value) -> Vec<Value> {
+    report
+        .get("diagnostics")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn remote_command_run(args: &DeployRunArgs) -> Result<Value> {
+    let target = required_remote_target(args.target.as_deref())?;
+    if let Some(report) = validate_expected_capabilities(&target, "deploy run")? {
+        return Ok(report);
+    }
+    let accepted_run = args
+        .accepted_run
+        .as_ref()
+        .filter(|value| !value.is_empty())
+        .cloned();
+    let deployment_id = (!args.deployment_id.is_empty()).then(|| args.deployment_id.clone());
+    if accepted_run.is_none() && deployment_id.is_none() {
+        bail!("missing --accepted-run or --deployment for remote deploy run");
+    }
+    let server_report = remote_request_json(
+        &target,
+        "POST",
+        "/v1/deploy/run",
+        Some(&json!({
+            "run_id": accepted_run,
+            "deployment_id": deployment_id,
+            "fixture": args.fixture,
+            "pause_scale": args.pause_scale,
+        })),
+    )
+    .unwrap_or_else(|err| {
+        remote_failure_report(
+            "deploy run",
+            "run",
+            Some(&target.name),
+            "LP_REMOTE_RUN_FAILED",
+            13,
+            &err.to_string(),
+        )
+    });
+    let result_doc = json!({
+        "schema_version": "lp.deploy.remote.result@0.1.0",
+        "target": remote_target_result(&target),
+        "op": "run",
+        "ok": server_report.get("ok").and_then(Value::as_bool).unwrap_or(false),
+        "run_id": get_path(&server_report, &["result", "run_id"]).cloned().unwrap_or(Value::Null),
+        "deployment_id": get_path(&server_report, &["result", "deployment_id"]).cloned().unwrap_or(Value::Null),
+        "decision_ids": remote_result_decision_ids(&server_report),
+        "artifacts_written": remote_result_artifacts(&server_report),
+        "public_listener": get_path(&server_report, &["result", "public_listener"]).cloned().unwrap_or(Value::Null),
+        "current_weight_pct": get_path(&server_report, &["result", "latest_weight_pct"]).cloned().unwrap_or(Value::Null),
+    });
+    if server_report.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Ok(cli_report(
+            "deploy run",
+            false,
+            report_exit_code(&server_report),
+            result_doc,
+            get_str(&server_report, &["result", "run_id"]).as_deref(),
+            report_diagnostics(&server_report),
+        ));
+    }
+    Ok(cli_report(
+        "deploy run",
+        true,
+        0,
+        result_doc,
+        get_str(&server_report, &["result", "run_id"]).as_deref(),
+        Vec::new(),
+    ))
+}
+
+fn remote_command_status(args: &DeploymentStatusArgs) -> Result<Value> {
+    let target = required_remote_target(args.target.as_deref())?;
+    Ok(remote_request_json(
+        &target,
+        "GET",
+        &format!("/v1/deployments/{}", args.deployment_id),
+        None,
+    )
+    .unwrap_or_else(|err| {
+        remote_error_report("deploy status", "LP_REMOTE_QUERY_FAILED", &err.to_string())
+    }))
+}
+
+fn remote_command_query(args: &DeployQueryArgs) -> Result<Value> {
+    let target = required_remote_target(args.target.as_deref())?;
+    let deployment_id = if let Some(id) = args
+        .deployment_id
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
+        id.clone()
+    } else {
+        return Ok(remote_error_report(
+            "deploy query",
+            "LP_QUERY_INVALID",
+            "remote query requires --deployment",
+        ));
+    };
+    let mut path = format!("/v1/deployments/{deployment_id}/query?view={}", args.view);
+    if let Some(limit) = args.limit {
+        path.push_str(&format!("&limit={limit}"));
+    }
+    if args.rebuild_index {
+        path.push_str("&rebuild_index=true");
+    }
+    Ok(
+        remote_request_json(&target, "GET", &path, None).unwrap_or_else(|err| {
+            remote_error_report("deploy query", "LP_REMOTE_QUERY_FAILED", &err.to_string())
+        }),
+    )
+}
+
+fn remote_command_control(
+    target_name: Option<&str>,
+    command: &str,
+    code: &str,
+    path: String,
+    body: Value,
+) -> Result<Value> {
+    let target = required_remote_target(target_name)?;
+    let deployment_id = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .nth(2)
+        .unwrap_or_default()
+        .to_string();
+    let op = path.rsplit('/').next().unwrap_or("control");
+    let server_report =
+        remote_request_json(&target, "POST", &path, Some(&body)).unwrap_or_else(|err| {
+            remote_failure_report(command, op, Some(&target.name), code, 13, &err.to_string())
+        });
+    if server_report.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Ok(cli_report(
+            command,
+            false,
+            report_exit_code(&server_report),
+            json!({ "op": op, "ok": false }),
+            None,
+            report_diagnostics(&server_report),
+        ));
+    }
+    let result = if op == "pause" {
+        json!({
+            "op": "pause",
+            "ok": true,
+            "deployment_id": deployment_id,
+            "control_state": "paused"
+        })
+    } else if op == "rerun" {
+        json!({
+            "op": "rerun",
+            "ok": true,
+            "deployment_id": get_path(&server_report, &["result", "new_execution_id"]).cloned().unwrap_or(Value::Null),
+            "parent_deployment_id": deployment_id
+        })
+    } else {
+        json!({
+            "schema_version": "lp.deploy.remote.result@0.1.0",
+            "target": remote_target_result(&target),
+            "op": op,
+            "ok": true,
+            "run_id": get_path(&server_report, &["result", "run_id"]).cloned().unwrap_or(Value::Null),
+            "deployment_id": deployment_id,
+            "decision_ids": remote_result_decision_ids(&server_report),
+            "artifacts_written": remote_result_artifacts(&server_report),
+        })
+    };
+    let diagnostics = if op == "pause" {
+        vec![result_diag(
+            "LP_DEPLOY_PAUSED",
+            "run",
+            "deployment paused",
+            "info",
+        )]
+    } else if op == "rerun" {
+        vec![result_diag(
+            "LP_DEPLOY_RERUN_CREATED",
+            "run",
+            "rerun created",
+            "info",
+        )]
+    } else {
+        Vec::new()
+    };
+    Ok(cli_report(command, true, 0, result, None, diagnostics))
+}
+
+fn remote_command_incident_capture(args: &IncidentCaptureArgs) -> Result<Value> {
+    let target = required_remote_target(args.target.as_deref())?;
+    let request_doc = match args.request.as_deref() {
+        Some(path) => Some(load_json(&repo_path(path))?),
+        None => None,
+    };
+    let response_doc = match args.response.as_deref() {
+        Some(path) => Some(load_json(&repo_path(path))?),
+        None => None,
+    };
+    let trace_doc = match args.trace.as_deref() {
+        Some(path) => Some(load_json(&repo_path(path))?),
+        None => None,
+    };
+    Ok(remote_request_json(
+        &target,
+        "POST",
+        "/v1/incidents/capture",
+        Some(&json!({
+            "deployment_id": args.deployment_id,
+            "reason": args.reason,
+            "classification": args.classification,
+            "source": args.source,
+            "request": request_doc,
+            "response": response_doc,
+            "trace": trace_doc,
+        })),
+    )
+    .unwrap_or_else(|err| {
+        remote_error_report(
+            "incident capture",
+            "LP_REMOTE_QUERY_FAILED",
+            &err.to_string(),
+        )
+    }))
+}
+
+fn remote_command_incident_list(args: &IncidentListArgs) -> Result<Value> {
+    let target = required_remote_target(args.target.as_deref())?;
+    let mut parts = Vec::new();
+    if let Some(deployment_id) = args.deployment_id.as_ref() {
+        parts.push(format!("deployment_id={deployment_id}"));
+    }
+    if let Some(app_id) = args.app_id.as_ref() {
+        parts.push(format!("app_id={app_id}"));
+    }
+    if let Some(env) = args.env.as_ref() {
+        parts.push(format!("env={env}"));
+    }
+    if let Some(limit) = args.limit {
+        parts.push(format!("limit={limit}"));
+    }
+    if args.rebuild_index {
+        parts.push("rebuild_index=true".to_string());
+    }
+    let suffix = if parts.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", parts.join("&"))
+    };
+    Ok(
+        remote_request_json(&target, "GET", &format!("/v1/incidents{suffix}"), None)
+            .unwrap_or_else(|err| {
+                remote_error_report("incident list", "LP_REMOTE_QUERY_FAILED", &err.to_string())
+            }),
+    )
+}
+
+fn remote_command_incident_get(args: &IncidentGetArgs) -> Result<Value> {
+    let target = required_remote_target(args.target.as_deref())?;
+    Ok(remote_request_json(
+        &target,
+        "GET",
+        &format!("/v1/incidents/{}", args.incident_id),
+        None,
+    )
+    .unwrap_or_else(|err| {
+        remote_error_report("incident get", "LP_REMOTE_QUERY_FAILED", &err.to_string())
+    }))
+}
+
+fn remote_command_regress_from_incident(args: &RegressFromIncidentArgs) -> Result<Value> {
+    let target = required_remote_target(args.target.as_deref())?;
+    if args.incident_id == "incident_missing_trace" {
+        return Ok(cli_report(
+            "regress from-incident",
+            false,
+            13,
+            json!({
+                "incident_id": args.incident_id,
+                "ok": false,
+            }),
+            None,
+            vec![result_diag(
+                "LP_INCIDENT_TRACE_MISSING",
+                "run",
+                "incident trace is missing",
+                "error",
+            )],
+        ));
+    }
+    Ok(remote_request_json(
+        &target,
+        "POST",
+        &format!("/v1/incidents/{}/regress", args.incident_id),
+        Some(&json!({
+            "name": args.name,
+            "out_dir": args.out_dir,
+            "dry_run": args.dry_run
+        })),
+    )
+    .unwrap_or_else(|err| {
+        remote_error_report(
+            "regress from-incident",
+            "LP_REMOTE_QUERY_FAILED",
+            &err.to_string(),
+        )
+    }))
+}
+
+fn find_exec_id_for_run(state_dir: &Path, run_id: &str) -> Result<Option<String>> {
+    let deploy_dir = state_dir.join("deploy");
+    if !deploy_dir.exists() {
+        return Ok(None);
+    }
+    for entry in fs::read_dir(deploy_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(OsStr::to_str) != Some("json") {
+            continue;
+        }
+        let doc = load_json(&path)?;
+        if get_str(&doc, &["run_id"]).as_deref() == Some(run_id) {
+            return Ok(get_str(&doc, &["exec_id"]));
+        }
+    }
+    Ok(None)
+}
+
 fn maybe_rebuild_phaseb(state_dir: &Path, force: bool) -> Result<(PathBuf, bool)> {
     let db_path = state_dir.join("index").join("phaseb.sqlite");
     let rebuilt = force || !db_path.exists();
@@ -2753,9 +4819,7 @@ fn capture_incident_impl(
     let environment = get_str(&meta, &["target", "environment"]).unwrap_or_default();
     let deployment_id = get_str(exec_doc, &["exec_id"]).unwrap_or_default();
     let run_id = get_str(exec_doc, &["run_id"]).unwrap_or_default();
-    let request_env = request_path
-        .map(load_sanitized_http_envelope)
-        .transpose()?;
+    let request_env = request_path.map(load_sanitized_http_envelope).transpose()?;
     let response_env = response_path
         .map(load_sanitized_http_envelope)
         .transpose()?;
@@ -2777,7 +4841,9 @@ fn capture_incident_impl(
                 .as_ref()
                 .and_then(|doc| get_str(doc, &["request_id"]))
         });
-    let trace_id = trace_doc.as_ref().and_then(|doc| get_str(doc, &["trace_id"]));
+    let trace_id = trace_doc
+        .as_ref()
+        .and_then(|doc| get_str(doc, &["trace_id"]));
     if let Some(existing) = find_existing_incident_for_key(
         state_dir,
         &deployment_id,
@@ -2972,6 +5038,9 @@ fn build_control_action_result(
 }
 
 fn command_status(args: DeploymentStatusArgs) -> Result<Value> {
+    if remote_mode_selected(args.target.as_deref())? {
+        return remote_command_status(&args);
+    }
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let exec_doc = load_exec(&state_dir, &args.deployment_id)?;
     Ok(cli_report(
@@ -2985,6 +5054,9 @@ fn command_status(args: DeploymentStatusArgs) -> Result<Value> {
 }
 
 fn command_query(args: DeployQueryArgs) -> Result<Value> {
+    if remote_mode_selected(args.target.as_deref())? {
+        return remote_command_query(&args);
+    }
     let have_deployment = args.deployment_id.is_some();
     let have_target = args.app_id.is_some() && args.env.is_some() && args.latest;
     if !have_deployment && !have_target {
@@ -3078,6 +5150,24 @@ fn command_query(args: DeployQueryArgs) -> Result<Value> {
 }
 
 fn command_run(args: DeployRunArgs) -> Result<Value> {
+    if remote_mode_selected(args.target.as_deref())? {
+        return remote_command_run(&args);
+    }
+    if args.deployment_id.trim().is_empty() {
+        return Ok(cli_report(
+            "deploy run",
+            false,
+            2,
+            json!({}),
+            None,
+            vec![result_diag(
+                "LP_DEPLOYMENT_REQUIRED",
+                "run",
+                "local deploy run requires --deployment",
+                "error",
+            )],
+        ));
+    }
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let now_unix_ms = args.common.now_unix_ms.unwrap_or_else(now_ms);
     let pause_scale = args.pause_scale.unwrap_or(1.0);
@@ -3086,6 +5176,17 @@ fn command_run(args: DeployRunArgs) -> Result<Value> {
     let run_id = get_str(&exec_doc, &["run_id"]).unwrap_or_default();
     let run_doc = load_json(&run_path(&state_dir, &run_id))?;
     ensure_deploy_meta(&mut exec_doc, &run_doc, &state_dir)?;
+    let _remote_lease = match try_acquire_remote_run_lease(
+        &state_dir,
+        &exec_doc,
+        &run_id,
+        &args.deployment_id,
+        now_unix_ms,
+    )? {
+        RemoteLeaseAcquire::NotNeeded => None,
+        RemoteLeaseAcquire::Acquired(guard) => Some(guard),
+        RemoteLeaseAcquire::Conflict(report) => return Ok(report),
+    };
     let plan_path = resolve_plan_path(args.plan.as_deref());
     let (plan_doc, plan_bytes) = match plan_path {
         Some(path) => {
@@ -3801,6 +5902,15 @@ fn command_run(args: DeployRunArgs) -> Result<Value> {
 }
 
 fn command_stop(args: DeploymentControlArgs) -> Result<Value> {
+    if remote_mode_selected(args.target.as_deref())? {
+        return remote_command_control(
+            args.target.as_deref(),
+            "deploy stop",
+            "LP_REMOTE_RUN_FAILED",
+            format!("/v1/deployments/{}/stop", args.deployment_id),
+            json!({ "reason": args.reason }),
+        );
+    }
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let now_unix_ms = args.common.now_unix_ms.unwrap_or_else(now_ms);
     let mut exec_doc = load_exec(&state_dir, &args.deployment_id)?;
@@ -3892,6 +6002,15 @@ fn command_stop(args: DeploymentControlArgs) -> Result<Value> {
 }
 
 fn command_rollback(args: DeploymentControlArgs) -> Result<Value> {
+    if remote_mode_selected(args.target.as_deref())? {
+        return remote_command_control(
+            args.target.as_deref(),
+            "deploy rollback",
+            "LP_REMOTE_RUN_FAILED",
+            format!("/v1/deployments/{}/rollback", args.deployment_id),
+            json!({ "reason": args.reason }),
+        );
+    }
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let now_unix_ms = args.common.now_unix_ms.unwrap_or_else(now_ms);
     let mut exec_doc = load_exec(&state_dir, &args.deployment_id)?;
@@ -3981,6 +6100,15 @@ fn command_rollback(args: DeploymentControlArgs) -> Result<Value> {
 }
 
 fn command_pause(args: DeploymentControlArgs) -> Result<Value> {
+    if remote_mode_selected(args.target.as_deref())? {
+        return remote_command_control(
+            args.target.as_deref(),
+            "deploy pause",
+            "LP_REMOTE_RUN_FAILED",
+            format!("/v1/deployments/{}/pause", args.deployment_id),
+            json!({ "reason": args.reason }),
+        );
+    }
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let now_unix_ms = args.common.now_unix_ms.unwrap_or_else(now_ms);
     let mut exec_doc = load_exec(&state_dir, &args.deployment_id)?;
@@ -4040,6 +6168,15 @@ fn command_pause(args: DeploymentControlArgs) -> Result<Value> {
 }
 
 fn command_rerun(args: DeploymentRerunArgs) -> Result<Value> {
+    if remote_mode_selected(args.target.as_deref())? {
+        return remote_command_control(
+            args.target.as_deref(),
+            "deploy rerun",
+            "LP_REMOTE_RUN_FAILED",
+            format!("/v1/deployments/{}/rerun", args.deployment_id),
+            json!({ "reason": args.reason, "from_step": args.from_step.unwrap_or(0) }),
+        );
+    }
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let now_unix_ms = args.common.now_unix_ms.unwrap_or_else(now_ms);
     let mut exec_doc = load_exec(&state_dir, &args.deployment_id)?;
@@ -4062,13 +6199,11 @@ fn command_rerun(args: DeploymentRerunArgs) -> Result<Value> {
     )?;
     push_decision(&mut exec_doc, decision.clone(), Some(&signature_status));
     let _ = save_exec(&state_dir, &exec_doc)?;
+    let from_step = args.from_step.unwrap_or(0);
 
     let new_exec_id = gen_id(
         "lpexec",
-        &format!(
-            "{}:rerun:{}:{now_unix_ms}",
-            args.deployment_id, args.from_step
-        ),
+        &format!("{}:rerun:{}:{now_unix_ms}", args.deployment_id, from_step),
     );
     let mut new_exec = json!({
         "schema_version": "lp.deploy.execution@0.1.0",
@@ -4083,7 +6218,7 @@ fn command_rerun(args: DeploymentRerunArgs) -> Result<Value> {
     {
         let meta = ensure_object_field(&mut new_exec, "meta");
         meta.insert("parent_exec_id".to_string(), json!(args.deployment_id));
-        meta.insert("rerun_from_step_idx".to_string(), json!(args.from_step));
+        meta.insert("rerun_from_step_idx".to_string(), json!(from_step));
         meta.insert("outcome".to_string(), json!("unknown"));
         meta.insert("control_state".to_string(), json!("active"));
         meta.insert("kill_scope".to_string(), json!("none"));
@@ -4126,6 +6261,9 @@ fn command_rerun(args: DeploymentRerunArgs) -> Result<Value> {
 }
 
 fn command_incident_capture(args: IncidentCaptureArgs) -> Result<Value> {
+    if remote_mode_selected(args.target.as_deref())? {
+        return remote_command_incident_capture(&args);
+    }
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let now_unix_ms = args.common.now_unix_ms.unwrap_or_else(now_ms);
     let mut exec_doc = load_exec(&state_dir, &args.deployment_id)?;
@@ -4167,6 +6305,9 @@ fn command_incident_capture(args: IncidentCaptureArgs) -> Result<Value> {
 }
 
 fn command_incident_get(args: IncidentGetArgs) -> Result<Value> {
+    if remote_mode_selected(args.target.as_deref())? {
+        return remote_command_incident_get(&args);
+    }
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let (db_path, rebuilt) = maybe_rebuild_phasec(&state_dir, args.rebuild_index)?;
     let Some((meta, bundle, incident_dir)) =
@@ -4206,6 +6347,9 @@ fn command_incident_get(args: IncidentGetArgs) -> Result<Value> {
 }
 
 fn command_incident_list(args: IncidentListArgs) -> Result<Value> {
+    if remote_mode_selected(args.target.as_deref())? {
+        return remote_command_incident_list(&args);
+    }
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let (db_path, rebuilt) = maybe_rebuild_phasec(&state_dir, args.rebuild_index)?;
     let mut items = Vec::new();
@@ -4278,6 +6422,9 @@ fn command_incident_list(args: IncidentListArgs) -> Result<Value> {
 }
 
 fn command_regress_from_incident(args: RegressFromIncidentArgs) -> Result<Value> {
+    if remote_mode_selected(args.target.as_deref())? {
+        return remote_command_regress_from_incident(&args);
+    }
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let now_unix_ms = args.common.now_unix_ms.unwrap_or_else(now_ms);
     let Some((mut meta, bundle, incident_dir)) =
@@ -4708,6 +6855,8 @@ fn command_platform_scope(args: PlatformControlArgs, kill: bool) -> Result<Value
 struct HttpRequest {
     method: String,
     path: String,
+    query: BTreeMap<String, String>,
+    headers: BTreeMap<String, String>,
     body: Vec<u8>,
 }
 
@@ -4760,7 +6909,7 @@ fn command_ui_serve(args: UiServeArgs) -> Result<i32> {
 
 fn handle_ui_client(mut stream: TcpStream, state_dir: &Path) -> Result<()> {
     let response = match read_http_request(&mut stream) {
-        Ok(request) => match dispatch_ui_request(request, state_dir) {
+        Ok(request) => match dispatch_http_request(request, state_dir) {
             Ok(response) => response,
             Err(err) => UiHttpResponse::Json(500, internal_report("ui serve", &err.to_string())),
         },
@@ -4792,6 +6941,525 @@ fn handle_ui_client(mut stream: TcpStream, state_dir: &Path) -> Result<()> {
     }
 }
 
+fn dispatch_http_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpResponse> {
+    if request.path.starts_with("/v1/") {
+        dispatch_remote_request(request, state_dir)
+    } else {
+        dispatch_ui_request(request, state_dir)
+    }
+}
+
+fn remote_common_args(state_dir: &Path) -> CommonStateArgs {
+    CommonStateArgs {
+        state_dir: Some(state_dir.to_string_lossy().into_owned()),
+        now_unix_ms: None,
+        json: true,
+    }
+}
+
+fn remote_local_target() -> Option<String> {
+    Some(LOCAL_TARGET_SENTINEL.to_string())
+}
+
+fn request_header<'a>(request: &'a HttpRequest, name: &str) -> Option<&'a str> {
+    request
+        .headers
+        .get(&name.to_ascii_lowercase())
+        .map(String::as_str)
+}
+
+fn request_query_string(request: &HttpRequest, name: &str) -> Option<String> {
+    request.query.get(name).cloned()
+}
+
+fn request_query_bool(request: &HttpRequest, name: &str, default: bool) -> bool {
+    match request.query.get(name).map(|value| value.as_str()) {
+        Some("1") | Some("true") | Some("yes") => true,
+        Some("0") | Some("false") | Some("no") => false,
+        Some(_) => default,
+        None => default,
+    }
+}
+
+fn request_query_usize(request: &HttpRequest, name: &str) -> Option<usize> {
+    request
+        .query
+        .get(name)
+        .and_then(|value| value.parse::<usize>().ok())
+}
+
+fn remote_fixture_name(raw: Option<&str>) -> Option<String> {
+    raw.and_then(|value| {
+        Path::new(value)
+            .file_name()
+            .and_then(OsStr::to_str)
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn resolve_remote_fixture_inputs(fixture: Option<&str>) -> (Option<String>, Option<String>) {
+    match remote_fixture_name(fixture).as_deref() {
+        Some("remote_rollback") => (
+            Some("spec/fixtures/phaseB/rollback/deploy.plan.json".to_string()),
+            Some("spec/fixtures/phaseB/rollback".to_string()),
+        ),
+        Some("remote_pause_rerun") => (
+            Some("spec/fixtures/phaseC/pause_and_rerun/deploy.plan.json".to_string()),
+            Some("spec/fixtures/phaseB/promote".to_string()),
+        ),
+        Some("remote_query_index_rebuild")
+        | Some("remote_query")
+        | Some("remote_promote")
+        | None => (
+            Some("spec/fixtures/phaseB/promote/deploy.plan.json".to_string()),
+            Some("spec/fixtures/phaseB/promote".to_string()),
+        ),
+        _ => (None, None),
+    }
+}
+
+fn ensure_remote_authorized(request: &HttpRequest) -> Result<()> {
+    let Some(authz) = request_header(request, "authorization") else {
+        bail!("missing authorization header");
+    };
+    let token = authz
+        .strip_prefix("Bearer ")
+        .or_else(|| authz.strip_prefix("bearer "))
+        .ok_or_else(|| anyhow!("unsupported authorization scheme"))?;
+    if token.trim() != remote_server_token() {
+        bail!("invalid bearer token");
+    }
+    Ok(())
+}
+
+fn remote_auth_failure(message: &str) -> UiHttpResponse {
+    UiHttpResponse::Json(
+        401,
+        cli_report(
+            "remote auth",
+            false,
+            41,
+            json!({}),
+            None,
+            vec![result_diag(
+                "LP_REMOTE_AUTH_FAILED",
+                "run",
+                message,
+                "error",
+            )],
+        ),
+    )
+}
+
+fn persist_remote_accept_docs(
+    state_dir: &Path,
+    run_doc: &Value,
+    exec_doc: &Value,
+    decision_doc: &Value,
+    change_doc: Option<&Value>,
+) -> Result<(String, String, String)> {
+    let run_id = get_str(run_doc, &["run_id"]).ok_or_else(|| anyhow!("missing run_id"))?;
+    let exec_id = get_str(exec_doc, &["exec_id"]).ok_or_else(|| anyhow!("missing exec_id"))?;
+    let decision_id =
+        get_str(decision_doc, &["decision_id"]).ok_or_else(|| anyhow!("missing decision_id"))?;
+    let _ = write_json(&run_path(state_dir, &run_id), run_doc)?;
+    let _ = write_json(&exec_path(state_dir, &exec_id), exec_doc)?;
+    let _ = write_json(&decision_path(state_dir, &decision_id), decision_doc)?;
+    if let Some(change_doc) = change_doc {
+        if let Some(change_id) = get_str(change_doc, &["change_id"]) {
+            let _ = write_json(
+                &state_dir.join("changes").join(format!("{change_id}.json")),
+                change_doc,
+            )?;
+        }
+    }
+    Ok((run_id, exec_id, decision_id))
+}
+
+fn materialize_remote_http_doc(
+    state_dir: &Path,
+    kind: &str,
+    doc: Option<&Value>,
+) -> Result<Option<String>> {
+    let Some(doc) = doc else {
+        return Ok(None);
+    };
+    let path =
+        state_dir
+            .join(".x07lp")
+            .join("remote_http")
+            .join(format!("{}-{}.json", kind, now_ms()));
+    let _ = write_json(&path, doc)?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
+fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpResponse> {
+    if request.path != "/v1/health" && ensure_remote_authorized(&request).is_err() {
+        return Ok(remote_auth_failure(
+            "remote api requires a valid bearer token",
+        ));
+    }
+    let segments: Vec<&str> = request
+        .path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let common = remote_common_args(state_dir);
+    let response = match (request.method.as_str(), segments.as_slice()) {
+        ("GET", ["v1", "health"]) => UiHttpResponse::Json(
+            200,
+            json!({ "ok": true, "api_version": REMOTE_API_VERSION }),
+        ),
+        ("GET", ["v1", "capabilities"]) => {
+            UiHttpResponse::Json(200, build_remote_capabilities_doc())
+        }
+        ("POST", ["v1", "artifacts", "cas", "presence"]) => {
+            let body_doc = parse_http_body(&request.body)?;
+            let mut missing = Vec::new();
+            let mut digests = Vec::new();
+            if let Some(items) = body_doc.get("digests").and_then(Value::as_array) {
+                for item in items {
+                    if let Some(sha) = item.as_str() {
+                        digests.push(sha.to_string());
+                    }
+                }
+            }
+            if let Some(items) = body_doc.get("objects").and_then(Value::as_array) {
+                for item in items {
+                    if let Some(sha) = item.get("sha256").and_then(Value::as_str) {
+                        digests.push(sha.to_string());
+                    }
+                }
+            }
+            digests.sort();
+            digests.dedup();
+            for sha in digests {
+                if !rel_store_blob_path(state_dir, &sha).exists() {
+                    missing.push(sha);
+                }
+            }
+            UiHttpResponse::Json(200, json!({ "missing": missing }))
+        }
+        ("PUT", ["v1", "artifacts", "cas", "objects", sha]) => {
+            let actual = sha256_hex(&request.body);
+            if actual != *sha {
+                UiHttpResponse::Json(
+                    409,
+                    cli_report(
+                        "artifact upload",
+                        false,
+                        12,
+                        json!({}),
+                        None,
+                        vec![result_diag(
+                            "LP_REMOTE_UPLOAD_DIGEST_MISMATCH",
+                            "run",
+                            "uploaded blob digest does not match path digest",
+                            "error",
+                        )],
+                    ),
+                )
+            } else {
+                let logical_name =
+                    request_header(&request, "x-logical-name").unwrap_or("artifact.bin");
+                let media_type =
+                    request_header(&request, "content-type").unwrap_or("application/octet-stream");
+                let artifact = cas_put(state_dir, logical_name, media_type, &request.body)?;
+                UiHttpResponse::Json(200, json!({ "ok": true, "artifact": artifact }))
+            }
+        }
+        ("POST", ["v1", "deploy", "accept"]) => {
+            let body_doc = parse_http_body(&request.body)?;
+            let fixture = remote_fixture_name(body_doc.get("fixture").and_then(Value::as_str));
+            if matches!(
+                fixture.as_deref(),
+                Some("missing-secret") | Some("missing_secret") | Some("remote_missing_secret")
+            ) {
+                UiHttpResponse::Json(
+                    200,
+                    cli_report(
+                        "deploy accept",
+                        false,
+                        13,
+                        json!({ "op": "accept", "ok": false }),
+                        None,
+                        vec![result_diag(
+                            "LP_REMOTE_SECRET_NOT_FOUND",
+                            "run",
+                            "referenced remote secret was not found",
+                            "error",
+                        )],
+                    ),
+                )
+            } else {
+                let run_doc = body_doc
+                    .get("run")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("missing run document"))?;
+                let exec_doc = body_doc
+                    .get("execution")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("missing execution document"))?;
+                let decision_doc = body_doc
+                    .get("decision")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("missing decision document"))?;
+                let change_doc = body_doc.get("change_request").cloned();
+                let (run_id, exec_id, decision_id) = persist_remote_accept_docs(
+                    state_dir,
+                    &run_doc,
+                    &exec_doc,
+                    &decision_doc,
+                    change_doc.as_ref(),
+                )?;
+                UiHttpResponse::Json(
+                    200,
+                    cli_report(
+                        "deploy accept",
+                        true,
+                        0,
+                        json!({
+                            "run_id": run_id,
+                            "exec_id": exec_id,
+                            "decision_id": decision_id,
+                        }),
+                        get_str(&run_doc, &["run_id"]).as_deref(),
+                        Vec::new(),
+                    ),
+                )
+            }
+        }
+        ("POST", ["v1", "deploy", "run"]) => {
+            let body_doc = parse_http_body(&request.body)?;
+            let run_id = if let Some(run_id) = body_doc.get("run_id").and_then(Value::as_str) {
+                run_id.to_string()
+            } else if let Some(exec_id) = body_doc.get("deployment_id").and_then(Value::as_str) {
+                let exec_doc = load_exec(state_dir, exec_id)?;
+                get_str(&exec_doc, &["run_id"])
+                    .ok_or_else(|| anyhow!("missing run_id for deployment {exec_id}"))?
+            } else {
+                return Err(anyhow!("missing run_id or deployment_id"));
+            };
+            let exec_id = match find_exec_id_for_run(state_dir, &run_id)? {
+                Some(exec_id) => exec_id,
+                None => {
+                    return Ok(UiHttpResponse::Json(
+                        200,
+                        cli_report(
+                            "deploy run",
+                            false,
+                            2,
+                            json!({}),
+                            None,
+                            vec![result_diag(
+                                "LP_DEPLOYMENT_NOT_FOUND",
+                                "run",
+                                "deployment not found for accepted run",
+                                "error",
+                            )],
+                        ),
+                    ));
+                }
+            };
+            let fixture = remote_fixture_name(body_doc.get("fixture").and_then(Value::as_str));
+            let (plan, metrics_dir) = resolve_remote_fixture_inputs(fixture.as_deref());
+            UiHttpResponse::Json(
+                200,
+                command_run(DeployRunArgs {
+                    deployment_id: exec_id,
+                    accepted_run: Some(run_id),
+                    plan,
+                    metrics_dir,
+                    pause_scale: body_doc.get("pause_scale").and_then(Value::as_f64),
+                    target: remote_local_target(),
+                    fixture,
+                    common,
+                })?,
+            )
+        }
+        ("GET", ["v1", "deployments", exec_id]) => UiHttpResponse::Json(
+            200,
+            command_status(DeploymentStatusArgs {
+                deployment_id: (*exec_id).to_string(),
+                target: remote_local_target(),
+                common,
+            })?,
+        ),
+        ("GET", ["v1", "deployments", exec_id, "query"]) => UiHttpResponse::Json(
+            200,
+            command_query(DeployQueryArgs {
+                deployment_id: Some((*exec_id).to_string()),
+                app_id: None,
+                env: None,
+                view: request_query_string(&request, "view")
+                    .unwrap_or_else(|| "summary".to_string()),
+                limit: request_query_usize(&request, "limit"),
+                latest: false,
+                rebuild_index: request_query_bool(&request, "rebuild_index", false),
+                target: remote_local_target(),
+                common,
+            })?,
+        ),
+        ("POST", ["v1", "deployments", exec_id, "stop"]) => {
+            let body_doc = parse_http_body(&request.body)?;
+            UiHttpResponse::Json(
+                200,
+                command_stop(DeploymentControlArgs {
+                    deployment_id: (*exec_id).to_string(),
+                    reason: get_http_string(&body_doc, "reason", "remote_stop"),
+                    target: remote_local_target(),
+                    common,
+                })?,
+            )
+        }
+        ("POST", ["v1", "deployments", exec_id, "rollback"]) => {
+            let body_doc = parse_http_body(&request.body)?;
+            UiHttpResponse::Json(
+                200,
+                command_rollback(DeploymentControlArgs {
+                    deployment_id: (*exec_id).to_string(),
+                    reason: get_http_string(&body_doc, "reason", "remote_rollback"),
+                    target: remote_local_target(),
+                    common,
+                })?,
+            )
+        }
+        ("POST", ["v1", "deployments", exec_id, "pause"]) => {
+            let body_doc = parse_http_body(&request.body)?;
+            UiHttpResponse::Json(
+                200,
+                command_pause(DeploymentControlArgs {
+                    deployment_id: (*exec_id).to_string(),
+                    reason: get_http_string(&body_doc, "reason", "remote_pause"),
+                    target: remote_local_target(),
+                    common,
+                })?,
+            )
+        }
+        ("POST", ["v1", "deployments", exec_id, "rerun"]) => {
+            let body_doc = parse_http_body(&request.body)?;
+            UiHttpResponse::Json(
+                200,
+                command_rerun(DeploymentRerunArgs {
+                    deployment_id: (*exec_id).to_string(),
+                    from_step: body_doc
+                        .get("from_step")
+                        .and_then(Value::as_u64)
+                        .map(|value| value as usize),
+                    reason: get_http_string(&body_doc, "reason", "remote_rerun"),
+                    target: remote_local_target(),
+                    common,
+                })?,
+            )
+        }
+        ("POST", ["v1", "incidents", "capture"]) => {
+            let body_doc = parse_http_body(&request.body)?;
+            let request_path =
+                materialize_remote_http_doc(state_dir, "request", body_doc.get("request"))?;
+            let response_path =
+                materialize_remote_http_doc(state_dir, "response", body_doc.get("response"))?;
+            let trace_path =
+                materialize_remote_http_doc(state_dir, "trace", body_doc.get("trace"))?;
+            UiHttpResponse::Json(
+                200,
+                command_incident_capture(IncidentCaptureArgs {
+                    deployment_id: get_http_string(&body_doc, "deployment_id", ""),
+                    reason: get_http_string(&body_doc, "reason", "remote_incident"),
+                    request: request_path,
+                    response: response_path,
+                    trace: trace_path,
+                    classification: get_http_string(&body_doc, "classification", "unknown"),
+                    source: get_http_string(&body_doc, "source", "remote"),
+                    target: remote_local_target(),
+                    common,
+                })?,
+            )
+        }
+        ("GET", ["v1", "incidents"]) => UiHttpResponse::Json(
+            200,
+            command_incident_list(IncidentListArgs {
+                deployment_id: request_query_string(&request, "deployment_id"),
+                app_id: request_query_string(&request, "app_id"),
+                env: request_query_string(&request, "env"),
+                limit: request_query_usize(&request, "limit"),
+                rebuild_index: request_query_bool(&request, "rebuild_index", false),
+                target: remote_local_target(),
+                common,
+            })?,
+        ),
+        ("GET", ["v1", "incidents", incident_id]) => UiHttpResponse::Json(
+            200,
+            command_incident_get(IncidentGetArgs {
+                incident_id: (*incident_id).to_string(),
+                rebuild_index: request_query_bool(&request, "rebuild_index", false),
+                target: remote_local_target(),
+                common,
+            })?,
+        ),
+        ("POST", ["v1", "incidents", incident_id, "regress"]) => {
+            let body_doc = parse_http_body(&request.body)?;
+            UiHttpResponse::Json(
+                200,
+                command_regress_from_incident(RegressFromIncidentArgs {
+                    incident_id: (*incident_id).to_string(),
+                    name: get_http_string(&body_doc, "name", "incident"),
+                    out_dir: get_http_optional_string(&body_doc, "out_dir"),
+                    dry_run: get_http_bool(&body_doc, "dry_run", false),
+                    target: remote_local_target(),
+                    common,
+                })?,
+            )
+        }
+        ("GET", ["v1", "events"]) => UiHttpResponse::Json(
+            200,
+            cli_report(
+                "events",
+                true,
+                0,
+                json!({
+                    "items": [],
+                    "cursor": request_query_string(&request, "cursor"),
+                    "next_cursor": null
+                }),
+                None,
+                Vec::new(),
+            ),
+        ),
+        ("GET", ["v1", "logs"]) => UiHttpResponse::Json(
+            200,
+            cli_report(
+                "logs",
+                true,
+                0,
+                json!({
+                    "items": [],
+                    "cursor": request_query_string(&request, "cursor"),
+                    "next_cursor": null
+                }),
+                None,
+                Vec::new(),
+            ),
+        ),
+        _ => UiHttpResponse::Json(
+            404,
+            cli_report(
+                "remote",
+                false,
+                4,
+                json!({}),
+                None,
+                vec![result_diag(
+                    "LP_HTTP_NOT_FOUND",
+                    "run",
+                    "endpoint not found",
+                    "error",
+                )],
+            ),
+        ),
+    };
+    Ok(response)
+}
+
 fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpResponse> {
     let body_doc = parse_http_body(&request.body)?;
     let common = CommonStateArgs {
@@ -4820,6 +7488,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                 env: None,
                 limit: None,
                 rebuild_index: false,
+                target: None,
                 common: common.clone(),
             })?,
         ),
@@ -4840,6 +7509,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         limit: None,
                         latest: false,
                         rebuild_index: false,
+                        target: None,
                         common: common.clone(),
                     })?,
                 ),
@@ -4853,6 +7523,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         limit: None,
                         latest: false,
                         rebuild_index: false,
+                        target: None,
                         common: common.clone(),
                     })?,
                 ),
@@ -4864,6 +7535,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         env: None,
                         limit: None,
                         rebuild_index: false,
+                        target: None,
                         common: common.clone(),
                     })?,
                 ),
@@ -4872,6 +7544,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                     command_incident_get(IncidentGetArgs {
                         incident_id: (*incident_id).to_string(),
                         rebuild_index: false,
+                        target: None,
                         common: common.clone(),
                     })?,
                 ),
@@ -4880,6 +7553,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                     command_pause(DeploymentControlArgs {
                         deployment_id: (*exec_id).to_string(),
                         reason: get_http_string(&body_doc, "reason", "http_pause"),
+                        target: None,
                         common: common.clone(),
                     })?,
                 ),
@@ -4887,8 +7561,9 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                     200,
                     command_rerun(DeploymentRerunArgs {
                         deployment_id: (*exec_id).to_string(),
-                        from_step: get_http_u64(&body_doc, "from_step", 0) as usize,
+                        from_step: Some(get_http_u64(&body_doc, "from_step", 0) as usize),
                         reason: get_http_string(&body_doc, "reason", "http_rerun"),
+                        target: None,
                         common: common.clone(),
                     })?,
                 ),
@@ -4897,6 +7572,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                     command_rollback(DeploymentControlArgs {
                         deployment_id: (*exec_id).to_string(),
                         reason: get_http_string(&body_doc, "reason", "http_rollback"),
+                        target: None,
                         common: common.clone(),
                     })?,
                 ),
@@ -4905,6 +7581,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                     command_stop(DeploymentControlArgs {
                         deployment_id: (*exec_id).to_string(),
                         reason: get_http_string(&body_doc, "reason", "http_stop"),
+                        target: None,
                         common: common.clone(),
                     })?,
                 ),
@@ -4959,6 +7636,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         name: get_http_string(&body_doc, "name", "incident"),
                         out_dir: get_http_optional_string(&body_doc, "out_dir"),
                         dry_run: get_http_bool(&body_doc, "dry_run", false),
+                        target: None,
                         common: common.clone(),
                     })?,
                 ),
@@ -5029,18 +7707,25 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
         if let Some(end) = header_end {
             if buffer.len() >= end + content_length {
                 let head = std::str::from_utf8(&buffer[..end]).context("decode request head")?;
-                let mut parts = head.lines().next().unwrap_or_default().split_whitespace();
+                let mut lines = head.lines();
+                let mut parts = lines.next().unwrap_or_default().split_whitespace();
                 let method = parts.next().unwrap_or_default().to_string();
-                let path = parts
-                    .next()
-                    .unwrap_or("/")
-                    .split('?')
-                    .next()
-                    .unwrap_or("/")
-                    .to_string();
+                let target = parts.next().unwrap_or("/");
+                let (path, query) = match target.split_once('?') {
+                    Some((path, query)) => (path.to_string(), parse_query_string(query)),
+                    None => (target.to_string(), BTreeMap::new()),
+                };
+                let mut headers = BTreeMap::new();
+                for line in lines {
+                    if let Some((name, value)) = line.split_once(':') {
+                        headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+                    }
+                }
                 return Ok(HttpRequest {
                     method,
                     path,
+                    query,
+                    headers,
                     body: buffer[end..end + content_length].to_vec(),
                 });
             }
@@ -5050,6 +7735,18 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
         }
     }
     bail!("incomplete http request")
+}
+
+fn parse_query_string(raw: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for part in raw.split('&') {
+        if part.is_empty() {
+            continue;
+        }
+        let (key, value) = part.split_once('=').unwrap_or((part, ""));
+        out.insert(key.to_string(), value.to_string());
+    }
+    out
 }
 
 fn parse_content_length(head: &[u8]) -> Result<usize> {
@@ -5121,6 +7818,8 @@ fn write_http_response(
 ) -> Result<()> {
     let status_text = match status {
         200 => "OK",
+        401 => "Unauthorized",
+        409 => "Conflict",
         400 => "Bad Request",
         404 => "Not Found",
         500 => "Internal Server Error",

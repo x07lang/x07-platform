@@ -1,0 +1,14 @@
+{
+  "schema_version": "lp.cli.report@0.1.0",
+  "ok": false,
+  "exit_code": 12,
+  "diagnostics": [
+    {
+      "code": "LP_REMOTE_UPLOAD_DIGEST_MISMATCH"
+    }
+  ],
+  "result": {
+    "op": "accept",
+    "ok": false
+  }
+}

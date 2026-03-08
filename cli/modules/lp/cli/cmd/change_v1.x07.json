@@ -683,7 +683,7 @@
             "std.os.fs.read_all_v1",
             [
               "bytes.lit",
-              "spec/schemas/lp.change_request.schema.json"
+              "contracts/spec/schemas/lp.change_request.schema.json"
             ],
             [
               "std.bytes.copy",
@@ -1746,7 +1746,7 @@
             "std.os.fs.read_all_v1",
             [
               "bytes.lit",
-              "spec/schemas/lp.change_request.schema.json"
+              "contracts/spec/schemas/lp.change_request.schema.json"
             ],
             [
               "std.bytes.copy",

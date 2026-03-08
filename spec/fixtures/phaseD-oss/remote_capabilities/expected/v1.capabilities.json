@@ -1,0 +1,46 @@
+{
+  "schema_version": "lp.remote.capabilities.response@0.1.0",
+  "api_version": "v1",
+  "generated_unix_ms": "__ANY__",
+  "server_id": "__ANY__",
+  "runtime_provider": "lp.impl.runtime.wasmcloud_v1",
+  "routing_provider": "lp.impl.routing.edge_http_v1",
+  "telemetry_provider": "lp.impl.telemetry.otlp_http_v1",
+  "secrets_provider": "lp.impl.secrets.server_store_v1",
+  "component_registry": "lp.impl.component_registry.oci_v1",
+  "artifact_distribution": "oci",
+  "accepted_artifact_kinds": [
+    "x07.app.pack@0.1.0"
+  ],
+  "supported_schema_ids": [
+    "__ANY__"
+  ],
+  "supported_deploy_plan_versions": [
+    "x07.deploy.plan@0.2.0"
+  ],
+  "features": {
+    "incidents": true,
+    "regressions": true,
+    "pause": true,
+    "rerun": true,
+    "weighted_canary": true,
+    "otlp": true,
+    "server_side_secrets": true,
+    "event_stream": true,
+    "signed_control_actions": true
+  },
+  "limits": {
+    "max_blob_bytes": "__ANY__",
+    "max_parallel_uploads": "__ANY__",
+    "max_presence_batch": "__ANY__",
+    "max_query_limit": "__ANY__"
+  },
+  "auth": {
+    "scheme": "bearer",
+    "token_kind": "opaque",
+    "required_scopes": [
+      "lp.deploy.read"
+    ]
+  },
+  "capabilities_digest": "__ANY__"
+}

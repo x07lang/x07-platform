@@ -1,0 +1,14 @@
+{
+  "schema_version": "lp.cli.report@0.1.0",
+  "ok": false,
+  "exit_code": 13,
+  "diagnostics": [
+    {
+      "code": "LP_REMOTE_LEASE_CONFLICT"
+    }
+  ],
+  "result": {
+    "op": "run",
+    "ok": false
+  }
+}

@@ -1,1 +1,2011 @@
-{"decls":[{"kind":"export","names":["lp.impl.deploy_exec.driver_v1.app_kill_v1","lp.impl.deploy_exec.driver_v1.app_list_v1","lp.impl.deploy_exec.driver_v1.app_unkill_v1","lp.impl.deploy_exec.driver_v1.incident_capture_v1","lp.impl.deploy_exec.driver_v1.incident_get_v1","lp.impl.deploy_exec.driver_v1.incident_list_v1","lp.impl.deploy_exec.driver_v1.pause_v1","lp.impl.deploy_exec.driver_v1.platform_kill_v1","lp.impl.deploy_exec.driver_v1.platform_unkill_v1","lp.impl.deploy_exec.driver_v1.query_v1","lp.impl.deploy_exec.driver_v1.regress_from_incident_v1","lp.impl.deploy_exec.driver_v1.rerun_v1","lp.impl.deploy_exec.driver_v1.rollback_v1","lp.impl.deploy_exec.driver_v1.run_v1","lp.impl.deploy_exec.driver_v1.status_v1","lp.impl.deploy_exec.driver_v1.stop_v1","lp.impl.deploy_exec.driver_v1.ui_serve_v1"]},{"body":["begin",["let","deployment_id",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","deployment_id"]]],["let","incident_id",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","incident_id"]]],["let","reason",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","reason"]]],["let","plan",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","plan"]]],["let","metrics_dir",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","metrics_dir"]]],["let","pause_scale",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","pause_scale"]]],["let","state_dir",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","state_dir"]]],["let","now_unix_ms",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","now_unix_ms"]]],["let","app_id",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","app_id"]]],["let","env_name",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","env"]]],["let","view_name",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","view"]]],["let","limit",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","limit"]]],["let","classification",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","classification"]]],["let","incident_status",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","status"]]],["let","request_path",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","request"]]],["let","response_path",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","response"]]],["let","trace_path",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","trace"]]],["let","source",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","source"]]],["let","regression_name",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","name"]]],["let","out_dir",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","out_dir"]]],["let","from_step",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","from_step"]]],["let","addr",["lp.cli.args_v1.opt_bytes_v1","doc",["bytes.view_lit","addr"]]],["let","latest",["lp.cli.args_v1.flag_present_v1","doc",["bytes.view_lit","latest"]]],["let","rebuild_index",["lp.cli.args_v1.flag_present_v1","doc",["bytes.view_lit","rebuild_index"]]],["let","dry_run",["lp.cli.args_v1.flag_present_v1","doc",["bytes.view_lit","dry_run"]]],["let","req",["std.os.process.req_v1.new",["bytes.lit","/usr/bin/env"]]],["set","req",["std.os.process.req_v1.arg","req",["bytes.lit","bash"]]],["set","req",["std.os.process.req_v1.arg","req",["bytes.lit","scripts/x07lp-driver"]]],["set","req",["std.os.process.req_v1.arg","req",["std.bytes.copy","action"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--deployment-id"],["bytes.view","deployment_id"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--incident-id"],["bytes.view","incident_id"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--reason"],["bytes.view","reason"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--plan"],["bytes.view","plan"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--metrics-dir"],["bytes.view","metrics_dir"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--pause-scale"],["bytes.view","pause_scale"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--state-dir"],["bytes.view","state_dir"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--now-unix-ms"],["bytes.view","now_unix_ms"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--app-id"],["bytes.view","app_id"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--env"],["bytes.view","env_name"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--view"],["bytes.view","view_name"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--limit"],["bytes.view","limit"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--classification"],["bytes.view","classification"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--status"],["bytes.view","incident_status"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--request"],["bytes.view","request_path"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--response"],["bytes.view","response_path"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--trace"],["bytes.view","trace_path"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--source"],["bytes.view","source"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--name"],["bytes.view","regression_name"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--out-dir"],["bytes.view","out_dir"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--from-step"],["bytes.view","from_step"]]],["set","req",["lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","req",["bytes.view_lit","--addr"],["bytes.view","addr"]]],["if",["=","latest",1],["set","req",["std.os.process.req_v1.arg","req",["bytes.lit","--latest"]]],0],["if",["=","rebuild_index",1],["set","req",["std.os.process.req_v1.arg","req",["bytes.lit","--rebuild-index"]]],0],["if",["=","dry_run",1],["set","req",["std.os.process.req_v1.arg","req",["bytes.lit","--dry-run"]]],0],["set","req",["std.os.process.req_v1.arg","req",["bytes.lit","--json"]]],["set","req",["lp.impl.deploy_exec.driver_v1._req_env_v1","req"]],["let","req_b",["std.os.process.req_v1.finish","req"]],["let","caps",["std.os.process.caps_v1.finish",65536,1048576,600000,1048576]],["let","resp",["std.os.process.run_capture_v1","req_b","caps"]],["begin",["let","_x07_tmp_copy",["view.to_bytes",["bytes.view","resp"]]],["if",["std.os.process.is_err",["bytes.view","_x07_tmp_copy"]],["return",["lp.impl.deploy_exec.driver_v1._internal_err_v1","command",["bytes.view_lit","deploy_driver_spawn_failed"]]],0],0],["let","stdout",["std.os.process.resp_stdout",["bytes.view","resp"]]],["let","stdout_canon",["ext.json.canon.canonicalize",["bytes.view","stdout"]]],["if",["=",["view.len",["bytes.view","stdout_canon"]],0],["return",["lp.impl.deploy_exec.driver_v1._internal_err_v1","command",["bytes.view_lit","deploy_driver_empty_stdout"]]],0],"stdout_canon"],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1._call_driver_v1","params":[{"name":"doc","ty":"bytes_view"},{"name":"action","ty":"bytes_view"},{"name":"command","ty":"bytes_view"}],"result":"bytes"},{"body":["begin",["let","diag",["lp.core.diag_v1.mk_v1",["bytes.lit","LP_INTERNAL"],["bytes.lit","error"],["bytes.lit","run"],"message"]],["let","diags",["lp.cli.util_v1.seq1_v1",["bytes.view","diag"]]],["let","result",["lp.cli.util_v1.empty_map_v1"]],["let","report",["lp.cli.report_v1.mk_v1","command",0,50,["bytes.view","diags"],["bytes.view","result"]]],["lp.core.json_v1.value_to_canon_json_v1",["bytes.view","report"]]],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1._internal_err_v1","params":[{"name":"command","ty":"bytes_view"},{"name":"message","ty":"bytes_view"}],"result":"bytes"},{"body":["if",[">",["view.len","value"],0],["begin",["set","req",["std.os.process.req_v1.arg","req",["std.bytes.copy","flag"]]],["set","req",["std.os.process.req_v1.arg","req",["std.bytes.copy","value"]]],"req"],"req"],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1","params":[{"name":"req","ty":"vec_u8"},{"name":"flag","ty":"bytes_view"},{"name":"value","ty":"bytes_view"}],"result":"vec_u8"},{"body":["begin",["let","path",["std.os.env.get",["bytes.lit","PATH"]]],["if",[">",["bytes.len","path"],0],["set","req",["std.os.process.req_v1.env","req",["bytes.lit","PATH"],"path"]],0],["let","home",["std.os.env.get",["bytes.lit","HOME"]]],["if",[">",["bytes.len","home"],0],["set","req",["std.os.process.req_v1.env","req",["bytes.lit","HOME"],"home"]],0],"req"],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1._req_env_v1","params":[{"name":"req","ty":"vec_u8"}],"result":"vec_u8"},{"body":["lp.impl.deploy_exec.driver_v1._call_driver_v1","doc",["bytes.view_lit","app-kill"],["bytes.view_lit","app kill"]],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1.app_kill_v1","params":[{"name":"doc","ty":"bytes_view"}],"result":"bytes"},{"body":["lp.impl.deploy_exec.driver_v1._call_driver_v1","doc",["bytes.view_lit","app-list"],["bytes.view_lit","app list"]],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1.app_list_v1","params":[{"name":"doc","ty":"bytes_view"}],"result":"bytes"},{"body":["lp.impl.deploy_exec.driver_v1._call_driver_v1","doc",["bytes.view_lit","app-unkill"],["bytes.view_lit","app unkill"]],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1.app_unkill_v1","params":[{"name":"doc","ty":"bytes_view"}],"result":"bytes"},{"body":["lp.impl.deploy_exec.driver_v1._call_driver_v1","doc",["bytes.view_lit","incident-capture"],["bytes.view_lit","incident capture"]],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1.incident_capture_v1","params":[{"name":"doc","ty":"bytes_view"}],"result":"bytes"},{"body":["lp.impl.deploy_exec.driver_v1._call_driver_v1","doc",["bytes.view_lit","incident-get"],["bytes.view_lit","incident get"]],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1.incident_get_v1","params":[{"name":"doc","ty":"bytes_view"}],"result":"bytes"},{"body":["lp.impl.deploy_exec.driver_v1._call_driver_v1","doc",["bytes.view_lit","incident-list"],["bytes.view_lit","incident list"]],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1.incident_list_v1","params":[{"name":"doc","ty":"bytes_view"}],"result":"bytes"},{"body":["lp.impl.deploy_exec.driver_v1._call_driver_v1","doc",["bytes.view_lit","pause"],["bytes.view_lit","deploy pause"]],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1.pause_v1","params":[{"name":"doc","ty":"bytes_view"}],"result":"bytes"},{"body":["lp.impl.deploy_exec.driver_v1._call_driver_v1","doc",["bytes.view_lit","platform-kill"],["bytes.view_lit","platform kill"]],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1.platform_kill_v1","params":[{"name":"doc","ty":"bytes_view"}],"result":"bytes"},{"body":["lp.impl.deploy_exec.driver_v1._call_driver_v1","doc",["bytes.view_lit","platform-unkill"],["bytes.view_lit","platform unkill"]],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1.platform_unkill_v1","params":[{"name":"doc","ty":"bytes_view"}],"result":"bytes"},{"body":["lp.impl.deploy_exec.driver_v1._call_driver_v1","doc",["bytes.view_lit","query"],["bytes.view_lit","deploy query"]],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1.query_v1","params":[{"name":"doc","ty":"bytes_view"}],"result":"bytes"},{"body":["lp.impl.deploy_exec.driver_v1._call_driver_v1","doc",["bytes.view_lit","regress-from-incident"],["bytes.view_lit","regress from-incident"]],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1.regress_from_incident_v1","params":[{"name":"doc","ty":"bytes_view"}],"result":"bytes"},{"body":["lp.impl.deploy_exec.driver_v1._call_driver_v1","doc",["bytes.view_lit","rerun"],["bytes.view_lit","deploy rerun"]],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1.rerun_v1","params":[{"name":"doc","ty":"bytes_view"}],"result":"bytes"},{"body":["lp.impl.deploy_exec.driver_v1._call_driver_v1","doc",["bytes.view_lit","rollback"],["bytes.view_lit","deploy rollback"]],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1.rollback_v1","params":[{"name":"doc","ty":"bytes_view"}],"result":"bytes"},{"body":["lp.impl.deploy_exec.driver_v1._call_driver_v1","doc",["bytes.view_lit","run"],["bytes.view_lit","deploy run"]],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1.run_v1","params":[{"name":"doc","ty":"bytes_view"}],"result":"bytes"},{"body":["lp.impl.deploy_exec.driver_v1._call_driver_v1","doc",["bytes.view_lit","status"],["bytes.view_lit","deploy status"]],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1.status_v1","params":[{"name":"doc","ty":"bytes_view"}],"result":"bytes"},{"body":["lp.impl.deploy_exec.driver_v1._call_driver_v1","doc",["bytes.view_lit","stop"],["bytes.view_lit","deploy stop"]],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1.stop_v1","params":[{"name":"doc","ty":"bytes_view"}],"result":"bytes"},{"body":["lp.impl.deploy_exec.driver_v1._call_driver_v1","doc",["bytes.view_lit","ui-serve"],["bytes.view_lit","ui serve"]],"kind":"defn","name":"lp.impl.deploy_exec.driver_v1.ui_serve_v1","params":[{"name":"doc","ty":"bytes_view"}],"result":"bytes"}],"imports":["ext.json.canon","lp.cli.args_v1","lp.cli.report_v1","lp.cli.util_v1","lp.core.diag_v1","lp.core.json_v1","std.bytes","std.os.env","std.os.process","std.os.process.caps_v1","std.os.process.req_v1"],"kind":"module","module_id":"lp.impl.deploy_exec.driver_v1","schema_version":"x07.x07ast@0.5.0"}
+{
+  "decls": [
+    {
+      "kind": "export",
+      "names": [
+        "lp.impl.deploy_exec.driver_v1.accept_v1",
+        "lp.impl.deploy_exec.driver_v1.adapter_conformance_v1",
+        "lp.impl.deploy_exec.driver_v1.app_kill_v1",
+        "lp.impl.deploy_exec.driver_v1.app_list_v1",
+        "lp.impl.deploy_exec.driver_v1.app_unkill_v1",
+        "lp.impl.deploy_exec.driver_v1.incident_capture_v1",
+        "lp.impl.deploy_exec.driver_v1.incident_get_v1",
+        "lp.impl.deploy_exec.driver_v1.incident_list_v1",
+        "lp.impl.deploy_exec.driver_v1.pause_v1",
+        "lp.impl.deploy_exec.driver_v1.platform_kill_v1",
+        "lp.impl.deploy_exec.driver_v1.platform_unkill_v1",
+        "lp.impl.deploy_exec.driver_v1.query_v1",
+        "lp.impl.deploy_exec.driver_v1.regress_from_incident_v1",
+        "lp.impl.deploy_exec.driver_v1.rerun_v1",
+        "lp.impl.deploy_exec.driver_v1.rollback_v1",
+        "lp.impl.deploy_exec.driver_v1.run_v1",
+        "lp.impl.deploy_exec.driver_v1.status_v1",
+        "lp.impl.deploy_exec.driver_v1.stop_v1",
+        "lp.impl.deploy_exec.driver_v1.target_add_v1",
+        "lp.impl.deploy_exec.driver_v1.target_inspect_v1",
+        "lp.impl.deploy_exec.driver_v1.target_list_v1",
+        "lp.impl.deploy_exec.driver_v1.target_remove_v1",
+        "lp.impl.deploy_exec.driver_v1.target_use_v1",
+        "lp.impl.deploy_exec.driver_v1.ui_serve_v1"
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        },
+        {
+          "name": "action",
+          "ty": "bytes_view"
+        },
+        {
+          "name": "command",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "begin",
+        [
+          "let",
+          "pack_dir",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "pack_dir"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "pack_manifest",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "pack_manifest"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "change_path",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "change"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "ops_profile",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "ops_profile"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "target_name",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "target"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "fixture_name",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "fixture"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "deployment_raw",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "deployment"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "deployment_id_raw",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "deployment_id"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "deployment_id",
+          [
+            "if",
+            [
+              ">",
+              [
+                "bytes.len",
+                "deployment_raw"
+              ],
+              0
+            ],
+            [
+              "std.bytes.copy",
+              [
+                "bytes.view",
+                "deployment_raw"
+              ]
+            ],
+            [
+              "std.bytes.copy",
+              [
+                "bytes.view",
+                "deployment_id_raw"
+              ]
+            ]
+          ]
+        ],
+        [
+          "let",
+          "incident_id",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "incident_id"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "accepted_run",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "accepted_run"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "reason",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "reason"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "plan",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "plan"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "metrics_dir",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "metrics_dir"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "pause_scale",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "pause_scale"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "profile_path",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "profile"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "state_dir",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "state_dir"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "now_unix_ms",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "now_unix_ms"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "app_id",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "app_id"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "env_name",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "env"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "view_name",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "view"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "limit",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "limit"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "classification",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "classification"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "incident_status",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "status"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "request_path",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "request"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "response_path",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "response"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "trace_path",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "trace"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "source",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "source"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "name",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "name"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "out_dir",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "out_dir"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "from_step",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "from_step"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "addr",
+          [
+            "lp.cli.args_v1.opt_bytes_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "addr"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "latest",
+          [
+            "lp.cli.args_v1.flag_present_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "latest"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "rebuild_index",
+          [
+            "lp.cli.args_v1.flag_present_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "rebuild_index"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "dry_run",
+          [
+            "lp.cli.args_v1.flag_present_v1",
+            "doc",
+            [
+              "bytes.view_lit",
+              "dry_run"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "req",
+          [
+            "std.os.process.req_v1.new",
+            [
+              "bytes.lit",
+              "/usr/bin/env"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "std.os.process.req_v1.arg",
+            "req",
+            [
+              "bytes.lit",
+              "bash"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "std.os.process.req_v1.arg",
+            "req",
+            [
+              "bytes.lit",
+              "scripts/x07lp-driver"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "std.os.process.req_v1.arg",
+            "req",
+            [
+              "std.bytes.copy",
+              "action"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--pack-dir"
+            ],
+            [
+              "bytes.view",
+              "pack_dir"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--pack-manifest"
+            ],
+            [
+              "bytes.view",
+              "pack_manifest"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--change"
+            ],
+            [
+              "bytes.view",
+              "change_path"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--ops-profile"
+            ],
+            [
+              "bytes.view",
+              "ops_profile"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--target"
+            ],
+            [
+              "bytes.view",
+              "target_name"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--fixture"
+            ],
+            [
+              "bytes.view",
+              "fixture_name"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--deployment"
+            ],
+            [
+              "bytes.view",
+              "deployment_id"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--incident-id"
+            ],
+            [
+              "bytes.view",
+              "incident_id"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--accepted-run"
+            ],
+            [
+              "bytes.view",
+              "accepted_run"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--reason"
+            ],
+            [
+              "bytes.view",
+              "reason"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--plan"
+            ],
+            [
+              "bytes.view",
+              "plan"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--metrics-dir"
+            ],
+            [
+              "bytes.view",
+              "metrics_dir"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--pause-scale"
+            ],
+            [
+              "bytes.view",
+              "pause_scale"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--profile"
+            ],
+            [
+              "bytes.view",
+              "profile_path"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--name"
+            ],
+            [
+              "bytes.view",
+              "name"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--state-dir"
+            ],
+            [
+              "bytes.view",
+              "state_dir"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--now-unix-ms"
+            ],
+            [
+              "bytes.view",
+              "now_unix_ms"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--app-id"
+            ],
+            [
+              "bytes.view",
+              "app_id"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--env"
+            ],
+            [
+              "bytes.view",
+              "env_name"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--view"
+            ],
+            [
+              "bytes.view",
+              "view_name"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--limit"
+            ],
+            [
+              "bytes.view",
+              "limit"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--classification"
+            ],
+            [
+              "bytes.view",
+              "classification"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--status"
+            ],
+            [
+              "bytes.view",
+              "incident_status"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--request"
+            ],
+            [
+              "bytes.view",
+              "request_path"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--response"
+            ],
+            [
+              "bytes.view",
+              "response_path"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--trace"
+            ],
+            [
+              "bytes.view",
+              "trace_path"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--source"
+            ],
+            [
+              "bytes.view",
+              "source"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--out-dir"
+            ],
+            [
+              "bytes.view",
+              "out_dir"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--from-step"
+            ],
+            [
+              "bytes.view",
+              "from_step"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+            "req",
+            [
+              "bytes.view_lit",
+              "--addr"
+            ],
+            [
+              "bytes.view",
+              "addr"
+            ]
+          ]
+        ],
+        [
+          "if",
+          [
+            "=",
+            "latest",
+            1
+          ],
+          [
+            "set",
+            "req",
+            [
+              "std.os.process.req_v1.arg",
+              "req",
+              [
+                "bytes.lit",
+                "--latest"
+              ]
+            ]
+          ],
+          0
+        ],
+        [
+          "if",
+          [
+            "=",
+            "rebuild_index",
+            1
+          ],
+          [
+            "set",
+            "req",
+            [
+              "std.os.process.req_v1.arg",
+              "req",
+              [
+                "bytes.lit",
+                "--rebuild-index"
+              ]
+            ]
+          ],
+          0
+        ],
+        [
+          "if",
+          [
+            "=",
+            "dry_run",
+            1
+          ],
+          [
+            "set",
+            "req",
+            [
+              "std.os.process.req_v1.arg",
+              "req",
+              [
+                "bytes.lit",
+                "--dry-run"
+              ]
+            ]
+          ],
+          0
+        ],
+        [
+          "set",
+          "req",
+          [
+            "std.os.process.req_v1.arg",
+            "req",
+            [
+              "bytes.lit",
+              "--json"
+            ]
+          ]
+        ],
+        [
+          "set",
+          "req",
+          [
+            "lp.impl.deploy_exec.driver_v1._req_env_v1",
+            "req"
+          ]
+        ],
+        [
+          "let",
+          "req_b",
+          [
+            "std.os.process.req_v1.finish",
+            "req"
+          ]
+        ],
+        [
+          "let",
+          "caps",
+          [
+            "std.os.process.caps_v1.finish",
+            65536,
+            1048576,
+            600000,
+            1048576
+          ]
+        ],
+        [
+          "let",
+          "resp",
+          [
+            "std.os.process.run_capture_v1",
+            "req_b",
+            "caps"
+          ]
+        ],
+        [
+          "begin",
+          [
+            "let",
+            "_x07_tmp_copy",
+            [
+              "view.to_bytes",
+              [
+                "bytes.view",
+                "resp"
+              ]
+            ]
+          ],
+          [
+            "if",
+            [
+              "std.os.process.is_err",
+              [
+                "bytes.view",
+                "_x07_tmp_copy"
+              ]
+            ],
+            [
+              "return",
+              [
+                "lp.impl.deploy_exec.driver_v1._internal_err_v1",
+                "command",
+                [
+                  "bytes.view_lit",
+                  "deploy_driver_spawn_failed"
+                ]
+              ]
+            ],
+            0
+          ],
+          0
+        ],
+        [
+          "let",
+          "stdout",
+          [
+            "std.os.process.resp_stdout",
+            [
+              "bytes.view",
+              "resp"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "stdout_canon",
+          [
+            "ext.json.canon.canonicalize",
+            [
+              "bytes.view",
+              "stdout"
+            ]
+          ]
+        ],
+        [
+          "if",
+          [
+            "=",
+            [
+              "view.len",
+              [
+                "bytes.view",
+                "stdout_canon"
+              ]
+            ],
+            0
+          ],
+          [
+            "return",
+            [
+              "lp.impl.deploy_exec.driver_v1._internal_err_v1",
+              "command",
+              [
+                "bytes.view_lit",
+                "deploy_driver_empty_stdout"
+              ]
+            ]
+          ],
+          0
+        ],
+        "stdout_canon"
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1._internal_err_v1",
+      "params": [
+        {
+          "name": "command",
+          "ty": "bytes_view"
+        },
+        {
+          "name": "message",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "begin",
+        [
+          "let",
+          "diag",
+          [
+            "lp.core.diag_v1.mk_v1",
+            [
+              "bytes.lit",
+              "LP_INTERNAL"
+            ],
+            [
+              "bytes.lit",
+              "error"
+            ],
+            [
+              "bytes.lit",
+              "run"
+            ],
+            "message"
+          ]
+        ],
+        [
+          "let",
+          "diags",
+          [
+            "lp.cli.util_v1.seq1_v1",
+            [
+              "bytes.view",
+              "diag"
+            ]
+          ]
+        ],
+        [
+          "let",
+          "result",
+          [
+            "lp.cli.util_v1.empty_map_v1"
+          ]
+        ],
+        [
+          "let",
+          "report",
+          [
+            "lp.cli.report_v1.mk_v1",
+            "command",
+            0,
+            50,
+            [
+              "bytes.view",
+              "diags"
+            ],
+            [
+              "bytes.view",
+              "result"
+            ]
+          ]
+        ],
+        [
+          "lp.core.json_v1.value_to_canon_json_v1",
+          [
+            "bytes.view",
+            "report"
+          ]
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1._maybe_push_pair_v1",
+      "params": [
+        {
+          "name": "req",
+          "ty": "vec_u8"
+        },
+        {
+          "name": "flag",
+          "ty": "bytes_view"
+        },
+        {
+          "name": "value",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "vec_u8",
+      "body": [
+        "if",
+        [
+          ">",
+          [
+            "view.len",
+            "value"
+          ],
+          0
+        ],
+        [
+          "begin",
+          [
+            "set",
+            "req",
+            [
+              "std.os.process.req_v1.arg",
+              "req",
+              [
+                "std.bytes.copy",
+                "flag"
+              ]
+            ]
+          ],
+          [
+            "set",
+            "req",
+            [
+              "std.os.process.req_v1.arg",
+              "req",
+              [
+                "std.bytes.copy",
+                "value"
+              ]
+            ]
+          ],
+          "req"
+        ],
+        "req"
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1._req_env_v1",
+      "params": [
+        {
+          "name": "req",
+          "ty": "vec_u8"
+        }
+      ],
+      "result": "vec_u8",
+      "body": [
+        "begin",
+        [
+          "let",
+          "path",
+          [
+            "std.os.env.get",
+            [
+              "bytes.lit",
+              "PATH"
+            ]
+          ]
+        ],
+        [
+          "if",
+          [
+            ">",
+            [
+              "bytes.len",
+              "path"
+            ],
+            0
+          ],
+          [
+            "set",
+            "req",
+            [
+              "std.os.process.req_v1.env",
+              "req",
+              [
+                "bytes.lit",
+                "PATH"
+              ],
+              "path"
+            ]
+          ],
+          0
+        ],
+        [
+          "let",
+          "home",
+          [
+            "std.os.env.get",
+            [
+              "bytes.lit",
+              "HOME"
+            ]
+          ]
+        ],
+        [
+          "if",
+          [
+            ">",
+            [
+              "bytes.len",
+              "home"
+            ],
+            0
+          ],
+          [
+            "set",
+            "req",
+            [
+              "std.os.process.req_v1.env",
+              "req",
+              [
+                "bytes.lit",
+                "HOME"
+              ],
+              "home"
+            ]
+          ],
+          0
+        ],
+        "req"
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.accept_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "accept"
+        ],
+        [
+          "bytes.view_lit",
+          "deploy accept"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.adapter_conformance_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "adapter-conformance"
+        ],
+        [
+          "bytes.view_lit",
+          "adapter conformance"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.app_kill_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "app-kill"
+        ],
+        [
+          "bytes.view_lit",
+          "app kill"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.app_list_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "app-list"
+        ],
+        [
+          "bytes.view_lit",
+          "app list"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.app_unkill_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "app-unkill"
+        ],
+        [
+          "bytes.view_lit",
+          "app unkill"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.incident_capture_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "incident-capture"
+        ],
+        [
+          "bytes.view_lit",
+          "incident capture"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.incident_get_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "incident-get"
+        ],
+        [
+          "bytes.view_lit",
+          "incident get"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.incident_list_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "incident-list"
+        ],
+        [
+          "bytes.view_lit",
+          "incident list"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.pause_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "pause"
+        ],
+        [
+          "bytes.view_lit",
+          "deploy pause"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.platform_kill_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "platform-kill"
+        ],
+        [
+          "bytes.view_lit",
+          "platform kill"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.platform_unkill_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "platform-unkill"
+        ],
+        [
+          "bytes.view_lit",
+          "platform unkill"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.query_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "query"
+        ],
+        [
+          "bytes.view_lit",
+          "deploy query"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.regress_from_incident_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "regress-from-incident"
+        ],
+        [
+          "bytes.view_lit",
+          "regress from-incident"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.rerun_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "rerun"
+        ],
+        [
+          "bytes.view_lit",
+          "deploy rerun"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.rollback_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "rollback"
+        ],
+        [
+          "bytes.view_lit",
+          "deploy rollback"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.run_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "run"
+        ],
+        [
+          "bytes.view_lit",
+          "deploy run"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.status_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "status"
+        ],
+        [
+          "bytes.view_lit",
+          "deploy status"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.stop_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "stop"
+        ],
+        [
+          "bytes.view_lit",
+          "deploy stop"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.target_add_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "target-add"
+        ],
+        [
+          "bytes.view_lit",
+          "target add"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.target_inspect_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "target-inspect"
+        ],
+        [
+          "bytes.view_lit",
+          "target inspect"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.target_list_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "target-list"
+        ],
+        [
+          "bytes.view_lit",
+          "target list"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.target_remove_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "target-remove"
+        ],
+        [
+          "bytes.view_lit",
+          "target remove"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.target_use_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "target-use"
+        ],
+        [
+          "bytes.view_lit",
+          "target use"
+        ]
+      ]
+    },
+    {
+      "kind": "defn",
+      "name": "lp.impl.deploy_exec.driver_v1.ui_serve_v1",
+      "params": [
+        {
+          "name": "doc",
+          "ty": "bytes_view"
+        }
+      ],
+      "result": "bytes",
+      "body": [
+        "lp.impl.deploy_exec.driver_v1._call_driver_v1",
+        "doc",
+        [
+          "bytes.view_lit",
+          "ui-serve"
+        ],
+        [
+          "bytes.view_lit",
+          "ui serve"
+        ]
+      ]
+    }
+  ],
+  "imports": [
+    "ext.json.canon",
+    "lp.cli.args_v1",
+    "lp.cli.report_v1",
+    "lp.cli.util_v1",
+    "lp.core.diag_v1",
+    "lp.core.json_v1",
+    "std.bytes",
+    "std.os.env",
+    "std.os.process",
+    "std.os.process.caps_v1",
+    "std.os.process.req_v1"
+  ],
+  "kind": "module",
+  "module_id": "lp.impl.deploy_exec.driver_v1",
+  "schema_version": "x07.x07ast@0.5.0"
+}

@@ -765,7 +765,7 @@
     },
     {
       "name": "lp.regress.from_incident",
-      "description": "Generate regression fixtures from a captured incident using the Phase C regression adapter.",
+      "description": "Generate regression fixtures from a captured incident using the regression adapter.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,

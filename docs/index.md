@@ -4,12 +4,13 @@
 
 Current surface:
 
-- `lp.*` JSON Schemas under `spec/schemas/`
-- `x07lp` CLI for accept, run, query, status, stop, and rollback flows
+- public `lp.*` JSON Schemas consumed from `contracts/spec/schemas/` with `x07-platform-contracts` as the authority
+- `x07lp` CLI for local and remote `change`, `deploy`, `target`, `adapter`, `incident`, `regress`, `app`, `platform`, `ui`, and `schema` flows
 - Local filesystem content-addressed store (`--state-dir`, default `.x07lp/`)
 - Local runtime and routing for `x07.app.pack@0.1.0`
+- Remote target selection, CAS push, remote query/control parity, and adapter conformance for self-hosted targets
 - MCP router/worker surface under `gateway/mcp/`
-- Compatibility landing page for the historical `docs/phaseB.md` path
+- Historical deploy compatibility note for the preserved `docs/phaseB.md` path
 - CI gates for accept, local deploy execution, query, and MCP coverage
 
 For an end-to-end check, run `./scripts/ci/check_all.sh`.

@@ -1,0 +1,22 @@
+{
+  "schema_version": "lp.deploy.query.result.normalized@0.1.0",
+  "target": {
+    "app_id": "app_min",
+    "environment": "staging"
+  },
+  "status": "completed",
+  "outcome": "promoted",
+  "current_weight_pct": 100,
+  "analysis_decisions": [
+    "promote"
+  ],
+  "step_statuses": [
+    "ok",
+    "ok",
+    "ok"
+  ],
+  "decision_reason_codes": [
+    "LP-INTAKE-OK",
+    "LP-SLO-PROMOTE"
+  ]
+}

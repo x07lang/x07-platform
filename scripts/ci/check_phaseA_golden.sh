@@ -198,19 +198,19 @@ dec_rel="$(extract_store_rel_path "${ROOT_DIR}/_tmp/ci_phaseA_allow.cli.json" lp
 exec_rel="$(extract_store_rel_path "${ROOT_DIR}/_tmp/ci_phaseA_allow.cli.json" lp.deploy.execution)"
 
 check_schema_validate_ok \
-  "spec/schemas/lp.pipeline.run.schema.json" \
+  "contracts/spec/schemas/lp.pipeline.run.schema.json" \
   "_tmp/ci_phaseA_allow_state/${run_rel}" \
   "${ROOT_DIR}/_tmp/ci_phaseA_allow.validate_run.run_report.json" \
   "${ROOT_DIR}/_tmp/ci_phaseA_allow.validate_run.cli.json"
 
 check_schema_validate_ok \
-  "spec/schemas/lp.decision.record.schema.json" \
+  "contracts/spec/schemas/lp.decision.record.schema.json" \
   "_tmp/ci_phaseA_allow_state/${dec_rel}" \
   "${ROOT_DIR}/_tmp/ci_phaseA_allow.validate_dec.run_report.json" \
   "${ROOT_DIR}/_tmp/ci_phaseA_allow.validate_dec.cli.json"
 
 check_schema_validate_ok \
-  "spec/schemas/lp.deploy.execution.schema.json" \
+  "contracts/spec/schemas/lp.deploy.execution.schema.json" \
   "_tmp/ci_phaseA_allow_state/${exec_rel}" \
   "${ROOT_DIR}/_tmp/ci_phaseA_allow.validate_exec.run_report.json" \
   "${ROOT_DIR}/_tmp/ci_phaseA_allow.validate_exec.cli.json"
@@ -242,19 +242,19 @@ dec_rel="$(extract_store_rel_path "${ROOT_DIR}/_tmp/ci_phaseA_deny.cli.json" lp.
 exec_rel="$(extract_store_rel_path "${ROOT_DIR}/_tmp/ci_phaseA_deny.cli.json" lp.deploy.execution)"
 
 check_schema_validate_ok \
-  "spec/schemas/lp.pipeline.run.schema.json" \
+  "contracts/spec/schemas/lp.pipeline.run.schema.json" \
   "_tmp/ci_phaseA_deny_state/${run_rel}" \
   "${ROOT_DIR}/_tmp/ci_phaseA_deny.validate_run.run_report.json" \
   "${ROOT_DIR}/_tmp/ci_phaseA_deny.validate_run.cli.json"
 
 check_schema_validate_ok \
-  "spec/schemas/lp.decision.record.schema.json" \
+  "contracts/spec/schemas/lp.decision.record.schema.json" \
   "_tmp/ci_phaseA_deny_state/${dec_rel}" \
   "${ROOT_DIR}/_tmp/ci_phaseA_deny.validate_dec.run_report.json" \
   "${ROOT_DIR}/_tmp/ci_phaseA_deny.validate_dec.cli.json"
 
 check_schema_validate_ok \
-  "spec/schemas/lp.deploy.execution.schema.json" \
+  "contracts/spec/schemas/lp.deploy.execution.schema.json" \
   "_tmp/ci_phaseA_deny_state/${exec_rel}" \
   "${ROOT_DIR}/_tmp/ci_phaseA_deny.validate_exec.run_report.json" \
   "${ROOT_DIR}/_tmp/ci_phaseA_deny.validate_exec.cli.json"

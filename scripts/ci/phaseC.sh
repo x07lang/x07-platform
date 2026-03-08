@@ -95,11 +95,11 @@ import sys
 
 root = pathlib.Path(sys.argv[1]).resolve()
 raw = pathlib.Path(sys.argv[2])
-path = raw.resolve() if raw.is_absolute() else (root / raw).resolve()
+path = raw if raw.is_absolute() else (root / raw)
 try:
-    print(path.relative_to(root).as_posix())
+    print(path.absolute().relative_to(root).as_posix())
 except ValueError:
-    print(path)
+    print(path.absolute())
 PY
 }
 
@@ -218,7 +218,7 @@ validate_cli_report() {
   local cli_path="$1"
   local out_dir="$2"
   check_schema_validate_ok \
-    "spec/schemas/lp.cli.report.schema.json" \
+    "contracts/spec/schemas/lp.cli.report.schema.json" \
     "$cli_path" \
     "$out_dir/cli_report.validate.run_report.json" \
     "$out_dir/cli_report.validate.cli.json"
@@ -476,7 +476,7 @@ prepare_accepted_state() {
   local exec_id
   exec_id="$(extract_report_field "$out_dir/deploy_accept.cli.json" result.exec_id)"
   check_schema_validate_ok \
-    "spec/schemas/lp.deploy.execution.schema.json" \
+    "contracts/spec/schemas/lp.deploy.execution.schema.json" \
     "$state_dir_rel/deploy/${exec_id}.json" \
     "$out_dir/deploy_accept.validate_exec.run_report.json" \
     "$out_dir/deploy_accept.validate_exec.cli.json"
@@ -552,19 +552,19 @@ run_x07lp \
   --now-unix-ms 1762752005000 \
   --json
 validate_cli_report "$INCIDENT_5XX_DIR/incident_capture.cli.json" "$INCIDENT_5XX_DIR"
-validate_report_result_schema "spec/schemas/lp.incident.query.result.schema.json" "$INCIDENT_5XX_DIR/incident_capture.cli.json" "$INCIDENT_5XX_DIR" "incident_capture"
+validate_report_result_schema "contracts/spec/schemas/lp.incident.query.result.schema.json" "$INCIDENT_5XX_DIR/incident_capture.cli.json" "$INCIDENT_5XX_DIR" "incident_capture"
 assert_report_matches_template "$INCIDENT_5XX_DIR/incident_capture.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/incident_capture_5xx/expected/incident.capture.report.json"
 INCIDENT_5XX_ID="$(extract_report_field "$INCIDENT_5XX_DIR/incident_capture.cli.json" result.incident_id)"
 INCIDENT_5XX_DIR_PATH="$ROOT_DIR/$PROMOTE_STATE_REL/incidents/app_min/staging/${INCIDENT_5XX_ID}"
 assert_file_exists "$INCIDENT_5XX_DIR_PATH/incident.bundle.json"
 assert_file_exists "$INCIDENT_5XX_DIR_PATH/incident.meta.local.json"
 check_schema_validate_ok \
-  "spec/schemas/lp.incident.bundle.schema.json" \
+  "contracts/spec/schemas/lp.incident.bundle.schema.json" \
   "$PROMOTE_STATE_REL/incidents/app_min/staging/${INCIDENT_5XX_ID}/incident.bundle.json" \
   "$INCIDENT_5XX_DIR/incident_bundle.validate.run_report.json" \
   "$INCIDENT_5XX_DIR/incident_bundle.validate.cli.json"
 check_schema_validate_ok \
-  "spec/schemas/lp.incident.bundle.meta.local.schema.json" \
+  "contracts/spec/schemas/lp.incident.bundle.meta.local.schema.json" \
   "$PROMOTE_STATE_REL/incidents/app_min/staging/${INCIDENT_5XX_ID}/incident.meta.local.json" \
   "$INCIDENT_5XX_DIR/incident_meta.validate.run_report.json" \
   "$INCIDENT_5XX_DIR/incident_meta.validate.cli.json"
@@ -583,7 +583,7 @@ run_x07lp \
   --state-dir "$PROMOTE_STATE_REL" \
   --json
 validate_cli_report "$INCIDENT_QUERY_DIR/incident_list.cli.json" "$INCIDENT_QUERY_DIR"
-validate_report_result_schema "spec/schemas/lp.incident.query.result.schema.json" "$INCIDENT_QUERY_DIR/incident_list.cli.json" "$INCIDENT_QUERY_DIR" "incident_list"
+validate_report_result_schema "contracts/spec/schemas/lp.incident.query.result.schema.json" "$INCIDENT_QUERY_DIR/incident_list.cli.json" "$INCIDENT_QUERY_DIR" "incident_list"
 assert_report_matches_template "$INCIDENT_QUERY_DIR/incident_list.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/incident_capture_5xx/expected/incident.list.report.json"
 
 run_x07lp \
@@ -594,7 +594,7 @@ run_x07lp \
   --state-dir "$PROMOTE_STATE_REL" \
   --json
 validate_cli_report "$INCIDENT_QUERY_DIR/incident_get.cli.json" "$INCIDENT_QUERY_DIR"
-validate_report_result_schema "spec/schemas/lp.incident.query.result.schema.json" "$INCIDENT_QUERY_DIR/incident_get.cli.json" "$INCIDENT_QUERY_DIR" "incident_get"
+validate_report_result_schema "contracts/spec/schemas/lp.incident.query.result.schema.json" "$INCIDENT_QUERY_DIR/incident_get.cli.json" "$INCIDENT_QUERY_DIR" "incident_get"
 assert_report_matches_template "$INCIDENT_QUERY_DIR/incident_get.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/incident_capture_5xx/expected/incident.get.report.json"
 echo "ok: incident_query"
 
@@ -612,7 +612,7 @@ run_x07lp \
   --state-dir "$ROLLBACK_STATE_REL" \
   --json
 validate_cli_report "$ROLLBACK_DIR/incident_list.cli.json" "$ROLLBACK_DIR"
-validate_report_result_schema "spec/schemas/lp.incident.query.result.schema.json" "$ROLLBACK_DIR/incident_list.cli.json" "$ROLLBACK_DIR" "incident_list"
+validate_report_result_schema "contracts/spec/schemas/lp.incident.query.result.schema.json" "$ROLLBACK_DIR/incident_list.cli.json" "$ROLLBACK_DIR" "incident_list"
 assert_report_matches_template "$ROLLBACK_DIR/incident_list.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/incident_capture_slo_rollback/expected/incident.list.report.json"
 echo "ok: incident_capture_slo_rollback"
 
@@ -630,7 +630,7 @@ run_x07lp \
   --now-unix-ms 1762752010000 \
   --json
 validate_cli_report "$REGRESSION_DIR/regress.cli.json" "$REGRESSION_DIR"
-validate_report_result_schema "spec/schemas/lp.regression.run.result.schema.json" "$REGRESSION_DIR/regress.cli.json" "$REGRESSION_DIR" "regress"
+validate_report_result_schema "contracts/spec/schemas/lp.regression.run.result.schema.json" "$REGRESSION_DIR/regress.cli.json" "$REGRESSION_DIR" "regress"
 assert_report_matches_template "$REGRESSION_DIR/regress.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/regression_from_incident/expected/regress.from_incident.report.json"
 REGRESSION_ID="$(extract_report_field "$REGRESSION_DIR/regress.cli.json" result.regression_id)"
 echo "ok: regression_from_incident"
@@ -646,7 +646,7 @@ run_x07lp \
   --rebuild-index \
   --json
 validate_cli_report "$APP_LIST_DIR/app_list.cli.json" "$APP_LIST_DIR"
-validate_report_result_schema "spec/schemas/lp.app.list.result.schema.json" "$APP_LIST_DIR/app_list.cli.json" "$APP_LIST_DIR" "app_list"
+validate_report_result_schema "contracts/spec/schemas/lp.app.list.result.schema.json" "$APP_LIST_DIR/app_list.cli.json" "$APP_LIST_DIR" "app_list"
 assert_report_matches_template "$APP_LIST_DIR/app_list.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/app_list/expected/app.list.report.json"
 echo "ok: app_list"
 
@@ -682,7 +682,7 @@ run_x07lp \
   --now-unix-ms 1762752016000 \
   --json
 validate_cli_report "$PAUSE_DIR/deploy_pause.cli.json" "$PAUSE_DIR"
-validate_report_result_schema "spec/schemas/lp.control.action.result.schema.json" "$PAUSE_DIR/deploy_pause.cli.json" "$PAUSE_DIR" "deploy_pause"
+validate_report_result_schema "contracts/spec/schemas/lp.control.action.result.schema.json" "$PAUSE_DIR/deploy_pause.cli.json" "$PAUSE_DIR" "deploy_pause"
 assert_report_matches_template "$PAUSE_DIR/deploy_pause.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/pause_and_rerun/expected/deploy.pause.report.json"
 wait_for_control_state "$ROOT_DIR/$PAUSE_STATE_REL/deploy/${PAUSE_EXEC_ID}.json" paused 10
 wait "$PAUSE_RUN_PID" || true
@@ -699,7 +699,7 @@ run_x07lp \
   --now-unix-ms 1762752017000 \
   --json
 validate_cli_report "$PAUSE_DIR/deploy_rerun.cli.json" "$PAUSE_DIR"
-validate_report_result_schema "spec/schemas/lp.control.action.result.schema.json" "$PAUSE_DIR/deploy_rerun.cli.json" "$PAUSE_DIR" "deploy_rerun"
+validate_report_result_schema "contracts/spec/schemas/lp.control.action.result.schema.json" "$PAUSE_DIR/deploy_rerun.cli.json" "$PAUSE_DIR" "deploy_rerun"
 assert_report_matches_template "$PAUSE_DIR/deploy_rerun.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/pause_and_rerun/expected/deploy.rerun.report.json"
 RERUN_EXEC_ID="$(extract_report_field "$PAUSE_DIR/deploy_rerun.cli.json" result.new_execution_id)"
 assert_file_exists "$ROOT_DIR/$PAUSE_STATE_REL/deploy/${RERUN_EXEC_ID}.json"
@@ -719,7 +719,7 @@ run_x07lp \
   --now-unix-ms 1762752020000 \
   --json
 validate_cli_report "$KILL_DIR/app_kill.cli.json" "$KILL_DIR"
-validate_report_result_schema "spec/schemas/lp.control.action.result.schema.json" "$KILL_DIR/app_kill.cli.json" "$KILL_DIR" "app_kill"
+validate_report_result_schema "contracts/spec/schemas/lp.control.action.result.schema.json" "$KILL_DIR/app_kill.cli.json" "$KILL_DIR" "app_kill"
 assert_report_matches_template "$KILL_DIR/app_kill.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/kill_switch/expected/app.kill.report.json"
 
 run_x07lp \
@@ -733,7 +733,7 @@ run_x07lp \
   --now-unix-ms 1762752021000 \
   --json
 validate_cli_report "$KILL_DIR/app_unkill.cli.json" "$KILL_DIR"
-validate_report_result_schema "spec/schemas/lp.control.action.result.schema.json" "$KILL_DIR/app_unkill.cli.json" "$KILL_DIR" "app_unkill"
+validate_report_result_schema "contracts/spec/schemas/lp.control.action.result.schema.json" "$KILL_DIR/app_unkill.cli.json" "$KILL_DIR" "app_unkill"
 assert_report_matches_template "$KILL_DIR/app_unkill.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/kill_switch/expected/app.unkill.report.json"
 
 run_x07lp \
@@ -745,7 +745,7 @@ run_x07lp \
   --now-unix-ms 1762752022000 \
   --json
 validate_cli_report "$KILL_DIR/platform_kill.cli.json" "$KILL_DIR"
-validate_report_result_schema "spec/schemas/lp.control.action.result.schema.json" "$KILL_DIR/platform_kill.cli.json" "$KILL_DIR" "platform_kill"
+validate_report_result_schema "contracts/spec/schemas/lp.control.action.result.schema.json" "$KILL_DIR/platform_kill.cli.json" "$KILL_DIR" "platform_kill"
 assert_report_matches_template "$KILL_DIR/platform_kill.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/kill_switch/expected/platform.kill.report.json"
 
 run_x07lp \
@@ -757,7 +757,7 @@ run_x07lp \
   --now-unix-ms 1762752023000 \
   --json
 validate_cli_report "$KILL_DIR/platform_unkill.cli.json" "$KILL_DIR"
-validate_report_result_schema "spec/schemas/lp.control.action.result.schema.json" "$KILL_DIR/platform_unkill.cli.json" "$KILL_DIR" "platform_unkill"
+validate_report_result_schema "contracts/spec/schemas/lp.control.action.result.schema.json" "$KILL_DIR/platform_unkill.cli.json" "$KILL_DIR" "platform_unkill"
 assert_report_matches_template "$KILL_DIR/platform_unkill.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/kill_switch/expected/platform.unkill.report.json"
 echo "ok: kill_switch"
 

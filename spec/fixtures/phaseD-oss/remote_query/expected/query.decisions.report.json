@@ -1,0 +1,27 @@
+{
+  "schema_version": "lp.cli.report@0.1.0",
+  "ok": true,
+  "exit_code": 0,
+  "result": {
+    "schema_version": "lp.deploy.query.result@0.1.0",
+    "view": "decisions",
+    "deployment_id": "__ANY__",
+    "run_id": "__ANY__",
+    "target": {
+      "app_id": "app_min",
+      "environment": "staging"
+    },
+    "decisions": [
+      {
+        "decision_id": "__ANY__",
+        "kind": "__ANY__",
+        "outcome": "allow",
+        "reasons": [
+          {
+            "code": "__ANY__"
+          }
+        ]
+      }
+    ]
+  }
+}

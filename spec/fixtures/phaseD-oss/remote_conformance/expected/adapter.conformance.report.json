@@ -1,0 +1,54 @@
+{
+  "schema_version": "lp.cli.report@0.1.0",
+  "ok": true,
+  "exit_code": 0,
+  "result": {
+    "schema_version": "lp.adapter.conformance.report@0.1.0",
+    "provider": "wasmcloud",
+    "target_profile": "__ANY__",
+    "passed": "__ANY__",
+    "failed": 0,
+    "scenarios": [
+      {
+        "name": "upload_dedupe",
+        "ok": true
+      },
+      {
+        "name": "remote_promote",
+        "ok": true
+      },
+      {
+        "name": "remote_rollback",
+        "ok": true
+      },
+      {
+        "name": "remote_pause",
+        "ok": true
+      },
+      {
+        "name": "remote_rerun",
+        "ok": true
+      },
+      {
+        "name": "remote_query_parity",
+        "ok": true
+      },
+      {
+        "name": "remote_incident_capture",
+        "ok": true
+      },
+      {
+        "name": "remote_regression_generation",
+        "ok": true
+      },
+      {
+        "name": "telemetry_export_smoke",
+        "ok": true
+      },
+      {
+        "name": "missing_secret_hard_fail",
+        "ok": true
+      }
+    ]
+  }
+}

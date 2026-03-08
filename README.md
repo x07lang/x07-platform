@@ -1,12 +1,13 @@
 # x07-platform (x07 Platform / x07-LP)
 
-`x07-platform` is the local deployment lifecycle repo for X07 sealed artifacts.
+`x07-platform` is the public lifecycle runtime and self-hosted control-plane repo for X07 sealed artifacts.
 
 Public surface:
-- `lp.*` contracts in `spec/schemas/`
-- `x07lp` CLI for `change`, `deploy`, `incident`, `regress`, `app`, `platform`, `ui`, and `schema` workflows
+- public `lp.*` contracts consumed from `contracts/spec/schemas/` with `x07-platform-contracts` as the authoritative source
+- `x07lp` CLI for `change`, `deploy`, `target`, `adapter`, `incident`, `regress`, `app`, `platform`, `ui`, and `schema` workflows
 - local content-addressed state under `.x07lp/` or `--state-dir`
 - local runtime, routing, signed control actions, incident capture, regression generation, and query/index support for `x07.app.pack@0.1.0`
+- self-hosted remote target management, remote deploy API, and reference adapter work for the OSS remote path
 - MCP router/worker integration under `gateway/mcp/`
 - local Command Center HTTP surface served by `x07lpd`
 
@@ -18,10 +19,10 @@ Repo entrypoints:
 
 Implementation note:
 - The x07 CLI and MCP modules are thin wrappers around the shared Rust `x07lp-driver`.
-- Phase C behavior is implemented in that driver: incident capture, regression execution, signed control actions, SQLite indexing, and the `x07lpd` HTTP daemon.
+- The shared driver implements local execution, remote target flows, incident capture, regression execution, signed control actions, SQLite indexing, and the `x07lpd` HTTP daemon.
 
 Developer commands:
-- Generate schema index: `./scripts/gen_schema_index.sh`
+- Check contract schema index: `./scripts/gen_schema_index.sh --check`
 - Lock deps: `x07 pkg lock --project x07.json`
 - Bundle CLI: `x07 bundle --project x07.json --profile os --out out/x07lp`
 - Run checks: `./scripts/ci/check_all.sh`

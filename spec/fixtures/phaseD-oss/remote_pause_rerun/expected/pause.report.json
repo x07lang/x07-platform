@@ -1,0 +1,16 @@
+{
+  "schema_version": "lp.cli.report@0.1.0",
+  "ok": true,
+  "exit_code": 0,
+  "diagnostics": [
+    {
+      "code": "LP_DEPLOY_PAUSED"
+    }
+  ],
+  "result": {
+    "op": "pause",
+    "ok": true,
+    "deployment_id": "__ANY__",
+    "control_state": "paused"
+  }
+}

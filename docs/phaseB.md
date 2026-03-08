@@ -1,6 +1,6 @@
 # Deploy Loop Compatibility
 
-This page exists to preserve the historical `docs/phaseB.md` path.
+This page exists to preserve the historical deploy-loop compatibility path.
 
 The shipped public surface stays neutral:
 

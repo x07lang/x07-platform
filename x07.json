@@ -123,8 +123,8 @@
     },
     {
       "name": "std-web-ui",
-      "path": ".x07/deps/std-web-ui/0.1.5",
-      "version": "0.1.5"
+      "path": ".x07/deps/std-web-ui/0.1.9",
+      "version": "0.1.9"
     }
   ],
   "entry": "cli/src/main.x07.json",
@@ -162,6 +162,7 @@
   "profiles": {
     "os": {
       "auto_ffi": true,
+      "cpu_time_limit_seconds": 180,
       "solve_fuel": 50000000000,
       "world": "run-os"
     },
