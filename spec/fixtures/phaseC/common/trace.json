@@ -1,14 +1,98 @@
 {
+  "meta": {
+    "app": {
+      "name": "app_min",
+      "version": "0.1.0"
+    },
+    "created_utc": "2026-03-08T00:00:00Z",
+    "tool": {
+      "name": "x07-web-ui",
+      "version": "0.1.0"
+    }
+  },
   "schema_version": "x07.app.trace@0.1.0",
-  "request_id": "lpreq_fixture_01",
-  "trace_id": "lptrace_fixture_01",
-  "spans": [
+  "steps": [
     {
-      "name": "http.request",
-      "dur_ms": 7,
-      "attrs": {
-        "route": "/api/health",
-        "status_code": 500
+      "http": [
+        {
+          "request": {
+            "body": {
+              "bytes_len": 0
+            },
+            "headers": [],
+            "id": "lpreq_fixture_01",
+            "method": "GET",
+            "path": "/api/health",
+            "schema_version": "x07.http.request.envelope@0.1.0"
+          },
+          "response": {
+            "body": {
+              "bytes_len": 45,
+              "text": "{\"code\":\"E_FIXTURE\",\"message\":\"fixture error\"}"
+            },
+            "headers": [],
+            "request_id": "lpreq_fixture_01",
+            "schema_version": "x07.http.response.envelope@0.1.0",
+            "status": 500
+          }
+        }
+      ],
+      "i": 0,
+      "timing": {
+        "http_ms": 7,
+        "total_ms": 7,
+        "ui_ms": 0
+      },
+      "ui_dispatch": {
+        "event": {
+          "type": "init"
+        },
+        "kind": "x07.web_ui.dispatch",
+        "state": null,
+        "v": 1
+      },
+      "ui_frame": {
+        "effects": [],
+        "kind": "x07.web_ui.frame",
+        "patches": [
+          {
+            "op": "replace",
+            "path": "/root/children/1/text",
+            "value": "fixture error"
+          }
+        ],
+        "state": null,
+        "telemetry": {},
+        "ui": {
+          "kind": "x07.web_ui.tree",
+          "root": {
+            "children": [
+              {
+                "k": "text",
+                "key": "t_title",
+                "text": "App Min"
+              },
+              {
+                "k": "text",
+                "key": "t_resp",
+                "text": "fixture error"
+              }
+            ],
+            "k": "el",
+            "key": "root",
+            "on": [],
+            "props": {
+              "attrs": {},
+              "class": [
+                "app"
+              ],
+              "style": {}
+            },
+            "tag": "div"
+          },
+          "v": 1
+        },
+        "v": 1
       }
     }
   ]

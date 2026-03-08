@@ -14,6 +14,7 @@
   "runtime_provider": "wasmcloud",
   "routing_provider": "edge_http_v1",
   "oci_registry": "__OCI_REGISTRY__",
+  "telemetry_collector_hint": "__TELEMETRY_COLLECTOR__",
   "default_namespace": "ci",
   "default_env": "staging",
   "expect_capabilities_digest": "__EXPECTED_CAPABILITIES_DIGEST__"

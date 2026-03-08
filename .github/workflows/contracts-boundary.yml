@@ -1,0 +1,45 @@
+name: Contracts Boundary
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Contracts mirror drift
+        run: bash scripts/contracts_sync.sh --check
+
+      - name: Contracts stub guard
+        run: bash scripts/check_contracts_stub.sh
+
+      - name: No lpcloud imports in public repo
+        run: bash scripts/check_no_lpcloud.sh
+
+      - name: Public contract authorship guard
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF}"
+          base_ref="origin/${GITHUB_BASE_REF}"
+          changed_public="$(git diff --name-only "${base_ref}"...HEAD -- spec/schemas docs/contracts.md || true)"
+          if [ -n "$changed_public" ]; then
+            changed_contracts="$(git diff --name-only "${base_ref}"...HEAD -- contracts || true)"
+            if [ -z "$changed_contracts" ]; then
+              echo 'public contract mirror changed without contracts checkout update' >&2
+              echo "$changed_public" >&2
+              exit 1
+            fi
+          fi
+

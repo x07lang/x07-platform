@@ -15,7 +15,7 @@
     "regression_id": "__ANY__",
     "ok": true,
     "tool": {
-      "name": "x07-wasm",
+      "name": "x07 wasm",
       "command": "app regress from-incident"
     },
     "dry_run": false,

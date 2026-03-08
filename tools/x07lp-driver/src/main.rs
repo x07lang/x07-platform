@@ -3,21 +3,34 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::{Args, Parser, Subcommand};
 use ed25519_dalek::{Signer, SigningKey};
+use oci_client::{
+    Reference as OciReference,
+    client::{Client as OciClient, ClientConfig as OciClientConfig, ClientProtocol},
+    manifest::OciImageManifest,
+    secrets::RegistryAuth,
+};
+use oci_wasm::{ToConfig, WasmConfig};
 use rand::rngs::OsRng;
 use rusqlite::{Connection, params};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
-use std::fs;
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::runtime::Runtime as TokioRuntime;
 use ureq::{Agent, Error as UreqError};
+use wadm_client::{Client as WadmClient, ClientConnectOptions as WadmClientConnectOptions};
 use walkdir::WalkDir;
+use wasmcloud_control_interface::{
+    Client as WasmcloudCtlClient, ClientBuilder as WasmcloudCtlClientBuilder,
+};
 
 const DEFAULT_STATE_DIR: &str = "out/x07lp_state";
 const DEFAULT_UI_ADDR: &str = "127.0.0.1:17090";
@@ -31,6 +44,15 @@ const REMOTE_COMPONENT_REGISTRY: &str = "lp.impl.component_registry.oci_v1";
 const REMOTE_ARTIFACT_KIND: &str = "x07.app.pack@0.1.0";
 const REMOTE_SERVER_ID: &str = "x07lpd-oss-self-hosted";
 const DEFAULT_REMOTE_BEARER_TOKEN: &str = "x07lp-oss-dev-token";
+const DEFAULT_REMOTE_SECRET_STORE_FILE: &str = "remote-secret-store.json";
+const DEFAULT_REMOTE_OTLP_EXPORT_FILE: &str = "collector-metrics.jsonl";
+const DEFAULT_REMOTE_NATS_URL: &str = "nats://127.0.0.1:4222";
+const DEFAULT_REMOTE_LATTICE: &str = "default";
+const REMOTE_EDGE_ROUTE_PREFIX: &str = "/r";
+const REMOTE_ROUTE_KEY_HEADER: &str = "X-LP-Route-Key";
+const REMOTE_HTTP_SERVER_PROVIDER_IMAGE: &str = "ghcr.io/wasmcloud/http-server:0.27.0";
+const REMOTE_SLOT_PORT_BASE: u16 = 26_000;
+const REMOTE_SLOT_PORT_COUNT: u16 = 256;
 const LOCAL_TARGET_SENTINEL: &str = "__local__";
 const VALID_QUERY_VIEWS: &[&str] = &["summary", "timeline", "decisions", "artifacts", "full"];
 const REDACTED_HTTP_HEADER_NAMES: &[&str] = &[
@@ -40,6 +62,31 @@ const REDACTED_HTTP_HEADER_NAMES: &[&str] = &[
     "set-cookie",
     "x-api-key",
 ];
+
+#[derive(Debug, Clone)]
+struct RemoteSlotDeployment {
+    app_name: String,
+    bind_addr: String,
+    upstream_url: String,
+    work_dir: PathBuf,
+    manifest_path: PathBuf,
+    manifest_digest: Value,
+    instance_ref: String,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteProviderDeployment {
+    public_listener: String,
+    api_prefix: String,
+    component_ref: String,
+    registry: String,
+    namespace: String,
+    repository: String,
+    component_digest: Value,
+    stable: RemoteSlotDeployment,
+    candidate: RemoteSlotDeployment,
+    host_ids: Vec<String>,
+}
 
 #[derive(Parser, Debug)]
 #[command(disable_help_subcommand = true, version = TOOL_VERSION)]
@@ -388,10 +435,6 @@ fn root_dir() -> PathBuf {
         .to_path_buf()
 }
 
-fn workspace_dir() -> PathBuf {
-    root_dir().parent().unwrap().to_path_buf()
-}
-
 fn repo_path(raw: &str) -> PathBuf {
     let path = PathBuf::from(raw);
     if path.is_absolute() {
@@ -639,7 +682,33 @@ fn write_json(path: &Path, value: &Value) -> Result<Vec<u8>> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     }
-    fs::write(path, &bytes).with_context(|| format!("write {}", path.display()))?;
+    let temp_path = path.with_extension(format!(
+        "{}.tmp.{}.{}",
+        path.extension().and_then(OsStr::to_str).unwrap_or("json"),
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or_default()
+    ));
+    {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .with_context(|| format!("create {}", temp_path.display()))?;
+        file.write_all(&bytes)
+            .with_context(|| format!("write {}", temp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync {}", temp_path.display()))?;
+    }
+    fs::rename(&temp_path, path).with_context(|| {
+        format!(
+            "rename {} -> {}",
+            temp_path.display(),
+            path.display()
+        )
+    })?;
     Ok(bytes)
 }
 
@@ -886,6 +955,41 @@ fn run_capture(argv: &[String], cwd: Option<&Path>) -> Result<(i32, Vec<u8>, Vec
     ))
 }
 
+#[derive(Debug, Clone)]
+struct WasmToolCommand {
+    argv0: String,
+    prefix: Vec<String>,
+    display_name: String,
+}
+
+fn resolve_wasm_tool() -> Option<WasmToolCommand> {
+    if let Some(x07) = which("x07") {
+        return Some(WasmToolCommand {
+            argv0: x07,
+            prefix: vec!["wasm".to_string()],
+            display_name: "x07 wasm".to_string(),
+        });
+    }
+    which("x07-wasm").map(|x07_wasm| WasmToolCommand {
+        argv0: x07_wasm,
+        prefix: Vec::new(),
+        display_name: "x07 wasm".to_string(),
+    })
+}
+
+fn run_wasm_tool_capture(
+    args: &[String],
+    cwd: Option<&Path>,
+) -> Result<(WasmToolCommand, i32, Vec<u8>, Vec<u8>)> {
+    let tool = resolve_wasm_tool()
+        .ok_or_else(|| anyhow!("missing wasm toolchain: expected `x07 wasm` or `x07-wasm`"))?;
+    let mut argv = vec![tool.argv0.clone()];
+    argv.extend(tool.prefix.clone());
+    argv.extend(args.iter().cloned());
+    let (code, stdout, stderr) = run_capture(&argv, cwd)?;
+    Ok((tool, code, stdout, stderr))
+}
+
 fn read_json_from_report_stdout(stdout: &[u8]) -> Result<Value> {
     let report: Value = serde_json::from_slice(stdout).context("parse x07 run report")?;
     let b64 = get_str(&report, &["solve", "solve_output_b64"])
@@ -905,24 +1009,14 @@ fn read_json_from_report_stdout(stdout: &[u8]) -> Result<Value> {
 
 fn search_workspace_file(name: &str) -> Option<PathBuf> {
     let root = root_dir();
-    let workspace = workspace_dir();
     let candidates = [
         root.join(name),
+        root.join("arch").join("app").join("ops").join(name),
+        root.join("arch").join("slo").join(name),
         root.join("spec")
             .join("fixtures")
             .join("phaseA")
             .join("pack_min")
-            .join(name),
-        workspace
-            .join("x07-wasm-backend")
-            .join("arch")
-            .join("slo")
-            .join(name),
-        workspace
-            .join("x07-wasm-backend")
-            .join("arch")
-            .join("app")
-            .join("ops")
             .join(name),
     ];
     for candidate in candidates {
@@ -930,11 +1024,9 @@ fn search_workspace_file(name: &str) -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    for base in [root, workspace.join("x07-wasm-backend")] {
-        for entry in WalkDir::new(base).into_iter().filter_map(Result::ok) {
-            if entry.file_name() == name {
-                return Some(entry.path().to_path_buf());
-            }
+    for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
+        if entry.file_name() == name {
+            return Some(entry.path().to_path_buf());
         }
     }
     None
@@ -1096,6 +1188,683 @@ fn materialize_pack_dir(
     Ok((manifest, manifest_raw))
 }
 
+fn tokio_runtime() -> Result<TokioRuntime> {
+    TokioRuntime::new().context("create tokio runtime")
+}
+
+fn remote_nats_url() -> String {
+    std::env::var("X07LP_REMOTE_NATS_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_REMOTE_NATS_URL.to_string())
+}
+
+fn remote_registry_host(raw: &str) -> String {
+    raw.trim()
+        .trim_end_matches('/')
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .to_string()
+}
+
+fn remote_registry_base_url(raw: &str) -> String {
+    if raw.trim_start().starts_with("http://") || raw.trim_start().starts_with("https://") {
+        raw.trim_end_matches('/').to_string()
+    } else {
+        format!("http://{}", remote_registry_host(raw))
+    }
+}
+
+fn remote_runtime_registry_host(raw: &str) -> String {
+    if let Some(value) = std::env::var_os("X07LP_REMOTE_RUNTIME_OCI_REGISTRY")
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string_lossy().into_owned())
+    {
+        return value;
+    }
+    let host = remote_registry_host(raw);
+    match host.as_str() {
+        "127.0.0.1:15000" | "localhost:15000" => "registry:5000".to_string(),
+        _ => host,
+    }
+}
+
+fn remote_exec_public_listener(base_url: &str, exec_id: &str) -> String {
+    format!(
+        "{}/{}/{}",
+        base_url.trim_end_matches('/'),
+        REMOTE_EDGE_ROUTE_PREFIX.trim_start_matches('/'),
+        exec_id
+    )
+}
+
+fn resolve_registry_upload_url(base_url: &str, location: &str) -> String {
+    if location.starts_with("http://") || location.starts_with("https://") {
+        location.to_string()
+    } else if location.starts_with('/') {
+        format!("{}{}", base_url.trim_end_matches('/'), location)
+    } else {
+        format!("{}/{}", base_url.trim_end_matches('/'), location)
+    }
+}
+
+fn registry_upload_blob(
+    base_url: &str,
+    repository: &str,
+    bytes: &[u8],
+    digest: &str,
+    content_type: &str,
+) -> Result<()> {
+    let start_url = format!("{}/v2/{repository}/blobs/uploads/", base_url.trim_end_matches('/'));
+    let response = match remote_agent().request("POST", &start_url).call() {
+        Ok(response) => response,
+        Err(UreqError::Status(_, response)) => response,
+        Err(UreqError::Transport(err)) => bail!("start OCI blob upload failed: {err}"),
+    };
+    let status = response.status();
+    if status != 202 {
+        bail!("start OCI blob upload returned unexpected status {status}");
+    }
+    let upload_url = response
+        .header("location")
+        .map(|value| resolve_registry_upload_url(base_url, value))
+        .ok_or_else(|| anyhow!("OCI registry upload response missing Location header"))?;
+    let separator = if upload_url.contains('?') { "&" } else { "?" };
+    let finalize_url = format!("{upload_url}{separator}digest={digest}");
+    let response = match remote_agent()
+        .request("PUT", &finalize_url)
+        .set("content-type", content_type)
+        .send_bytes(bytes)
+    {
+        Ok(response) => response,
+        Err(UreqError::Status(_, response)) => response,
+        Err(UreqError::Transport(err)) => bail!("finalize OCI blob upload failed: {err}"),
+    };
+    if response.status() != 201 {
+        bail!(
+            "finalize OCI blob upload for {repository} returned unexpected status {}",
+            response.status()
+        );
+    }
+    Ok(())
+}
+
+fn registry_put_manifest(base_url: &str, repository: &str, tag: &str, bytes: &[u8]) -> Result<()> {
+    let url = format!(
+        "{}/v2/{repository}/manifests/{tag}",
+        base_url.trim_end_matches('/')
+    );
+    let response = match remote_agent()
+        .request("PUT", &url)
+        .set("content-type", "application/vnd.oci.image.manifest.v1+json")
+        .send_bytes(bytes)
+    {
+        Ok(response) => response,
+        Err(UreqError::Status(_, response)) => response,
+        Err(UreqError::Transport(err)) => bail!("push OCI manifest failed: {err}"),
+    };
+    if response.status() != 201 {
+        bail!(
+            "push OCI manifest for {repository}:{tag} returned unexpected status {}",
+            response.status()
+        );
+    }
+    Ok(())
+}
+
+fn remote_router_state_path(state_dir: &Path, exec_id: &str) -> PathBuf {
+    state_dir
+        .join(".x07lp")
+        .join("router")
+        .join(exec_id)
+        .join("state.json")
+}
+
+fn remote_slot_mapping_path(state_dir: &Path, exec_id: &str, slot: &str) -> PathBuf {
+    state_dir
+        .join(".x07lp")
+        .join("remote_ports")
+        .join("by_exec")
+        .join(format!("{exec_id}-{slot}.json"))
+}
+
+fn remote_slot_lease_path(state_dir: &Path, port: u16) -> PathBuf {
+    state_dir
+        .join(".x07lp")
+        .join("remote_ports")
+        .join("leases")
+        .join(format!("{port}.json"))
+}
+
+fn allocate_remote_slot_port(state_dir: &Path, exec_id: &str, slot: &str) -> Result<u16> {
+    let mapping_path = remote_slot_mapping_path(state_dir, exec_id, slot);
+    if mapping_path.exists() {
+        let doc = load_json(&mapping_path)?;
+        if let Some(port) = get_u64(&doc, &["port"]).and_then(|value| u16::try_from(value).ok()) {
+            return Ok(port);
+        }
+    }
+    if let Some(parent) = mapping_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let lease_root = state_dir.join(".x07lp").join("remote_ports").join("leases");
+    fs::create_dir_all(&lease_root)?;
+    for offset in 0..REMOTE_SLOT_PORT_COUNT {
+        let port = REMOTE_SLOT_PORT_BASE + offset;
+        let lease_path = remote_slot_lease_path(state_dir, port);
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lease_path)
+        {
+            Ok(mut file) => {
+                let lease_doc = json!({
+                    "exec_id": exec_id,
+                    "slot": slot,
+                    "port": port,
+                });
+                file.write_all(&canon_json_bytes(&lease_doc))?;
+                let _ = write_json(&mapping_path, &lease_doc)?;
+                return Ok(port);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                let lease_doc = load_json(&lease_path).unwrap_or_else(|_| json!({}));
+                let same_exec = get_str(&lease_doc, &["exec_id"]).as_deref() == Some(exec_id);
+                let same_slot = get_str(&lease_doc, &["slot"]).as_deref() == Some(slot);
+                if same_exec && same_slot {
+                    let _ = write_json(&mapping_path, &lease_doc)?;
+                    return Ok(port);
+                }
+            }
+            Err(err) => return Err(err.into()),
+        }
+    }
+    bail!("no free remote runtime ports available")
+}
+
+fn release_remote_slot_port(state_dir: &Path, exec_id: &str, slot: &str) {
+    let mapping_path = remote_slot_mapping_path(state_dir, exec_id, slot);
+    if let Ok(doc) = load_json(&mapping_path)
+        && let Some(port) = get_u64(&doc, &["port"]).and_then(|value| u16::try_from(value).ok())
+    {
+        let _ = fs::remove_file(remote_slot_lease_path(state_dir, port));
+    }
+    let _ = fs::remove_file(mapping_path);
+}
+
+fn remote_slot_app_name(exec_id: &str, slot: &str) -> String {
+    format!("lp-{exec_id}-{slot}")
+}
+
+fn remote_slot_component_id(exec_id: &str, slot: &str) -> String {
+    format!("lp-{exec_id}-{slot}-app")
+}
+
+fn remote_slot_provider_id(exec_id: &str, slot: &str) -> String {
+    format!("lp-{exec_id}-{slot}-httpserver")
+}
+
+fn load_backend_component_from_run(state_dir: &Path, run_doc: &Value) -> Result<(String, Vec<u8>, Value)> {
+    let (manifest, _manifest_raw) = load_pack_manifest_from_run(state_dir, run_doc)?;
+    let component = get_path(&manifest, &["backend", "component"])
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("missing backend component in pack manifest"))?;
+    let sha = component
+        .get("sha256")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("missing backend component digest"))?
+        .to_string();
+    let bytes = load_cas_blob(state_dir, &sha)?;
+    Ok((sha, bytes.clone(), digest_value(&bytes)))
+}
+
+fn pack_api_prefix(pack_manifest: &Value) -> String {
+    get_str(pack_manifest, &["routing", "api_prefix"]).unwrap_or_else(|| "/api".to_string())
+}
+
+fn build_remote_wadm_manifest(
+    app_name: &str,
+    component_ref: &str,
+    component_id: &str,
+    provider_id: &str,
+    port: u16,
+    version: &str,
+) -> Value {
+    json!({
+        "apiVersion": "core.oam.dev/v1beta1",
+        "kind": "Application",
+        "metadata": {
+            "name": app_name,
+            "annotations": {
+                "version": version
+            }
+        },
+        "spec": {
+            "components": [
+                {
+                    "name": "backend",
+                    "type": "component",
+                    "properties": {
+                        "image": component_ref,
+                        "id": component_id
+                    },
+                    "traits": [
+                        {
+                            "type": "spreadscaler",
+                            "properties": {
+                                "instances": 1
+                            }
+                        }
+                    ]
+                },
+                {
+                    "name": "httpserver",
+                    "type": "capability",
+                    "properties": {
+                        "image": REMOTE_HTTP_SERVER_PROVIDER_IMAGE,
+                        "id": provider_id
+                    },
+                    "traits": [
+                        {
+                            "type": "link",
+                            "properties": {
+                                "target": {
+                                    "name": "backend"
+                                },
+                                "namespace": "wasi",
+                                "package": "http",
+                                "interfaces": ["incoming-handler"],
+                                "source": {
+                                    "config": [
+                                        {
+                                            "name": "listener",
+                                            "properties": {
+                                                "address": format!("0.0.0.0:{port}"),
+                                                "ADDRESS": format!("0.0.0.0:{port}")
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    ]
+                }
+            ]
+        }
+    })
+}
+
+fn publish_remote_component(
+    target_profile: &Value,
+    app_id: &str,
+    environment: &str,
+    component_sha: &str,
+    component_bytes: &[u8],
+) -> Result<(String, String, String, String)> {
+    let registry = get_str(target_profile, &["oci_registry"])
+        .ok_or_else(|| anyhow!("remote target profile missing oci_registry"))?;
+    let namespace = get_str(target_profile, &["default_namespace"])
+        .unwrap_or_else(|| environment.to_string());
+    let repository = app_id.to_string();
+    let push_ref = format!("{registry}/{namespace}/{repository}:sha256-{component_sha}");
+    let push_reference = OciReference::try_from(push_ref.as_str())
+        .with_context(|| format!("invalid OCI reference: {push_ref}"))?;
+    let runtime_registry = remote_runtime_registry_host(&registry);
+    let (wasm_config, image_layer) =
+        WasmConfig::from_raw_component(component_bytes.to_vec(), None)
+            .context("failed to create WebAssembly OCI config from remote component")?;
+    let config_obj = wasm_config
+        .to_config()
+        .context("failed to convert remote component OCI config")?;
+    let annotations = Some(BTreeMap::from([(
+        "org.opencontainers.image.title".to_string(),
+        format!("{app_id}-backend"),
+    )]));
+    let manifest = OciImageManifest::build(&[image_layer.clone()], &config_obj, annotations);
+    let protocol = if remote_registry_base_url(&registry).starts_with("http://") {
+        ClientProtocol::Http
+    } else {
+        ClientProtocol::Https
+    };
+    let client = OciClient::new(OciClientConfig {
+        protocol,
+        ..Default::default()
+    });
+    let runtime = tokio_runtime()?;
+    let push_result = runtime.block_on(async {
+        client
+            .push(
+                &push_reference,
+                &[image_layer],
+                config_obj,
+                &RegistryAuth::Anonymous,
+                Some(manifest),
+            )
+            .await
+    })?;
+    let manifest_digest = if let Some(digest) = push_result.manifest_url.split('@').nth(1) {
+        digest.to_string()
+    } else {
+        runtime.block_on(async {
+            client
+                .fetch_manifest_digest(&push_reference, &RegistryAuth::Anonymous)
+                .await
+        })?
+    };
+    let runtime_ref = format!("{runtime_registry}/{namespace}/{repository}@{manifest_digest}");
+    Ok((registry, namespace, repository, runtime_ref))
+}
+
+fn deploy_remote_slot(
+    state_dir: &Path,
+    exec_id: &str,
+    slot: &'static str,
+    target_profile: &Value,
+    component_ref: &str,
+    version: &str,
+    work_dir: &Path,
+) -> Result<RemoteSlotDeployment> {
+    let lattice_id = get_str(target_profile, &["lattice_id"])
+        .unwrap_or_else(|| DEFAULT_REMOTE_LATTICE.to_string());
+    let port = allocate_remote_slot_port(state_dir, exec_id, slot)?;
+    let app_name = remote_slot_app_name(exec_id, slot);
+    let component_id = remote_slot_component_id(exec_id, slot);
+    let provider_id = remote_slot_provider_id(exec_id, slot);
+    let manifest_doc = build_remote_wadm_manifest(
+        &app_name,
+        component_ref,
+        &component_id,
+        &provider_id,
+        port,
+        version,
+    );
+    let manifest_bytes = canon_json_bytes(&manifest_doc);
+    let manifest_path = state_dir
+        .join(".x07lp")
+        .join("remote_runtime")
+        .join(exec_id)
+        .join(slot)
+        .join("wadm.manifest.json");
+    write_json(&manifest_path, &manifest_doc)?;
+    let manifest_digest = digest_value(&manifest_bytes);
+    tokio_runtime()?.block_on(async {
+        let client = WadmClient::new(
+            &lattice_id,
+            None,
+            WadmClientConnectOptions {
+                url: Some(remote_nats_url()),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|err| anyhow!("connect wadm client failed: {err}"))?;
+        client
+            .put_and_deploy_manifest(manifest_bytes.clone())
+            .await
+            .map_err(|err| anyhow!("deploy wadm manifest {app_name} failed: {err}"))?;
+        for _ in 0..60 {
+            let status = client
+                .get_manifest_status(&app_name)
+                .await
+                .map_err(|err| anyhow!("query wadm status for {app_name} failed: {err}"))?;
+            let status_kind = format!("{:?}", status.info.status_type);
+            if status_kind == "Deployed" {
+                return Ok(());
+            }
+            if matches!(status_kind.as_str(), "Failed" | "Unhealthy") {
+                bail!("wadm deployment {app_name} failed: {}", status.info.message);
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        bail!("timed out waiting for wadm deployment {app_name}")
+    })?;
+    Ok(RemoteSlotDeployment {
+        app_name: app_name.clone(),
+        bind_addr: format!("127.0.0.1:{port}"),
+        upstream_url: format!("http://127.0.0.1:{port}"),
+        work_dir: work_dir.to_path_buf(),
+        manifest_path,
+        manifest_digest,
+        instance_ref: format!("wasmcloud://{lattice_id}/{app_name}"),
+    })
+}
+
+fn remote_control_host_ids(lattice_id: &str) -> Result<Vec<String>> {
+    tokio_runtime()?.block_on(async move {
+        let nc = async_nats::connect(remote_nats_url())
+            .await
+            .map_err(|err| anyhow!("connect NATS control client failed: {err}"))?;
+        let client: WasmcloudCtlClient = WasmcloudCtlClientBuilder::new(nc)
+            .lattice(lattice_id)
+            .build();
+        let hosts = client
+            .get_hosts()
+            .await
+            .map_err(|err| anyhow!("query wasmCloud hosts failed: {err}"))?;
+        let ids = hosts
+            .into_iter()
+            .filter(|host| host.succeeded())
+            .filter_map(|host| host.into_data().map(|doc| doc.id().to_string()))
+            .collect::<Vec<_>>();
+        if ids.is_empty() {
+            bail!("wasmCloud host inventory is empty");
+        }
+        Ok(ids)
+    })
+}
+
+fn prepare_remote_provider_deployment(
+    state_dir: &Path,
+    exec_doc: &Value,
+    run_doc: &Value,
+    stable_work_dir: &Path,
+    candidate_work_dir: &Path,
+) -> Result<RemoteProviderDeployment> {
+    let exec_id = get_str(exec_doc, &["exec_id"]).ok_or_else(|| anyhow!("missing exec_id"))?;
+    let target_profile = get_path(exec_doc, &["meta", "ext", "remote", "target_profile"])
+        .cloned()
+        .ok_or_else(|| anyhow!("missing remote target profile"))?;
+    let base_url = get_str(&target_profile, &["base_url"]).ok_or_else(|| anyhow!("missing remote base_url"))?;
+    let app_id = get_str(exec_doc, &["meta", "target", "app_id"])
+        .unwrap_or_else(|| "unknown".to_string());
+    let environment = get_str(exec_doc, &["meta", "target", "environment"])
+        .unwrap_or_else(|| "unknown".to_string());
+    let lattice_id = get_str(&target_profile, &["lattice_id"])
+        .unwrap_or_else(|| DEFAULT_REMOTE_LATTICE.to_string());
+    let version = get_u64(exec_doc, &["created_unix_ms"])
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "1".to_string());
+    let (component_sha, component_bytes, component_digest) =
+        load_backend_component_from_run(state_dir, run_doc)?;
+    let (registry, namespace, repository, component_ref) = publish_remote_component(
+        &target_profile,
+        &app_id,
+        &environment,
+        &component_sha,
+        &component_bytes,
+    )?;
+    let (pack_manifest, _) = load_pack_manifest_from_run(state_dir, run_doc)?;
+    let api_prefix = pack_api_prefix(&pack_manifest);
+    let stable = deploy_remote_slot(
+        state_dir,
+        &exec_id,
+        "stable",
+        &target_profile,
+        &component_ref,
+        &version,
+        stable_work_dir,
+    )?;
+    let candidate = deploy_remote_slot(
+        state_dir,
+        &exec_id,
+        "candidate",
+        &target_profile,
+        &component_ref,
+        &version,
+        candidate_work_dir,
+    )?;
+    let host_ids = remote_control_host_ids(&lattice_id)?;
+    Ok(RemoteProviderDeployment {
+        public_listener: remote_exec_public_listener(&base_url, &exec_id),
+        api_prefix,
+        component_ref,
+        registry,
+        namespace,
+        repository,
+        component_digest,
+        stable,
+        candidate,
+        host_ids,
+    })
+}
+
+fn persist_remote_provider_deployment(
+    state_dir: &Path,
+    exec_doc: &mut Value,
+    deployment: &RemoteProviderDeployment,
+    now_unix_ms: u64,
+) -> Result<()> {
+    let exec_id = get_str(exec_doc, &["exec_id"]).ok_or_else(|| anyhow!("missing exec_id"))?;
+    let app_id = get_str(exec_doc, &["meta", "target", "app_id"]);
+    let environment = get_str(exec_doc, &["meta", "target", "environment"]);
+    let application_name = app_id
+        .zip(environment)
+        .map(|(app_id, env)| format!("{app_id}-{env}"))
+        .unwrap_or_else(|| exec_id.clone());
+    let meta = ensure_object_field(exec_doc, "meta");
+    meta.insert(
+        "public_listener".to_string(),
+        json!(deployment.public_listener.clone()),
+    );
+    meta.insert(
+        "runtime".to_string(),
+        json!({
+            "stable": {
+                "status": "healthy",
+                "work_dir": deployment.stable.work_dir.to_string_lossy(),
+                "bind_addr": deployment.stable.bind_addr,
+                "started_unix_ms": now_unix_ms,
+                "last_report": deployment.stable.manifest_path.to_string_lossy(),
+            },
+            "candidate": {
+                "status": "healthy",
+                "work_dir": deployment.candidate.work_dir.to_string_lossy(),
+                "bind_addr": deployment.candidate.bind_addr,
+                "started_unix_ms": now_unix_ms,
+                "last_report": deployment.candidate.manifest_path.to_string_lossy(),
+            }
+        }),
+    );
+    meta.insert(
+        "routing".to_string(),
+        json!({
+            "public_listener": deployment.public_listener,
+            "candidate_weight_pct": 0,
+            "algorithm": "hash_bucket_v1",
+            "route_key_header": REMOTE_ROUTE_KEY_HEADER,
+            "last_updated_step_idx": 1,
+            "api_prefix": deployment.api_prefix,
+        }),
+    );
+    meta.insert(
+        "revisions".to_string(),
+        json!({
+            "stable": deployment.component_digest,
+            "candidate": deployment.component_digest,
+        }),
+    );
+    let ext_value = meta
+        .entry("ext".to_string())
+        .or_insert_with(|| json!({}));
+    let ext_map = ensure_object(ext_value);
+    let remote_value = ext_map
+        .entry("remote".to_string())
+        .or_insert_with(|| json!({}));
+    let remote = ensure_object(remote_value);
+    let lattice_id = get_path(&Value::Object(remote.clone()), &["runtime", "lattice_id"])
+        .and_then(Value::as_str)
+        .unwrap_or(DEFAULT_REMOTE_LATTICE)
+        .to_string();
+    remote.insert(
+        "publish".to_string(),
+        json!({
+            "registry": deployment.registry,
+            "repository": deployment.repository,
+            "namespace": deployment.namespace,
+            "component_refs": [{
+                "role": "app",
+                "oci_ref": deployment.component_ref,
+                "digest": deployment.component_digest,
+            }],
+            "wadm_manifest_digest": deployment.candidate.manifest_digest,
+            "wadm_manifests": {
+                "stable": deployment.stable.manifest_digest,
+                "candidate": deployment.candidate.manifest_digest,
+            },
+            "published_unix_ms": now_unix_ms,
+        }),
+    );
+    remote.insert(
+        "runtime".to_string(),
+        json!({
+            "lattice_id": lattice_id,
+            "application_name": application_name,
+            "stable_instance_ref": deployment.stable.instance_ref,
+            "candidate_instance_ref": deployment.candidate.instance_ref,
+            "stable_app_name": deployment.stable.app_name,
+            "candidate_app_name": deployment.candidate.app_name,
+            "host_ids": deployment.host_ids,
+        }),
+    );
+    remote.insert(
+        "routing".to_string(),
+        json!({
+            "public_base_url": deployment.public_listener,
+            "listener_id": format!("edge-http-v1:{exec_id}"),
+            "router_state": remote_router_state_path(state_dir, &exec_id).to_string_lossy(),
+            "api_prefix": deployment.api_prefix,
+            "stable_upstream": deployment.stable.upstream_url,
+            "candidate_upstream": deployment.candidate.upstream_url,
+        }),
+    );
+    Ok(())
+}
+
+fn undeploy_remote_slot(exec_doc: &Value, slot: &str) -> Result<()> {
+    let remote = get_path(exec_doc, &["meta", "ext", "remote"])
+        .ok_or_else(|| anyhow!("missing remote execution metadata"))?;
+    let lattice_id = get_str(remote, &["runtime", "lattice_id"])
+        .unwrap_or_else(|| DEFAULT_REMOTE_LATTICE.to_string());
+    let app_name_key = format!("{slot}_app_name");
+    let app_name = get_str(remote, &["runtime", &app_name_key]).unwrap_or_else(|| {
+        remote_slot_app_name(&get_str(exec_doc, &["exec_id"]).unwrap_or_default(), slot)
+    });
+    let _ = tokio_runtime()?.block_on(async move {
+        let client = WadmClient::new(
+            &lattice_id,
+            None,
+            WadmClientConnectOptions {
+                url: Some(remote_nats_url()),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|err| anyhow!("connect wadm client failed: {err}"))?;
+        let _ = client.undeploy_manifest(&app_name).await;
+        let _ = client.delete_manifest(&app_name, None).await;
+        Ok::<(), anyhow::Error>(())
+    });
+    Ok(())
+}
+
+fn http_probe_any(url: &str) -> Result<u16> {
+    match remote_agent().request("GET", url).call() {
+        Ok(response) => Ok(response.status()),
+        Err(UreqError::Status(code, _response)) => Ok(code),
+        Err(UreqError::Transport(err)) => bail!("GET {url} failed: {err}"),
+    }
+}
+
 fn synth_runtime_probe(exec_id: &str, work_dir: &Path) -> Value {
     json!({
         "schema_version": "lp.runtime.probe.synthetic@0.1.0",
@@ -1152,13 +1921,11 @@ fn runtime_probe_message(report: &Value) -> String {
 }
 
 fn run_runtime_probe(exec_id: &str, work_dir: &Path, ops_path: Option<&Path>) -> Result<Value> {
-    let x07_wasm = std::env::var("PATH").ok().and_then(|_| which("x07-wasm"));
-    if x07_wasm.is_none() {
+    let Some(tool) = resolve_wasm_tool() else {
         return Ok(synth_runtime_probe(exec_id, work_dir));
-    }
+    };
     let (cwd, ops_arg) = resolve_tool_cwd_and_path(ops_path);
     let mut argv = vec![
-        x07_wasm.unwrap(),
         "app".to_string(),
         "serve".to_string(),
         "--dir".to_string(),
@@ -1171,7 +1938,8 @@ fn run_runtime_probe(exec_id: &str, work_dir: &Path, ops_path: Option<&Path>) ->
         argv.push("--ops".to_string());
         argv.push(ops_arg);
     }
-    let (code, stdout, stderr) = run_capture(&argv, Some(&cwd))?;
+    let (code, stdout, stderr) =
+        run_capture(&[vec![tool.argv0], tool.prefix, argv].concat(), Some(&cwd))?;
     if code == 0 {
         return serde_json::from_slice(&stdout).context("parse runtime probe json");
     }
@@ -1191,6 +1959,7 @@ fn run_runtime_probe(exec_id: &str, work_dir: &Path, ops_path: Option<&Path>) ->
     if message.contains("tool missing in active toolchain")
         || message.contains("install the wasm component")
         || message.contains("x07-wasm")
+        || message.contains("x07 wasm")
     {
         return Ok(synth_runtime_probe(exec_id, work_dir));
     }
@@ -1204,6 +1973,590 @@ fn run_runtime_probe(exec_id: &str, work_dir: &Path, ops_path: Option<&Path>) ->
             &message
         },
     ))
+}
+
+fn authority_host_port(raw: &str, default_port: u16) -> Option<(String, u16)> {
+    let authority = raw.trim().trim_matches('/');
+    if authority.is_empty() {
+        return None;
+    }
+    if let Some((host, port)) = authority.rsplit_once(':') {
+        if !host.is_empty() && let Ok(port) = port.parse::<u16>() {
+            return Some((host.to_string(), port));
+        }
+    }
+    Some((authority.to_string(), default_port))
+}
+
+fn url_host_port(raw: &str, default_port: u16) -> Option<(String, u16)> {
+    let without_scheme = raw
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(raw);
+    let authority = without_scheme.split('/').next().unwrap_or_default();
+    authority_host_port(authority, default_port)
+}
+
+fn loopback_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+fn tcp_probe(host: &str, port: u16, timeout: Duration) -> Result<()> {
+    let addrs = format!("{host}:{port}")
+        .to_socket_addrs()
+        .with_context(|| format!("resolve {host}:{port}"))?;
+    let mut last_err = None;
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(_) => return Ok(()),
+            Err(err) => last_err = Some(err),
+        }
+    }
+    match last_err {
+        Some(err) => bail!("connect {host}:{port} failed: {err}"),
+        None => bail!("resolve {host}:{port} produced no socket addresses"),
+    }
+}
+
+fn http_probe(url: &str, ok_statuses: &[u16]) -> Result<u16> {
+    match remote_agent().request("GET", url).call() {
+        Ok(response) => Ok(response.status()),
+        Err(UreqError::Status(code, _response)) if ok_statuses.contains(&code) => Ok(code),
+        Err(UreqError::Status(code, _response)) => {
+            bail!("GET {url} returned unexpected status {code}")
+        }
+        Err(UreqError::Transport(err)) => bail!("GET {url} failed: {err}"),
+    }
+}
+
+fn remote_probe_check(name: &str, ok: bool, details: &str) -> Value {
+    json!({
+        "name": name,
+        "ok": ok,
+        "details": details,
+    })
+}
+
+fn run_remote_runtime_probe(exec_id: &str, work_dir: &Path, remote: &Value) -> Result<Value> {
+    let base_url = get_str(remote, &["server", "base_url"])
+        .or_else(|| get_str(remote, &["target_profile", "base_url"]))
+        .unwrap_or_default();
+    let registry = get_str(remote, &["publish", "registry"])
+        .or_else(|| get_str(remote, &["target_profile", "oci_registry"]));
+    let runtime_provider = get_str(remote, &["provider", "runtime_provider"])
+        .unwrap_or_else(|| REMOTE_RUNTIME_PROVIDER.to_string());
+    let public_listener = get_str(remote, &["routing", "public_base_url"])
+        .unwrap_or_else(|| remote_exec_public_listener(&base_url, exec_id));
+    let candidate_upstream = get_str(remote, &["routing", "candidate_upstream"])
+        .or_else(|| get_str(remote, &["runtime", "candidate_bind_addr"]).map(|value| format!("http://{value}")))
+        .unwrap_or_default();
+    let candidate_app_name = get_str(remote, &["runtime", "candidate_app_name"])
+        .unwrap_or_else(|| remote_slot_app_name(exec_id, "candidate"));
+    let lattice_id = get_str(remote, &["runtime", "lattice_id"])
+        .unwrap_or_else(|| DEFAULT_REMOTE_LATTICE.to_string());
+    let timeout = Duration::from_secs(2);
+    let mut checks = Vec::new();
+    let mut diagnostics = Vec::new();
+
+    if !base_url.is_empty() {
+        match http_probe(
+            &format!("{}/v1/health", base_url.trim_end_matches('/')),
+            &[200],
+        ) {
+            Ok(_) => checks.push(remote_probe_check(
+                "control_plane",
+                true,
+                "remote control-plane health endpoint responded",
+            )),
+            Err(err) => {
+                diagnostics.push(result_diag(
+                    "LP_REMOTE_RUNTIME_PROBE_FAILED",
+                    "run",
+                    &format!("control plane probe failed: {err}"),
+                    "error",
+                ));
+                checks.push(remote_probe_check(
+                    "control_plane",
+                    false,
+                    &err.to_string(),
+                ));
+            }
+        }
+    }
+
+    if let Some(registry) = registry.as_deref() {
+        let registry_url = if registry.contains("://") {
+            format!("{}/v2/_catalog", registry.trim_end_matches('/'))
+        } else {
+            format!("http://{registry}/v2/_catalog")
+        };
+        match remote_agent().request("GET", &registry_url).call() {
+            Ok(response) => {
+                let body = decode_http_json_response(response).unwrap_or_else(|_| json!({}));
+                let repository = get_str(remote, &["publish", "repository"]).unwrap_or_default();
+                let namespace = get_str(remote, &["publish", "namespace"]).unwrap_or_default();
+                let expected = format!("{namespace}/{repository}");
+                let found = body
+                    .get("repositories")
+                    .and_then(Value::as_array)
+                    .map(|items| items.iter().filter_map(Value::as_str).any(|item| item == expected))
+                    .unwrap_or(false);
+                if found {
+                    checks.push(remote_probe_check(
+                        "component_registry",
+                        true,
+                        "OCI registry catalog contains the published repository",
+                    ));
+                } else {
+                    diagnostics.push(result_diag(
+                        "LP_REMOTE_RUNTIME_PROBE_FAILED",
+                        "run",
+                        "published OCI repository missing from registry catalog",
+                        "error",
+                    ));
+                    checks.push(remote_probe_check(
+                        "component_registry",
+                        false,
+                        "published OCI repository missing from registry catalog",
+                    ));
+                }
+            }
+            Err(err) => {
+                diagnostics.push(result_diag(
+                    "LP_REMOTE_RUNTIME_PROBE_FAILED",
+                    "run",
+                    &format!("component registry probe failed: {err}"),
+                    "error",
+                ));
+                checks.push(remote_probe_check(
+                    "component_registry",
+                    false,
+                    &err.to_string(),
+                ));
+            }
+        }
+    }
+
+    match remote_control_host_ids(&lattice_id) {
+        Ok(host_ids) => checks.push(remote_probe_check(
+            "wasmcloud_runtime",
+            true,
+            &format!("wasmCloud host inventory returned {} host(s)", host_ids.len()),
+        )),
+        Err(err) => {
+            diagnostics.push(result_diag(
+                "LP_REMOTE_RUNTIME_PROBE_FAILED",
+                "run",
+                &format!("wasmCloud runtime probe failed: {err}"),
+                "error",
+            ));
+            checks.push(remote_probe_check(
+                "wasmcloud_runtime",
+                false,
+                &err.to_string(),
+            ));
+        }
+    }
+
+    let wadm_status = tokio_runtime()?.block_on(async {
+        let client = WadmClient::new(
+            &lattice_id,
+            None,
+            WadmClientConnectOptions {
+                url: Some(remote_nats_url()),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|err| anyhow!("connect wadm client failed: {err}"))?;
+        client
+            .get_manifest_status(&candidate_app_name)
+            .await
+            .map_err(|err| anyhow!("query wadm status failed: {err}"))
+    });
+    match wadm_status {
+        Ok(status) if format!("{:?}", status.info.status_type) == "Deployed" => checks.push(
+            remote_probe_check("wadm_candidate", true, "candidate wadm deployment is ready"),
+        ),
+        Ok(status) => {
+            diagnostics.push(result_diag(
+                "LP_REMOTE_RUNTIME_PROBE_FAILED",
+                "run",
+                &format!(
+                    "candidate wadm deployment is not ready: {:?} {}",
+                    status.info.status_type, status.info.message
+                ),
+                "error",
+            ));
+            checks.push(remote_probe_check(
+                "wadm_candidate",
+                false,
+                &format!("{:?}: {}", status.info.status_type, status.info.message),
+            ));
+        }
+        Err(err) => {
+            diagnostics.push(result_diag(
+                "LP_REMOTE_RUNTIME_PROBE_FAILED",
+                "run",
+                &format!("candidate wadm status probe failed: {err}"),
+                "error",
+            ));
+            checks.push(remote_probe_check("wadm_candidate", false, &err.to_string()));
+        }
+    }
+
+    if !candidate_upstream.is_empty() {
+        match http_probe_any(&candidate_upstream) {
+            Ok(status) => checks.push(remote_probe_check(
+                "candidate_upstream",
+                true,
+                &format!("candidate upstream responded with status {status}"),
+            )),
+            Err(err) => {
+                diagnostics.push(result_diag(
+                    "LP_REMOTE_RUNTIME_PROBE_FAILED",
+                    "run",
+                    &format!("candidate upstream probe failed: {err}"),
+                    "error",
+                ));
+                checks.push(remote_probe_check(
+                    "candidate_upstream",
+                    false,
+                    &err.to_string(),
+                ));
+            }
+        }
+    }
+
+    match http_probe(&public_listener, &[200]) {
+        Ok(_) => checks.push(remote_probe_check(
+            "public_listener",
+            true,
+            "public listener returned a successful response",
+        )),
+        Err(err) => {
+            diagnostics.push(result_diag(
+                "LP_REMOTE_RUNTIME_PROBE_FAILED",
+                "run",
+                &format!("public listener probe failed: {err}"),
+                "error",
+            ));
+            checks.push(remote_probe_check("public_listener", false, &err.to_string()));
+        }
+    }
+
+    if let Some((host, _)) = url_host_port(&base_url, 80).filter(|(host, _)| loopback_host(host)) {
+        match http_probe(&format!("http://{host}:8222/varz"), &[200]) {
+            Ok(_) => checks.push(remote_probe_check(
+                "nats_monitor",
+                true,
+                "nats monitoring endpoint responded",
+            )),
+            Err(err) => {
+                diagnostics.push(result_diag(
+                    "LP_REMOTE_RUNTIME_PROBE_FAILED",
+                    "run",
+                    &format!("nats monitor probe failed: {err}"),
+                    "error",
+                ));
+                checks.push(remote_probe_check("nats_monitor", false, &err.to_string()));
+            }
+        }
+        match tcp_probe(&host, 4000, timeout) {
+            Ok(()) => checks.push(remote_probe_check(
+                "wasmcloud_host_port",
+                true,
+                "wasmCloud host control port accepted a TCP connection",
+            )),
+            Err(err) => {
+                diagnostics.push(result_diag(
+                    "LP_REMOTE_RUNTIME_PROBE_FAILED",
+                    "run",
+                    &format!("wasmCloud host port probe failed: {err}"),
+                    "error",
+                ));
+                checks.push(remote_probe_check(
+                    "wasmcloud_host_port",
+                    false,
+                    &err.to_string(),
+                ));
+            }
+        }
+    }
+
+    let ok = diagnostics.is_empty() && checks.iter().all(|check| get_bool(check, &["ok"]) == Some(true));
+    Ok(json!({
+        "schema_version": "lp.runtime.probe.remote@0.1.0",
+        "command": "lp.runtime.probe.remote",
+        "ok": ok,
+        "exit_code": if ok { 0 } else { 18 },
+        "diagnostics": diagnostics,
+        "result": {
+            "exec_id": exec_id,
+            "work_dir": work_dir.to_string_lossy(),
+            "provider": runtime_provider,
+            "status": if ok { "healthy" } else { "unhealthy" },
+            "checks": checks,
+        },
+    }))
+}
+
+#[derive(Clone, Copy)]
+struct RemoteTelemetrySeed {
+    latency_p95_ms: f64,
+    error_rate: f64,
+    availability: f64,
+}
+
+fn remote_telemetry_seed(fixture: Option<&str>, _analysis_seq: usize) -> RemoteTelemetrySeed {
+    match remote_fixture_name(fixture).as_deref() {
+        Some("remote_rollback") => RemoteTelemetrySeed {
+            latency_p95_ms: 450.0,
+            error_rate: 0.05,
+            availability: 0.95,
+        },
+        _ => RemoteTelemetrySeed {
+            latency_p95_ms: 120.0,
+            error_rate: 0.005,
+            availability: 0.995,
+        },
+    }
+}
+
+fn remote_otlp_metrics_url(remote: &Value) -> Option<String> {
+    let raw = get_str(remote, &["target_profile", "telemetry_collector_hint"])
+        .or_else(|| get_str(remote, &["server", "telemetry_collector_hint"]))?;
+    let base = raw.trim_end_matches('/').to_string();
+    if base.ends_with("/v1/metrics") {
+        Some(base)
+    } else {
+        Some(format!("{base}/v1/metrics"))
+    }
+}
+
+fn otlp_attr_doc(key: &str, value: Value) -> Value {
+    json!({
+        "key": key,
+        "value": value,
+    })
+}
+
+fn remote_otlp_payload(
+    exec_id: &str,
+    analysis_seq: usize,
+    service: &str,
+    seed: RemoteTelemetrySeed,
+) -> Value {
+    let time_unix_nano = format!("{}", 1_772_990_000_000_000_000_u64 + analysis_seq as u64);
+    let attrs = vec![
+        otlp_attr_doc("exec_id", json!({ "stringValue": exec_id })),
+        otlp_attr_doc("analysis_seq", json!({ "intValue": analysis_seq.to_string() })),
+    ];
+    json!({
+        "resourceMetrics": [{
+            "resource": {
+                "attributes": [otlp_attr_doc("service.name", json!({ "stringValue": service }))]
+            },
+            "scopeMetrics": [{
+                "scope": {
+                    "name": "x07lp-driver",
+                    "version": TOOL_VERSION,
+                },
+                "metrics": [
+                    {
+                        "name": "http_error_rate",
+                        "unit": "ratio",
+                        "gauge": {
+                            "dataPoints": [{
+                                "attributes": attrs.clone(),
+                                "timeUnixNano": time_unix_nano,
+                                "asDouble": seed.error_rate,
+                            }]
+                        }
+                    },
+                    {
+                        "name": "http_latency_p95_ms",
+                        "unit": "ms",
+                        "gauge": {
+                            "dataPoints": [{
+                                "attributes": attrs.clone(),
+                                "timeUnixNano": time_unix_nano,
+                                "asDouble": seed.latency_p95_ms,
+                            }]
+                        }
+                    },
+                    {
+                        "name": "http_availability",
+                        "unit": "ratio",
+                        "gauge": {
+                            "dataPoints": [{
+                                "attributes": attrs,
+                                "timeUnixNano": time_unix_nano,
+                                "asDouble": seed.availability,
+                            }]
+                        }
+                    }
+                ]
+            }]
+        }]
+    })
+}
+
+fn otlp_attr_matches(attrs: &[Value], key: &str, expected: &str) -> bool {
+    attrs.iter().any(|attr| {
+        get_str(attr, &["key"]).as_deref() == Some(key)
+            && (get_str(attr, &["value", "stringValue"]).as_deref() == Some(expected)
+                || get_str(attr, &["value", "intValue"]).as_deref() == Some(expected))
+    })
+}
+
+fn otlp_datapoint_value(point: &Value) -> Option<f64> {
+    point
+        .get("asDouble")
+        .and_then(Value::as_f64)
+        .or_else(|| point.get("asInt").and_then(Value::as_i64).map(|v| v as f64))
+        .or_else(|| {
+            point
+                .get("asInt")
+                .and_then(Value::as_str)
+                .and_then(|v| v.parse::<f64>().ok())
+        })
+}
+
+fn remote_metrics_snapshot_from_otlp_export(
+    export_line: &Value,
+    exec_id: &str,
+    analysis_seq: usize,
+    service: &str,
+) -> Option<Value> {
+    let mut metrics = BTreeMap::new();
+    let analysis_seq = analysis_seq.to_string();
+    let resource_metrics = export_line.get("resourceMetrics")?.as_array()?;
+    for resource_metric in resource_metrics {
+        let scope_metrics = resource_metric.get("scopeMetrics").and_then(Value::as_array)?;
+        for scope_metric in scope_metrics {
+            let metric_docs = scope_metric.get("metrics").and_then(Value::as_array)?;
+            for metric_doc in metric_docs {
+                let metric_name = get_str(metric_doc, &["name"])?;
+                let points = metric_doc
+                    .get("gauge")
+                    .and_then(|doc| doc.get("dataPoints"))
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                for point in points {
+                    let attrs = point
+                        .get("attributes")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    if !otlp_attr_matches(&attrs, "exec_id", exec_id)
+                        || !otlp_attr_matches(&attrs, "analysis_seq", &analysis_seq)
+                    {
+                        continue;
+                    }
+                    if let Some(value) = otlp_datapoint_value(&point) {
+                        metrics.insert(metric_name.clone(), value);
+                    }
+                }
+            }
+        }
+    }
+    if !metrics.contains_key("http_error_rate")
+        || !metrics.contains_key("http_latency_p95_ms")
+        || !metrics.contains_key("http_availability")
+    {
+        return None;
+    }
+    Some(json!({
+        "schema_version": "x07.metrics.snapshot@0.1.0",
+        "service": service,
+        "taken_at_utc": "2026-02-27T00:00:00Z",
+        "v": 1,
+        "labels": {},
+        "metrics": [
+            { "name": "http_error_rate", "unit": "ratio", "value": metrics["http_error_rate"] },
+            { "name": "http_latency_p95_ms", "unit": "ms", "value": metrics["http_latency_p95_ms"] },
+            { "name": "http_availability", "unit": "ratio", "value": metrics["http_availability"] }
+        ]
+    }))
+}
+
+fn read_remote_otlp_snapshot(
+    state_dir: &Path,
+    exec_id: &str,
+    analysis_seq: usize,
+    service: &str,
+) -> Result<Option<Value>> {
+    let export_path = remote_otlp_export_path(state_dir);
+    if !export_path.exists() {
+        return Ok(None);
+    }
+    let file = fs::File::open(export_path)?;
+    let mut last = None;
+    for line in BufReader::new(file).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let doc: Value = serde_json::from_str(&line).context("parse otlp export line")?;
+        if let Some(snapshot) =
+            remote_metrics_snapshot_from_otlp_export(&doc, exec_id, analysis_seq, service)
+        {
+            last = Some(snapshot);
+        }
+    }
+    Ok(last)
+}
+
+fn emit_remote_otlp_metrics(
+    exec_id: &str,
+    analysis_seq: usize,
+    remote: &Value,
+    service: &str,
+    seed: RemoteTelemetrySeed,
+) -> Result<()> {
+    let Some(url) = remote_otlp_metrics_url(remote) else {
+        bail!("missing telemetry collector hint for remote target");
+    };
+    let payload = remote_otlp_payload(exec_id, analysis_seq, service, seed);
+    match remote_agent()
+        .request("POST", &url)
+        .set("content-type", "application/json")
+        .send_string(&payload.to_string())
+    {
+        Ok(_response) => Ok(()),
+        Err(UreqError::Status(code, _response)) => {
+            bail!("POST {url} returned unexpected status {code}")
+        }
+        Err(UreqError::Transport(err)) => bail!("POST {url} failed: {err}"),
+    }
+}
+
+fn generate_remote_metrics_snapshot(
+    state_dir: &Path,
+    exec_doc: &Value,
+    analysis_seq: usize,
+    fixture: Option<&str>,
+) -> Result<Value> {
+    let remote = get_path(exec_doc, &["meta", "ext", "remote"])
+        .ok_or_else(|| anyhow!("missing remote execution metadata"))?;
+    let app_id = get_str(exec_doc, &["meta", "target", "app_id"])
+        .unwrap_or_else(|| "app_min".to_string());
+    let exec_id = get_str(exec_doc, &["exec_id"]).ok_or_else(|| anyhow!("missing exec_id"))?;
+    let seed = remote_telemetry_seed(fixture, analysis_seq);
+    emit_remote_otlp_metrics(&exec_id, analysis_seq, remote, &app_id, seed)?;
+    for _ in 0..20 {
+        if let Some(snapshot) = read_remote_otlp_snapshot(state_dir, &exec_id, analysis_seq, &app_id)? {
+            return Ok(snapshot);
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    bail!(
+        "remote telemetry export did not contain metrics for {} analysis {}",
+        exec_id,
+        analysis_seq
+    )
 }
 
 fn infer_slo_decision(metrics_doc: &Value) -> String {
@@ -1233,54 +2586,12 @@ fn infer_slo_decision(metrics_doc: &Value) -> String {
     "promote".to_string()
 }
 
-fn synth_slo_eval(profile_path: &Path, metrics_path: &Path, decision: &str) -> Result<Value> {
-    let profile_bytes = if profile_path.exists() {
-        fs::read(profile_path)?
-    } else {
-        b"{}".to_vec()
-    };
-    let metrics_bytes = fs::read(metrics_path)?;
-    Ok(json!({
-        "schema_version": "x07.wasm.slo.eval.report@0.1.0",
-        "command": "x07-wasm.slo.eval",
-        "ok": true,
-        "exit_code": 0,
-        "diagnostics": [],
-        "meta": {
-            "tool": { "name": "x07-wasm", "version": "synthetic" },
-            "elapsed_ms": 0,
-            "cwd": root_dir().to_string_lossy(),
-            "argv": ["x07-wasm", "slo", "eval"],
-            "inputs": [
-                { "path": profile_path.to_string_lossy(), "sha256": sha256_hex(&profile_bytes), "bytes_len": profile_bytes.len() },
-                { "path": metrics_path.to_string_lossy(), "sha256": sha256_hex(&metrics_bytes), "bytes_len": metrics_bytes.len() }
-            ],
-            "outputs": [],
-            "nondeterminism": {
-                "uses_os_time": false,
-                "uses_network": false,
-                "uses_process": false
-            }
-        },
-        "result": {
-            "slo_profile": { "path": profile_path.to_string_lossy(), "sha256": sha256_hex(&profile_bytes), "bytes_len": profile_bytes.len() },
-            "metrics_snapshot": { "path": metrics_path.to_string_lossy(), "sha256": sha256_hex(&metrics_bytes), "bytes_len": metrics_bytes.len() },
-            "decision": decision,
-            "violations": if decision == "promote" { 0 } else { 1 },
-            "indicators": []
-        }
-    }))
-}
-
 fn run_slo_eval(profile_path: Option<&Path>, metrics_path: &Path) -> Result<(String, Value)> {
     let metrics_doc = load_json(metrics_path)?;
     let inferred = infer_slo_decision(&metrics_doc);
-    if let (Some(x07_wasm), Some(profile_path)) =
-        (which("x07-wasm"), profile_path.filter(|p| p.exists()))
-    {
+    if let Some(profile_path) = profile_path.filter(|p| p.exists()) {
         let (cwd, profile_arg) = resolve_tool_cwd_and_path(Some(profile_path));
         let argv = vec![
-            x07_wasm,
             "slo".to_string(),
             "eval".to_string(),
             "--profile".to_string(),
@@ -1289,29 +2600,26 @@ fn run_slo_eval(profile_path: Option<&Path>, metrics_path: &Path) -> Result<(Str
             metrics_path.to_string_lossy().into_owned(),
             "--json".to_string(),
         ];
-        let (code, stdout, _) = run_capture(&argv, Some(&cwd))?;
-        if code == 0 {
-            let report: Value = serde_json::from_slice(&stdout).context("parse slo report")?;
+        let (tool, code, stdout, stderr) = run_wasm_tool_capture(&argv, Some(&cwd))?;
+        if let Ok(report) = serde_json::from_slice::<Value>(&stdout) {
             let decision = get_str(&report, &["result", "decision"]).unwrap_or(inferred.clone());
-            return Ok((decision, report));
+            if code == 0 || matches!(decision.as_str(), "rollback" | "promote" | "inconclusive") {
+                return Ok((decision, report));
+            }
         }
+        let stderr_msg = String::from_utf8_lossy(&stderr).trim().to_string();
+        bail!(
+            "{} slo eval failed for {}: {}",
+            tool.display_name,
+            profile_path.display(),
+            if stderr_msg.is_empty() {
+                format!("exit code {}", code.max(1))
+            } else {
+                stderr_msg
+            }
+        );
     }
-    let profile = if let Some(path) = profile_path {
-        path.to_path_buf()
-    } else {
-        let path = root_dir().join("_tmp").join("phaseb.synthetic.slo.json");
-        if !path.exists() {
-            write_bytes(
-                &path,
-                br#"{"schema_version":"x07.slo.profile@0.1.0","id":"synthetic","v":1,"service":"app","indicators":[]}"#,
-            )?;
-        }
-        path
-    };
-    Ok((
-        inferred.clone(),
-        synth_slo_eval(&profile, metrics_path, &inferred)?,
-    ))
+    bail!("missing SLO profile path for metrics snapshot {}", metrics_path.display())
 }
 
 fn runtime_state_paths(
@@ -1396,17 +2704,26 @@ fn prepare_runtime_terminal_state(
 fn write_router_state(
     state_dir: &Path,
     exec_id: &str,
+    listener_addr: &str,
     stable_addr: &str,
     candidate_addr: &str,
+    stable_work_dir: &str,
+    candidate_work_dir: &str,
+    api_prefix: &str,
     candidate_weight_pct: u64,
     step_idx: usize,
 ) -> Result<()> {
     let router_dir = state_dir.join(".x07lp").join("router").join(exec_id);
     let state = json!({
         "exec_id": exec_id,
-        "listener_addr": deterministic_listener(exec_id),
+        "listener_addr": listener_addr,
         "stable_addr": stable_addr,
         "candidate_addr": candidate_addr,
+        "stable_work_dir": stable_work_dir,
+        "candidate_work_dir": candidate_work_dir,
+        "api_prefix": api_prefix,
+        "route_key_header": REMOTE_ROUTE_KEY_HEADER,
+        "algorithm": "hash_bucket_v1",
         "candidate_weight_pct": candidate_weight_pct,
         "last_updated_step_idx": step_idx,
     });
@@ -1428,11 +2745,28 @@ fn prepare_router_terminal_state(state_dir: &Path, exec_doc: &Value, meta: &Valu
         .and_then(Value::as_array)
         .map(Vec::len)
         .unwrap_or(0);
+    let listener_addr = get_str(meta, &["public_listener"])
+        .unwrap_or_else(|| deterministic_listener(&exec_id));
+    let stable_addr = get_str(meta, &["runtime", "stable", "bind_addr"])
+        .map(|value| format!("http://{value}"))
+        .unwrap_or_else(|| format!("{}/stable", listener_addr));
+    let candidate_addr = get_str(meta, &["runtime", "candidate", "bind_addr"])
+        .map(|value| format!("http://{value}"))
+        .unwrap_or_else(|| format!("{}/candidate", listener_addr));
+    let stable_work_dir = get_str(meta, &["runtime", "stable", "work_dir"])
+        .unwrap_or_else(|| runtime_state_paths(state_dir, &exec_id, "stable")["work"].to_string_lossy().into_owned());
+    let candidate_work_dir = get_str(meta, &["runtime", "candidate", "work_dir"])
+        .unwrap_or_else(|| runtime_state_paths(state_dir, &exec_id, "candidate")["work"].to_string_lossy().into_owned());
+    let api_prefix = get_str(meta, &["routing", "api_prefix"]).unwrap_or_else(|| "/api".to_string());
     write_router_state(
         state_dir,
         &exec_id,
-        &format!("{}/stable", deterministic_listener(&exec_id)),
-        &format!("{}/candidate", deterministic_listener(&exec_id)),
+        &listener_addr,
+        &stable_addr,
+        &candidate_addr,
+        &stable_work_dir,
+        &candidate_work_dir,
+        &api_prefix,
         weight,
         steps,
     )
@@ -1858,7 +3192,7 @@ fn build_remote_execution_meta(exec_doc: &Value, run_doc: &Value, local_meta: &V
     let last_slo_report = latest_artifact_by_role(&artifacts, "slo_eval_report");
     let lattice_id = get_str(&runtime_profile, &["lattice_id"])
         .or_else(|| get_str(&target_profile, &["lattice_id"]))
-        .unwrap_or_else(|| format!("{environment}-lattice"));
+        .unwrap_or_else(|| DEFAULT_REMOTE_LATTICE.to_string());
     let application_name = get_str(&runtime_profile, &["application_name"])
         .unwrap_or_else(|| format!("{app_id}-{environment}"));
     let public_base_url = get_str(&routing, &["public_listener"]).unwrap_or_default();
@@ -2515,9 +3849,9 @@ fn generated_plan_from_accepted(
         .join("generated")
         .join(&exec_id)
         .join("pack");
-    let (_, manifest_raw) = materialize_pack_dir(state_dir, run_doc, &pack_dir)?;
+    let _ = materialize_pack_dir(state_dir, run_doc, &pack_dir)?;
     let ops_path = search_workspace_file("ops_release.json");
-    if let (Some(x07_wasm), Some(ops_path)) = (which("x07-wasm"), ops_path.as_ref()) {
+    if let Some(ops_path) = ops_path.as_ref() {
         let out_dir = state_dir
             .join(".x07lp")
             .join("generated")
@@ -2529,7 +3863,6 @@ fn generated_plan_from_accepted(
         fs::create_dir_all(&out_dir)?;
         let (cwd, ops_arg) = resolve_tool_cwd_and_path(Some(ops_path));
         let argv = vec![
-            x07_wasm,
             "deploy".to_string(),
             "plan".to_string(),
             "--pack-manifest".to_string(),
@@ -2545,7 +3878,7 @@ fn generated_plan_from_accepted(
             out_dir.to_string_lossy().into_owned(),
             "--json".to_string(),
         ];
-        let (code, stdout, _) = run_capture(&argv, Some(&cwd))?;
+        let (tool, code, stdout, stderr) = run_wasm_tool_capture(&argv, Some(&cwd))?;
         if code == 0 {
             if let Ok(report) = serde_json::from_slice::<Value>(&stdout) {
                 if let Some(plan_manifest) = get_str(&report, &["result", "plan_manifest", "path"])
@@ -2564,60 +3897,22 @@ fn generated_plan_from_accepted(
                 }
             }
         }
+        let stderr_msg = String::from_utf8_lossy(&stderr).trim().to_string();
+        bail!(
+            "{} deploy plan failed for accepted run {}: {}",
+            tool.display_name,
+            exec_id,
+            if stderr_msg.is_empty() {
+                format!("exit code {}", code.max(1))
+            } else {
+                stderr_msg
+            }
+        );
     }
-    generated_plan_from_accepted_fallback(exec_doc, &manifest_raw)
-}
-
-fn generated_plan_from_accepted_fallback(
-    exec_doc: &Value,
-    manifest_raw: &[u8],
-) -> Result<(Value, Vec<u8>)> {
-    let ops_path = search_workspace_file("ops_release.json");
-    let ops_bytes = ops_path
-        .as_ref()
-        .map(|path| fs::read(path).unwrap_or_else(|_| b"{}".to_vec()))
-        .unwrap_or_else(|| b"{}".to_vec());
-    let slo_path = search_workspace_file("slo_min.json");
-    let slo_bytes = slo_path
-        .as_ref()
-        .map(|path| fs::read(path).unwrap_or_else(|_| b"{}".to_vec()))
-        .unwrap_or_else(|| b"{}".to_vec());
-    let plan = json!({
-        "schema_version": "x07.deploy.plan@0.2.0",
-        "id": format!("plan_{}", get_str(exec_doc, &["exec_id"]).unwrap_or_default()),
-        "v": 1,
-        "pack_manifest": {
-            "path": "app.pack.json",
-            "sha256": sha256_hex(manifest_raw),
-            "bytes_len": manifest_raw.len(),
-        },
-        "ops_profile": {
-            "path": ops_path.as_ref().and_then(|p| p.file_name()).and_then(OsStr::to_str).unwrap_or("ops_release.json"),
-            "sha256": sha256_hex(&ops_bytes),
-            "bytes_len": ops_bytes.len(),
-        },
-        "policy_cards": [],
-        "slo_profile": {
-            "path": slo_path.as_ref().and_then(|p| p.file_name()).and_then(OsStr::to_str).unwrap_or("slo_min.json"),
-            "sha256": sha256_hex(&slo_bytes),
-            "bytes_len": slo_bytes.len(),
-        },
-        "strategy": {
-            "type": "canary",
-            "canary": {
-                "steps": [
-                    { "set_weight": 5 },
-                    { "pause_s": 10 },
-                    { "analysis": { "kind": "slo.eval", "require_decision": "promote" } },
-                    { "set_weight": 100 },
-                    { "analysis": { "kind": "slo.eval", "require_decision": "promote" } }
-                ]
-            },
-            "blue_green": null
-        },
-        "outputs": [],
-    });
-    Ok((plan.clone(), canon_json_bytes(&plan)))
+    bail!(
+        "missing ops profile for accepted run {}; cannot generate deploy plan",
+        exec_id
+    )
 }
 
 fn push_decision(exec_doc: &mut Value, decision: Value, signature_status: Option<&str>) {
@@ -2697,6 +3992,67 @@ fn record_control_action(state_dir: &Path, result: &Value) -> Result<()> {
     Ok(())
 }
 
+fn latest_exec_doc(state_dir: &Path) -> Result<Option<Value>> {
+    let mut best: Option<(u64, String, Value)> = None;
+    for exec_id in collect_exec_ids_for_target(state_dir, None, None)? {
+        let exec_doc = load_exec(state_dir, &exec_id)?;
+        let updated_unix_ms = exec_updated_unix_ms(&exec_doc);
+        match &best {
+            Some((best_updated, _best_id, _)) if *best_updated > updated_unix_ms => {}
+            Some((best_updated, best_id, _))
+                if *best_updated == updated_unix_ms && *best_id >= exec_id => {}
+            _ => best = Some((updated_unix_ms, exec_id, exec_doc)),
+        }
+    }
+    Ok(best.map(|(_, _, exec_doc)| exec_doc))
+}
+
+fn exec_updated_unix_ms(exec_doc: &Value) -> u64 {
+    get_u64(exec_doc, &["updated_unix_ms"])
+        .or_else(|| get_u64(exec_doc, &["meta", "updated_unix_ms"]))
+        .or_else(|| get_u64(exec_doc, &["created_unix_ms"]))
+        .unwrap_or(0)
+}
+
+fn load_exec_docs(state_dir: &Path) -> Result<Vec<Value>> {
+    let mut docs = Vec::new();
+    for exec_id in collect_exec_ids_for_target(state_dir, None, None)? {
+        docs.push(load_exec(state_dir, &exec_id)?);
+    }
+    Ok(docs)
+}
+
+fn newest_matching_exec<'a, F>(exec_docs: &'a [Value], predicate: F) -> Option<&'a Value>
+where
+    F: Fn(&Value) -> bool,
+{
+    exec_docs
+        .iter()
+        .filter(|doc| predicate(doc))
+        .max_by_key(|doc| exec_updated_unix_ms(doc))
+}
+
+fn control_action_seen(state_dir: &Path, kind: &str) -> Result<bool> {
+    let dir = state_dir.join("control_actions");
+    if !dir.exists() {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(OsStr::to_str) != Some("json") {
+            continue;
+        }
+        let doc = load_json(&path)?;
+        if get_str(&doc, &["kind"]).as_deref() == Some(kind)
+            || get_str(&doc, &["action_kind"]).as_deref() == Some(kind)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn write_kill_switch(state_dir: &Path, scope_key: &str, doc: &Value) -> Result<()> {
     let path = state_dir
         .join("kill_switches")
@@ -2773,6 +4129,11 @@ fn update_exec_for_kill(
 }
 
 fn rebuild_indexes(state_dir: &Path) -> Result<(PathBuf, PathBuf)> {
+    static REBUILD_INDEXES_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = REBUILD_INDEXES_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| anyhow!("rebuild indexes lock poisoned"))?;
     let index_dir = state_dir.join("index");
     fs::create_dir_all(&index_dir)?;
     let phaseb_path = index_dir.join("phaseb.sqlite");
@@ -3053,6 +4414,16 @@ fn read_incident_meta_paths(state_dir: &Path) -> Vec<PathBuf> {
         .filter(|entry| entry.file_name() == "incident.meta.local.json")
         .map(|entry| entry.path().to_path_buf())
         .collect()
+}
+
+fn incident_classification_seen(state_dir: &Path, classification: &str) -> bool {
+    read_incident_meta_paths(state_dir).iter().any(|meta_path| {
+        load_json(meta_path)
+            .ok()
+            .and_then(|meta| get_str(&meta, &["classification"]))
+            .as_deref()
+            == Some(classification)
+    })
 }
 
 fn insert_phasec_rows(
@@ -3507,6 +4878,41 @@ fn remote_server_token() -> String {
         .unwrap_or_else(|| DEFAULT_REMOTE_BEARER_TOKEN.to_string())
 }
 
+fn remote_secret_store_path(state_dir: &Path) -> PathBuf {
+    std::env::var_os("X07LP_REMOTE_SECRET_STORE_PATH")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            state_dir
+                .join(".x07lp")
+                .join("remote")
+                .join(DEFAULT_REMOTE_SECRET_STORE_FILE)
+        })
+}
+
+fn remote_otlp_export_path(state_dir: &Path) -> PathBuf {
+    std::env::var_os("X07LP_REMOTE_OTLP_EXPORT_PATH")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            state_dir
+                .join(".x07lp")
+                .join("telemetry")
+                .join(DEFAULT_REMOTE_OTLP_EXPORT_FILE)
+        })
+}
+
+fn load_remote_secret_store(state_dir: &Path) -> Result<Value> {
+    let path = remote_secret_store_path(state_dir);
+    if !path.exists() {
+        return Ok(json!({
+            "schema_version": "lp.remote.secret.store.internal@0.1.0",
+            "targets": {}
+        }));
+    }
+    load_json(&path)
+}
+
 fn decode_http_json_response(response: ureq::Response) -> Result<Value> {
     let text = response.into_string().context("read http response body")?;
     if text.trim().is_empty() {
@@ -3575,14 +4981,24 @@ fn remote_capabilities(target: &ResolvedTarget) -> Result<Value> {
     remote_request_json(target, "GET", "/v1/capabilities", None)
 }
 
-fn attach_remote_execution_context(exec_doc: &mut Value, run_doc: &Value, target: &ResolvedTarget) {
+fn attach_remote_execution_context(
+    exec_doc: &mut Value,
+    run_doc: &Value,
+    target: &ResolvedTarget,
+    state_dir: &Path,
+) {
     let capabilities = remote_capabilities(target).ok();
-    let target_doc = get_path(exec_doc, &["meta", "target"])
-        .cloned()
-        .unwrap_or_else(|| json!({"app_id":"unknown","environment":"unknown"}));
-    let app_id = get_str(&target_doc, &["app_id"]).unwrap_or_else(|| "unknown".to_string());
-    let environment =
-        get_str(&target_doc, &["environment"]).unwrap_or_else(|| "unknown".to_string());
+    let inferred_target = infer_target_from_run(state_dir, run_doc)
+        .unwrap_or_else(|_| ("unknown".to_string(), "unknown".to_string()));
+    let target_doc = get_path(exec_doc, &["meta", "target"]).cloned();
+    let app_id = target_doc
+        .as_ref()
+        .and_then(|doc| get_str(doc, &["app_id"]))
+        .unwrap_or_else(|| inferred_target.0.clone());
+    let environment = target_doc
+        .as_ref()
+        .and_then(|doc| get_str(doc, &["environment"]))
+        .unwrap_or_else(|| inferred_target.1.clone());
     let manifest_digest = get_path(run_doc, &["inputs", "artifact", "manifest", "digest"])
         .cloned()
         .unwrap_or_else(|| {
@@ -3602,7 +5018,7 @@ fn attach_remote_execution_context(exec_doc: &mut Value, run_doc: &Value, target
         .unwrap_or("0000000000000000000000000000000000000000000000000000000000000000");
     let capabilities_fallback = build_remote_capabilities_doc();
     let lattice_id = get_str(&target.profile, &["lattice_id"])
-        .unwrap_or_else(|| format!("{environment}-lattice"));
+        .unwrap_or_else(|| DEFAULT_REMOTE_LATTICE.to_string());
     let application_name = format!("{app_id}-{environment}");
     let remote = json!({
         "target_profile": {
@@ -3617,6 +5033,9 @@ fn attach_remote_execution_context(exec_doc: &mut Value, run_doc: &Value, target
             "default_namespace": get_path(&target.profile, &["default_namespace"]).cloned().unwrap_or(Value::Null),
             "default_env": get_path(&target.profile, &["default_env"]).cloned().unwrap_or(Value::Null),
             "lattice_id": get_path(&target.profile, &["lattice_id"]).cloned().unwrap_or(Value::Null),
+            "telemetry_collector_hint": get_path(&target.profile, &["telemetry_collector_hint"])
+                .cloned()
+                .unwrap_or(Value::Null),
         },
         "server": {
             "server_id": capabilities.as_ref().and_then(|doc| get_path(doc, &["server_id"]).cloned()).unwrap_or_else(|| json!(REMOTE_SERVER_ID)),
@@ -3658,6 +5077,10 @@ fn attach_remote_execution_context(exec_doc: &mut Value, run_doc: &Value, target
         }
     });
     let meta = ensure_object_field(exec_doc, "meta");
+    let target_meta = meta.entry("target".to_string()).or_insert_with(|| json!({}));
+    let target_meta_map = ensure_object(target_meta);
+    upsert_default(target_meta_map, "app_id", json!(app_id.clone()));
+    upsert_default(target_meta_map, "environment", json!(environment.clone()));
     let ext = meta.entry("ext".to_string()).or_insert_with(|| json!({}));
     ensure_object(ext).insert("remote".to_string(), remote);
 }
@@ -3767,6 +5190,52 @@ fn load_remote_accept_stage(
     Ok((run_id, exec_id, run_doc, exec_doc, decision_doc, change_doc))
 }
 
+fn required_secret_ids_from_capabilities_doc(capabilities: &Value) -> Vec<String> {
+    let mut ids = BTreeSet::new();
+    if let Some(items) = get_path(capabilities, &["secrets", "allow"]).and_then(Value::as_array) {
+        for item in items {
+            if let Some(secret_id) = item.as_str() {
+                let trimmed = secret_id.trim();
+                if !trimmed.is_empty() {
+                    ids.insert(trimmed.to_string());
+                }
+            }
+        }
+    }
+    ids.into_iter().collect()
+}
+
+fn load_accept_ops_docs(
+    args: &DeployAcceptArgs,
+) -> Result<(Option<Value>, Option<Value>, Vec<String>)> {
+    let Some(raw_path) = args.ops_profile.as_ref().filter(|value| !value.trim().is_empty()) else {
+        return Ok((None, None, Vec::new()));
+    };
+    let ops_path = repo_path(raw_path);
+    let ops_doc = load_json(&ops_path)?;
+    let capabilities_doc = get_str(&ops_doc, &["capabilities", "path"])
+        .map(|caps_path| {
+            let candidate = Path::new(&caps_path);
+            let resolved = if candidate.is_absolute() {
+                candidate.to_path_buf()
+            } else if root_dir().join(candidate).exists() {
+                root_dir().join(candidate)
+            } else {
+                ops_path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(candidate)
+            };
+            load_json(&resolved)
+        })
+        .transpose()?;
+    let required_secrets = capabilities_doc
+        .as_ref()
+        .map(required_secret_ids_from_capabilities_doc)
+        .unwrap_or_default();
+    Ok((Some(ops_doc), capabilities_doc, required_secrets))
+}
+
 fn collect_sha256_refs(value: &Value, out: &mut BTreeSet<String>) {
     match value {
         Value::Object(map) => {
@@ -3810,6 +5279,27 @@ fn remote_cas_presence(target: &ResolvedTarget, digests: &[String]) -> Result<BT
         .filter_map(Value::as_str)
         .map(ToOwned::to_owned)
         .collect())
+}
+
+fn conformance_cas_digests(
+    state_dir: &Path,
+    run_doc: &Value,
+    exec_doc: &Value,
+    decision_doc: Option<&Value>,
+) -> Vec<String> {
+    let mut digests = BTreeSet::new();
+    if let Ok((manifest_doc, _manifest_raw)) = load_pack_manifest_from_run(state_dir, run_doc) {
+        collect_sha256_refs(&manifest_doc, &mut digests);
+    }
+    collect_sha256_refs(run_doc, &mut digests);
+    collect_sha256_refs(exec_doc, &mut digests);
+    if let Some(decision_doc) = decision_doc {
+        collect_sha256_refs(decision_doc, &mut digests);
+    }
+    digests
+        .into_iter()
+        .filter(|sha| rel_store_blob_path(state_dir, sha).exists())
+        .collect()
 }
 
 fn remote_push_cas(
@@ -4022,6 +5512,7 @@ fn command_target_remove(args: TargetRemoveArgs) -> Result<Value> {
 
 fn command_adapter_conformance(args: AdapterConformanceArgs) -> Result<Value> {
     let target = required_remote_target(args.target.as_deref())?;
+    let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let capabilities = match remote_capabilities(&target) {
         Ok(doc) => doc,
         Err(err) => {
@@ -4040,37 +5531,212 @@ fn command_adapter_conformance(args: AdapterConformanceArgs) -> Result<Value> {
             ));
         }
     };
-    let scenarios = vec![
-        "upload_dedupe",
-        "remote_promote",
-        "remote_rollback",
-        "remote_pause",
-        "remote_rerun",
-        "remote_query_parity",
-        "remote_incident_capture",
-        "remote_regression_generation",
-        "telemetry_export_smoke",
-        "missing_secret_hard_fail",
-    ]
-    .into_iter()
-    .map(|name| json!({"name": name, "ok": true}))
-    .collect::<Vec<_>>();
+    let exec_docs = load_exec_docs(&state_dir)?;
+    let latest_exec = latest_exec_doc(&state_dir)?;
+    let promoted_exec = newest_matching_exec(&exec_docs, |doc| {
+        get_str(doc, &["meta", "outcome"]).as_deref() == Some("promoted")
+    })
+    .cloned();
+    let rolled_back_exec = newest_matching_exec(&exec_docs, |doc| {
+        get_str(doc, &["meta", "outcome"]).as_deref() == Some("rolled_back")
+    })
+    .cloned();
+    let reference_exec = promoted_exec
+        .clone()
+        .or_else(|| {
+            newest_matching_exec(&exec_docs, |doc| {
+                get_str(doc, &["status"]).as_deref() == Some("completed")
+            })
+            .cloned()
+        })
+        .or(latest_exec.clone());
+    let reference_run_doc = reference_exec.as_ref().and_then(|exec_doc| {
+        get_str(exec_doc, &["run_id"])
+            .and_then(|run_id| load_json(&run_path(&state_dir, &run_id)).ok())
+    });
+    let reference_decision_doc = reference_exec.as_ref().and_then(|exec_doc| {
+        get_str(exec_doc, &["meta", "latest_decision_id"])
+            .and_then(|decision_id| load_json(&decision_path(&state_dir, &decision_id)).ok())
+    });
+    let full_query = promoted_exec
+        .as_ref()
+        .or(reference_exec.as_ref())
+        .and_then(|doc| get_str(doc, &["exec_id"]))
+        .as_ref()
+        .and_then(|exec_id| {
+            remote_request_json(
+                &target,
+                "GET",
+                &format!("/v1/deployments/{exec_id}/query?view=full"),
+                None,
+            )
+            .ok()
+        });
+    let mut scenarios = Vec::new();
+    let mut diagnostics = Vec::new();
+    let push_ok = match (reference_run_doc.as_ref(), reference_exec.as_ref()) {
+        (Some(run_doc), Some(exec_doc)) => {
+            let digests =
+                conformance_cas_digests(&state_dir, run_doc, exec_doc, reference_decision_doc.as_ref());
+            if digests.is_empty() {
+                false
+            } else {
+                match remote_cas_presence(&target, &digests) {
+                    Ok(missing) => missing.is_empty(),
+                    Err(_) => false,
+                }
+            }
+        }
+        _ => false,
+    };
+    scenarios.push(json!({
+        "name": "upload_dedupe",
+        "ok": push_ok,
+        "details": if push_ok { "remote CAS already contains the accepted deployment digests" } else { "missing remote CAS evidence for the accepted deployment" }
+    }));
+    let promote_ok = promoted_exec.is_some();
+    scenarios.push(json!({
+        "name": "remote_promote",
+        "ok": promote_ok,
+        "details": if promote_ok { "latest deployment completed with promoted outcome" } else { "no promoted remote deployment found" }
+    }));
+    let rollback_ok = rolled_back_exec.is_some()
+        || control_action_seen(&state_dir, "deploy.rollback.manual")?
+        || incident_classification_seen(&state_dir, "slo_rollback");
+    scenarios.push(json!({
+        "name": "remote_rollback",
+        "ok": rollback_ok,
+        "details": if rollback_ok { "rollback path was recorded in remote state" } else { "rollback path not found in remote state" }
+    }));
+    let pause_ok = control_action_seen(&state_dir, "deploy.pause.manual")?;
+    scenarios.push(json!({
+        "name": "remote_pause",
+        "ok": pause_ok,
+        "details": if pause_ok { "pause control action was recorded" } else { "pause control action not found" }
+    }));
+    let rerun_ok = control_action_seen(&state_dir, "deploy.rerun.manual")?;
+    scenarios.push(json!({
+        "name": "remote_rerun",
+        "ok": rerun_ok,
+        "details": if rerun_ok { "rerun control action was recorded" } else { "rerun control action not found" }
+    }));
+    let query_ok = full_query
+        .as_ref()
+        .and_then(|doc| get_str(doc, &["result", "outcome"]))
+        .as_deref()
+        == Some("promoted");
+    scenarios.push(json!({
+        "name": "remote_query_parity",
+        "ok": query_ok,
+        "details": if query_ok { "remote full query returned a promoted deployment" } else { "remote full query did not return the expected promoted deployment" }
+    }));
+    let incident_ok = read_incident_meta_paths(&state_dir).first().is_some();
+    scenarios.push(json!({
+        "name": "remote_incident_capture",
+        "ok": incident_ok,
+        "details": if incident_ok { "incident metadata exists in remote state" } else { "no incident metadata found in remote state" }
+    }));
+    let regression_ok = read_incident_meta_paths(&state_dir).iter().any(|meta_path| {
+        meta_path
+            .parent()
+            .map(|dir| dir.join("regression.report.json").exists())
+            .unwrap_or(false)
+    }) || state_dir.join("regressions").exists()
+        && fs::read_dir(state_dir.join("regressions"))
+            .map(|entries| {
+                entries
+                    .filter_map(Result::ok)
+                    .any(|entry| entry.path().extension().and_then(OsStr::to_str) == Some("json"))
+            })
+            .unwrap_or(false);
+    scenarios.push(json!({
+        "name": "remote_regression_generation",
+        "ok": regression_ok,
+        "details": if regression_ok { "incident regression report exists in remote state" } else { "no regression report found in remote state" }
+    }));
+    let telemetry_ok = exec_docs.iter().any(|exec_doc| {
+        let artifacts = get_path(exec_doc, &["meta", "artifacts"])
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        artifacts
+            .iter()
+            .any(|artifact| get_str(artifact, &["role"]).as_deref() == Some("metrics_snapshot"))
+            && artifacts
+                .iter()
+                .any(|artifact| get_str(artifact, &["role"]).as_deref() == Some("slo_eval_report"))
+    });
+    scenarios.push(json!({
+        "name": "telemetry_export_smoke",
+        "ok": telemetry_ok,
+        "details": if telemetry_ok { "metrics snapshot and SLO evaluation artifacts were emitted" } else { "missing metrics snapshot or SLO evaluation artifacts" }
+    }));
+    let missing_secret_ok = match (reference_run_doc.as_ref(), reference_exec.as_ref()) {
+        (Some(run_doc), Some(exec_doc)) => {
+            let decision_id = get_str(exec_doc, &["meta", "latest_decision_id"]);
+            let decision_doc = decision_id
+                .as_ref()
+                .and_then(|id| load_json(&decision_path(&state_dir, id)).ok());
+            let missing_secret_id = "missing_secret__conformance_probe";
+            let request = json!({
+                "run": run_doc,
+                "execution": exec_doc,
+                "decision": decision_doc.unwrap_or_else(|| json!({})),
+                "ops_profile": {
+                    "schema_version": "x07.app.ops.profile@0.1.0",
+                    "id": "ops_secret_conformance",
+                    "v": 1
+                },
+                "capabilities": {
+                    "schema_version": "x07.app.capabilities@0.2.0",
+                    "id": "caps_secret_conformance",
+                    "v": 1,
+                    "secrets": {
+                        "allow": [missing_secret_id]
+                    }
+                },
+                "required_secrets": [missing_secret_id]
+            });
+            remote_request_json(&target, "POST", "/v1/deploy/accept", Some(&request))
+                .ok()
+                .map(|doc| report_has_diag(&doc, "LP_REMOTE_SECRET_NOT_FOUND"))
+                .unwrap_or(false)
+        }
+        _ => false,
+    };
+    scenarios.push(json!({
+        "name": "missing_secret_hard_fail",
+        "ok": missing_secret_ok,
+        "details": if missing_secret_ok { "missing-secret accept path returned the expected diagnostic" } else { "missing-secret accept path did not return the expected diagnostic" }
+    }));
+    let failed = scenarios
+        .iter()
+        .filter(|scenario| scenario.get("ok").and_then(Value::as_bool) != Some(true))
+        .count();
+    if failed > 0 {
+        diagnostics.push(result_diag(
+            "LP_REMOTE_ADAPTER_CONFORMANCE_FAILED",
+            "run",
+            "one or more adapter conformance scenarios failed",
+            "error",
+        ));
+    }
     Ok(cli_report(
         "adapter conformance",
-        true,
-        0,
+        failed == 0,
+        if failed == 0 { 0 } else { 17 },
         json!({
             "schema_version": "lp.adapter.conformance.report@0.1.0",
             "provider": "wasmcloud",
             "target_profile": target.name,
             "capabilities": build_adapter_capabilities_doc(&capabilities),
             "scenarios": scenarios,
-            "passed": 10,
-            "failed": 0,
-            "diagnostics": []
+            "passed": 10usize.saturating_sub(failed),
+            "failed": failed,
+            "diagnostics": diagnostics.clone()
         }),
         None,
-        Vec::new(),
+        diagnostics,
     ))
 }
 
@@ -4125,7 +5791,17 @@ fn command_accept(args: DeployAcceptArgs) -> Result<Value> {
     }
     let (run_id, exec_id, run_doc, mut exec_doc, decision_doc, change_doc) =
         load_remote_accept_stage(&state_dir, &staged)?;
-    attach_remote_execution_context(&mut exec_doc, &run_doc, &target);
+    attach_remote_execution_context(&mut exec_doc, &run_doc, &target, &state_dir);
+    let (ops_profile_doc, capabilities_doc, required_secrets) = match load_accept_ops_docs(&args) {
+        Ok(docs) => docs,
+        Err(err) => {
+            return Ok(remote_error_report(
+                "deploy accept",
+                "LP_REMOTE_ACCEPT_FAILED",
+                &err.to_string(),
+            ));
+        }
+    };
     let (_, manifest_raw) = load_pack_manifest_from_run(&state_dir, &run_doc)?;
     let manifest_doc: Value = serde_json::from_slice(&manifest_raw)?;
     let mut digests = BTreeSet::new();
@@ -4148,6 +5824,9 @@ fn command_accept(args: DeployAcceptArgs) -> Result<Value> {
         "execution": exec_doc,
         "decision": decision_doc,
         "change_request": change_doc,
+        "ops_profile": ops_profile_doc,
+        "capabilities": capabilities_doc,
+        "required_secrets": required_secrets,
         "fixture": args.fixture,
         "push": push
     });
@@ -4165,9 +5844,15 @@ fn command_accept(args: DeployAcceptArgs) -> Result<Value> {
     if report.get("ok").and_then(Value::as_bool) != Some(true) {
         return Ok(report);
     }
-    ensure_object_field(&mut report, "result").insert("run_id".to_string(), json!(run_id.clone()));
+    let remote_run_id = get_str(&report, &["result", "run_id"]).unwrap_or(run_id.clone());
+    let remote_exec_id = get_str(&report, &["result", "exec_id"])
+        .or_else(|| get_str(&report, &["result", "deployment_id"]))
+        .unwrap_or(exec_id.clone());
+    ensure_object_field(&mut report, "result").insert("run_id".to_string(), json!(remote_run_id));
     ensure_object_field(&mut report, "result")
-        .insert("deployment_id".to_string(), json!(exec_id.clone()));
+        .insert("deployment_id".to_string(), json!(remote_exec_id.clone()));
+    ensure_object_field(&mut report, "result")
+        .insert("exec_id".to_string(), json!(remote_exec_id));
     ensure_object_field(&mut report, "result").insert("push".to_string(), request["push"].clone());
     Ok(cli_report(
         "deploy accept",
@@ -4181,13 +5866,14 @@ fn command_accept(args: DeployAcceptArgs) -> Result<Value> {
             },
             "op": "accept",
             "ok": true,
-            "run_id": run_id,
-            "deployment_id": exec_id,
-            "decision_ids": remote_result_decision_ids(&staged),
-            "artifacts_written": remote_result_artifacts(&staged),
+            "run_id": remote_run_id,
+            "deployment_id": remote_exec_id,
+            "exec_id": remote_exec_id,
+            "decision_ids": remote_result_decision_ids(&report),
+            "artifacts_written": remote_result_artifacts(&report),
             "push": request["push"].clone(),
         }),
-        get_str(&staged, &["result", "run_id"]).as_deref(),
+        get_str(&report, &["result", "run_id"]).as_deref(),
         Vec::new(),
     ))
 }
@@ -4656,6 +6342,35 @@ fn build_incident_summary_from_disk(
     Ok(None)
 }
 
+fn trace_request_id(trace_doc: &Value) -> Option<String> {
+    get_str(trace_doc, &["request_id"]).or_else(|| {
+        trace_doc
+            .get("steps")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find_map(|step| {
+                step.get("http")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .find_map(|exchange| get_str(exchange, &["request", "id"]))
+            })
+    })
+}
+
+fn trace_trace_id(trace_doc: &Value) -> Option<String> {
+    get_str(trace_doc, &["trace_id"]).or_else(|| {
+        trace_doc.get("steps").and_then(Value::as_array).and_then(|steps| {
+            if steps.is_empty() {
+                None
+            } else {
+                Some(gen_id("lptrace", &sha256_hex(&canon_json_bytes(trace_doc))))
+            }
+        })
+    })
+}
+
 fn find_existing_incident_for_key(
     state_dir: &Path,
     deployment_id: &str,
@@ -4835,15 +6550,11 @@ fn capture_incident_impl(
         .unwrap_or(Value::Null);
     let request_id = request_env
         .as_ref()
-        .and_then(|(doc, _)| get_str(doc, &["request_id"]))
-        .or_else(|| {
-            trace_doc
-                .as_ref()
-                .and_then(|doc| get_str(doc, &["request_id"]))
-        });
+        .and_then(|(doc, _)| get_str(doc, &["request_id"]).or_else(|| get_str(doc, &["id"])))
+        .or_else(|| trace_doc.as_ref().and_then(trace_request_id));
     let trace_id = trace_doc
         .as_ref()
-        .and_then(|doc| get_str(doc, &["trace_id"]));
+        .and_then(trace_trace_id);
     if let Some(existing) = find_existing_incident_for_key(
         state_dir,
         &deployment_id,
@@ -5041,6 +6752,10 @@ fn command_status(args: DeploymentStatusArgs) -> Result<Value> {
     if remote_mode_selected(args.target.as_deref())? {
         return remote_command_status(&args);
     }
+    command_status_state(args)
+}
+
+fn command_status_state(args: DeploymentStatusArgs) -> Result<Value> {
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let exec_doc = load_exec(&state_dir, &args.deployment_id)?;
     Ok(cli_report(
@@ -5057,6 +6772,10 @@ fn command_query(args: DeployQueryArgs) -> Result<Value> {
     if remote_mode_selected(args.target.as_deref())? {
         return remote_command_query(&args);
     }
+    command_query_state(args)
+}
+
+fn command_query_state(args: DeployQueryArgs) -> Result<Value> {
     let have_deployment = args.deployment_id.is_some();
     let have_target = args.app_id.is_some() && args.env.is_some() && args.latest;
     if !have_deployment && !have_target {
@@ -5153,6 +6872,10 @@ fn command_run(args: DeployRunArgs) -> Result<Value> {
     if remote_mode_selected(args.target.as_deref())? {
         return remote_command_run(&args);
     }
+    command_run_execution(args)
+}
+
+fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
     if args.deployment_id.trim().is_empty() {
         return Ok(cli_report(
             "deploy run",
@@ -5176,6 +6899,7 @@ fn command_run(args: DeployRunArgs) -> Result<Value> {
     let run_id = get_str(&exec_doc, &["run_id"]).unwrap_or_default();
     let run_doc = load_json(&run_path(&state_dir, &run_id))?;
     ensure_deploy_meta(&mut exec_doc, &run_doc, &state_dir)?;
+    let remote_exec = get_path(&exec_doc, &["meta", "ext", "remote"]).is_some();
     let _remote_lease = match try_acquire_remote_run_lease(
         &state_dir,
         &exec_doc,
@@ -5194,7 +6918,28 @@ fn command_run(args: DeployRunArgs) -> Result<Value> {
             let bytes = canon_json_bytes(&plan);
             (plan, bytes)
         }
-        None => generated_plan_from_accepted(&state_dir, &exec_doc, &run_doc)?,
+        None => match generated_plan_from_accepted(&state_dir, &exec_doc, &run_doc) {
+            Ok(result) => result,
+            Err(err) => {
+                return Ok(cli_report(
+                    "deploy run",
+                    false,
+                    19,
+                    json!({
+                        "deployment_id": args.deployment_id,
+                        "run_id": run_id,
+                        "outcome": "failed",
+                    }),
+                    Some(&run_id),
+                    vec![result_diag(
+                        "LP_DEPLOY_PLAN_TOOL_FAILED",
+                        "run",
+                        &err.to_string(),
+                        "error",
+                    )],
+                ));
+            }
+        },
     };
     let mut plan_artifact_raw =
         cas_put(&state_dir, "deploy.plan", "application/json", &plan_bytes)?;
@@ -5213,6 +6958,14 @@ fn command_run(args: DeployRunArgs) -> Result<Value> {
             "digest": plan_artifact.get("digest").cloned().unwrap_or(Value::Null),
         }),
     );
+    let initial_public_listener = if remote_exec {
+        get_path(&exec_doc, &["meta", "ext", "remote", "target_profile", "base_url"])
+            .and_then(Value::as_str)
+            .map(|base| remote_exec_public_listener(base, &args.deployment_id))
+            .unwrap_or_else(|| deterministic_listener(&args.deployment_id))
+    } else {
+        deterministic_listener(&args.deployment_id)
+    };
     {
         let meta = ensure_object_field(&mut exec_doc, "meta");
         meta.insert("updated_unix_ms".to_string(), json!(now_unix_ms));
@@ -5220,7 +6973,7 @@ fn command_run(args: DeployRunArgs) -> Result<Value> {
         meta.insert("control_state".to_string(), json!("active"));
         meta.insert(
             "public_listener".to_string(),
-            json!(deterministic_listener(&args.deployment_id)),
+            json!(initial_public_listener),
         );
         let (_, manifest_raw) = load_pack_manifest_from_run(&state_dir, &run_doc)?;
         let manifest_digest = digest_value(&manifest_raw);
@@ -5299,12 +7052,118 @@ fn command_run(args: DeployRunArgs) -> Result<Value> {
     fs::create_dir_all(&stable_paths["reports"])?;
     fs::create_dir_all(&candidate_paths["logs"])?;
     fs::create_dir_all(&candidate_paths["reports"])?;
-    let (ops_path, slo_path) = resolve_plan_inputs(&plan_doc);
-    let runtime_probe_doc = run_runtime_probe(
+    let remote_deployment = if remote_exec {
+        let deployment = match prepare_remote_provider_deployment(
+            &state_dir,
+            &exec_doc,
+            &run_doc,
+            &stable_paths["work"],
+            &candidate_paths["work"],
+        ) {
+            Ok(deployment) => deployment,
+            Err(err) => {
+                let _ = capture_incident_impl(
+                    &state_dir,
+                    &mut exec_doc,
+                    &run_doc,
+                    &err.to_string(),
+                    "runtime_start_failed",
+                    "runtime",
+                    None,
+                    None,
+                    None,
+                    None,
+                    "not_applicable",
+                    now_unix_ms,
+                )?;
+                return Ok(cli_report(
+                    "deploy run",
+                    false,
+                    17,
+                    json!({
+                        "deployment_id": args.deployment_id,
+                        "run_id": run_id,
+                        "outcome": "failed",
+                    }),
+                    Some(&run_id),
+                    vec![result_diag(
+                        "LP_RUNTIME_START_FAILED",
+                        "run",
+                        &err.to_string(),
+                        "error",
+                    )],
+                ));
+            }
+        };
+        persist_remote_provider_deployment(&state_dir, &mut exec_doc, &deployment, now_unix_ms)?;
+        let _ = record_remote_event(
+            &state_dir,
+            &args.deployment_id,
+            "deploy.publish",
+            "published OCI component and deployed stable/candidate revisions",
+            json!({
+                "component_ref": deployment.component_ref,
+                "stable_app": deployment.stable.app_name,
+                "candidate_app": deployment.candidate.app_name,
+            }),
+        );
+        let _ = record_remote_log(
+            &state_dir,
+            &args.deployment_id,
+            "info",
+            "remote provider deployment completed",
+            json!({
+                "component_ref": deployment.component_ref,
+                "public_listener": deployment.public_listener,
+            }),
+        );
+        Some(deployment)
+    } else {
+        None
+    };
+    if remote_deployment.is_none() {
+        let meta = ensure_object_field(&mut exec_doc, "meta");
+        meta.insert(
+            "runtime".to_string(),
+            json!({
+                "stable": {"status":"healthy","work_dir": stable_paths["work"].to_string_lossy()},
+                "candidate": {"status":"healthy","work_dir": candidate_paths["work"].to_string_lossy()},
+            }),
+        );
+    }
+    let routing_meta = get_path(&exec_doc, &["meta", "routing"]).cloned().unwrap_or_else(|| json!({}));
+    let runtime_meta = get_path(&exec_doc, &["meta", "runtime"]).cloned().unwrap_or_else(|| json!({}));
+    let listener_addr = get_str(&exec_doc, &["meta", "public_listener"])
+        .unwrap_or_else(|| deterministic_listener(&args.deployment_id));
+    let stable_addr = get_str(&runtime_meta, &["stable", "bind_addr"])
+        .map(|value| format!("http://{value}"))
+        .unwrap_or_else(|| format!("{}/stable", listener_addr));
+    let candidate_addr = get_str(&runtime_meta, &["candidate", "bind_addr"])
+        .map(|value| format!("http://{value}"))
+        .unwrap_or_else(|| format!("{}/candidate", listener_addr));
+    let stable_work_dir = get_str(&runtime_meta, &["stable", "work_dir"])
+        .unwrap_or_else(|| stable_paths["work"].to_string_lossy().into_owned());
+    let candidate_work_dir = get_str(&runtime_meta, &["candidate", "work_dir"])
+        .unwrap_or_else(|| candidate_paths["work"].to_string_lossy().into_owned());
+    let api_prefix = get_str(&routing_meta, &["api_prefix"]).unwrap_or_else(|| "/api".to_string());
+    write_router_state(
+        &state_dir,
         &args.deployment_id,
-        &candidate_paths["work"],
-        ops_path.as_deref(),
+        &listener_addr,
+        &stable_addr,
+        &candidate_addr,
+        &stable_work_dir,
+        &candidate_work_dir,
+        &api_prefix,
+        0,
+        1,
     )?;
+    let (ops_path, slo_path) = resolve_plan_inputs(&plan_doc);
+    let runtime_probe_doc = if let Some(remote) = get_path(&exec_doc, &["meta", "ext", "remote"]) {
+        run_remote_runtime_probe(&args.deployment_id, &candidate_paths["work"], remote)?
+    } else {
+        run_runtime_probe(&args.deployment_id, &candidate_paths["work"], ops_path.as_deref())?
+    };
     if !runtime_probe_ok(&runtime_probe_doc) {
         let _ = capture_incident_impl(
             &state_dir,
@@ -5385,24 +7244,6 @@ fn command_run(args: DeployRunArgs) -> Result<Value> {
         None,
         None,
     ));
-    {
-        let meta = ensure_object_field(&mut exec_doc, "meta");
-        meta.insert(
-            "runtime".to_string(),
-            json!({
-                "stable": {"status":"healthy","work_dir": stable_paths["work"].to_string_lossy()},
-                "candidate": {"status":"healthy","work_dir": candidate_paths["work"].to_string_lossy()},
-            }),
-        );
-    }
-    write_router_state(
-        &state_dir,
-        &args.deployment_id,
-        &format!("{}/stable", deterministic_listener(&args.deployment_id)),
-        &format!("{}/candidate", deterministic_listener(&args.deployment_id)),
-        0,
-        1,
-    )?;
     ensure_object(&mut exec_doc).insert("status".to_string(), json!("started"));
     ensure_object(&mut exec_doc).insert("steps".to_string(), Value::Array(steps.clone()));
     let _ = save_exec(&state_dir, &exec_doc)?;
@@ -5507,11 +7348,25 @@ fn command_run(args: DeployRunArgs) -> Result<Value> {
                 None,
             ));
             ensure_object(&mut exec_doc).insert("steps".to_string(), Value::Array(steps.clone()));
+            let listener_addr = get_str(&exec_doc, &["meta", "public_listener"])
+                .unwrap_or_else(|| deterministic_listener(&args.deployment_id));
+            let runtime_meta = get_path(&exec_doc, &["meta", "runtime"]).cloned().unwrap_or_else(|| json!({}));
+            let routing_meta = get_path(&exec_doc, &["meta", "routing"]).cloned().unwrap_or_else(|| json!({}));
             write_router_state(
                 &state_dir,
                 &args.deployment_id,
-                &format!("{}/stable", deterministic_listener(&args.deployment_id)),
-                &format!("{}/candidate", deterministic_listener(&args.deployment_id)),
+                &listener_addr,
+                &get_str(&runtime_meta, &["stable", "bind_addr"])
+                    .map(|value| format!("http://{value}"))
+                    .unwrap_or_else(|| format!("{}/stable", listener_addr)),
+                &get_str(&runtime_meta, &["candidate", "bind_addr"])
+                    .map(|value| format!("http://{value}"))
+                    .unwrap_or_else(|| format!("{}/candidate", listener_addr)),
+                &get_str(&runtime_meta, &["stable", "work_dir"])
+                    .unwrap_or_else(|| stable_paths["work"].to_string_lossy().into_owned()),
+                &get_str(&runtime_meta, &["candidate", "work_dir"])
+                    .unwrap_or_else(|| candidate_paths["work"].to_string_lossy().into_owned()),
+                &get_str(&routing_meta, &["api_prefix"]).unwrap_or_else(|| "/api".to_string()),
                 weight,
                 step_cursor,
             )?;
@@ -5632,37 +7487,123 @@ fn command_run(args: DeployRunArgs) -> Result<Value> {
             let required =
                 get_str(analysis, &["require_decision"]).unwrap_or_else(|| "promote".to_string());
             let mut attempt = 0usize;
+            let remote_exec = get_path(&exec_doc, &["meta", "ext", "remote"]).is_some();
             loop {
                 attempt += 1;
                 analysis_counter += 1;
-                let metrics_path = metrics_dir
-                    .as_ref()
-                    .map(|dir| dir.join(format!("analysis.{analysis_counter}.json")))
-                    .ok_or_else(|| anyhow!("missing metrics directory"))?;
-                if !metrics_path.exists() {
-                    return Ok(cli_report(
-                        "deploy run",
-                        false,
-                        16,
-                        json!({
-                            "deployment_id": args.deployment_id,
-                            "run_id": run_id,
-                            "final_decision_id": get_path(&exec_doc, &["meta", "latest_decision_id"]).cloned().unwrap_or(Value::Null),
-                            "outcome": "failed",
-                            "latest_weight_pct": get_u64(&exec_doc, &["meta", "routing", "candidate_weight_pct"]).unwrap_or(0),
-                            "public_listener": get_path(&exec_doc, &["meta", "public_listener"]).cloned().unwrap_or(Value::Null),
-                        }),
-                        Some(&run_id),
-                        vec![result_diag(
-                            "LP_METRICS_SNAPSHOT_MISSING",
-                            "run",
-                            "missing metrics snapshot",
-                            "error",
-                        )],
-                    ));
-                }
-                let (decision_value, slo_report) =
-                    run_slo_eval(slo_path.as_deref(), &metrics_path)?;
+                let metrics_path = if remote_exec {
+                    let metrics_doc = match generate_remote_metrics_snapshot(
+                        &state_dir,
+                        &exec_doc,
+                        analysis_counter,
+                        args.fixture.as_deref(),
+                    ) {
+                        Ok(doc) => doc,
+                        Err(err) => {
+                            return Ok(cli_report(
+                                "deploy run",
+                                false,
+                                16,
+                                json!({
+                                    "deployment_id": args.deployment_id,
+                                    "run_id": run_id,
+                                    "final_decision_id": get_path(&exec_doc, &["meta", "latest_decision_id"]).cloned().unwrap_or(Value::Null),
+                                    "outcome": "failed",
+                                    "latest_weight_pct": get_u64(&exec_doc, &["meta", "routing", "candidate_weight_pct"]).unwrap_or(0),
+                                    "public_listener": get_path(&exec_doc, &["meta", "public_listener"]).cloned().unwrap_or(Value::Null),
+                                }),
+                                Some(&run_id),
+                                vec![result_diag(
+                                    "LP_METRICS_SNAPSHOT_MISSING",
+                                    "run",
+                                    &err.to_string(),
+                                    "error",
+                                )],
+                            ));
+                        }
+                    };
+                    let metrics_path = state_dir
+                        .join(".x07lp")
+                        .join("telemetry")
+                        .join(&args.deployment_id)
+                        .join(format!("analysis.{analysis_counter}.json"));
+                    let _ = write_json(&metrics_path, &metrics_doc)?;
+                    metrics_path
+                } else {
+                    let Some(metrics_path) = metrics_dir
+                        .as_ref()
+                        .map(|dir| dir.join(format!("analysis.{analysis_counter}.json")))
+                    else {
+                        return Ok(cli_report(
+                            "deploy run",
+                            false,
+                            16,
+                            json!({
+                                "deployment_id": args.deployment_id,
+                                "run_id": run_id,
+                                "final_decision_id": get_path(&exec_doc, &["meta", "latest_decision_id"]).cloned().unwrap_or(Value::Null),
+                                "outcome": "failed",
+                                "latest_weight_pct": get_u64(&exec_doc, &["meta", "routing", "candidate_weight_pct"]).unwrap_or(0),
+                                "public_listener": get_path(&exec_doc, &["meta", "public_listener"]).cloned().unwrap_or(Value::Null),
+                            }),
+                            Some(&run_id),
+                            vec![result_diag(
+                                "LP_METRICS_SNAPSHOT_MISSING",
+                                "run",
+                                "missing metrics directory",
+                                "error",
+                            )],
+                        ));
+                    };
+                    if !metrics_path.exists() {
+                        return Ok(cli_report(
+                            "deploy run",
+                            false,
+                            16,
+                            json!({
+                                "deployment_id": args.deployment_id,
+                                "run_id": run_id,
+                                "final_decision_id": get_path(&exec_doc, &["meta", "latest_decision_id"]).cloned().unwrap_or(Value::Null),
+                                "outcome": "failed",
+                                "latest_weight_pct": get_u64(&exec_doc, &["meta", "routing", "candidate_weight_pct"]).unwrap_or(0),
+                                "public_listener": get_path(&exec_doc, &["meta", "public_listener"]).cloned().unwrap_or(Value::Null),
+                            }),
+                            Some(&run_id),
+                            vec![result_diag(
+                                "LP_METRICS_SNAPSHOT_MISSING",
+                                "run",
+                                "missing metrics snapshot",
+                                "error",
+                            )],
+                        ));
+                    }
+                    metrics_path
+                };
+                let (decision_value, slo_report) = match run_slo_eval(slo_path.as_deref(), &metrics_path) {
+                    Ok(result) => result,
+                    Err(err) => {
+                        return Ok(cli_report(
+                            "deploy run",
+                            false,
+                            20,
+                            json!({
+                                "deployment_id": args.deployment_id,
+                                "run_id": run_id,
+                                "final_decision_id": get_path(&exec_doc, &["meta", "latest_decision_id"]).cloned().unwrap_or(Value::Null),
+                                "outcome": "failed",
+                                "latest_weight_pct": get_u64(&exec_doc, &["meta", "routing", "candidate_weight_pct"]).unwrap_or(0),
+                                "public_listener": get_path(&exec_doc, &["meta", "public_listener"]).cloned().unwrap_or(Value::Null),
+                            }),
+                            Some(&run_id),
+                            vec![result_diag(
+                                "LP_SLO_TOOL_FAILED",
+                                "run",
+                                &err.to_string(),
+                                "error",
+                            )],
+                        ));
+                    }
+                };
                 let metrics_bytes = fs::read(&metrics_path)?;
                 let mut metrics_raw = cas_put(
                     &state_dir,
@@ -5755,6 +7696,10 @@ fn command_run(args: DeployRunArgs) -> Result<Value> {
                     break;
                 }
                 if decision_value == "rollback" {
+                    if remote_exec {
+                        undeploy_remote_slot(&exec_doc, "candidate")?;
+                        release_remote_slot_port(&state_dir, &args.deployment_id, "candidate");
+                    }
                     {
                         let meta = ensure_object_field(&mut exec_doc, "meta");
                         meta.entry("routing".to_string())
@@ -5874,6 +7819,10 @@ fn command_run(args: DeployRunArgs) -> Result<Value> {
             )],
         ));
     }
+    if remote_exec {
+        undeploy_remote_slot(&exec_doc, "stable")?;
+        release_remote_slot_port(&state_dir, &args.deployment_id, "stable");
+    }
     update_terminal_meta(&mut exec_doc, "promoted", now_unix_ms + step_cursor as u64);
     ensure_object(&mut exec_doc).insert("status".to_string(), json!("completed"));
     let exec_bytes = save_exec(&state_dir, &exec_doc)?;
@@ -5911,6 +7860,10 @@ fn command_stop(args: DeploymentControlArgs) -> Result<Value> {
             json!({ "reason": args.reason }),
         );
     }
+    command_stop_execution(args)
+}
+
+fn command_stop_execution(args: DeploymentControlArgs) -> Result<Value> {
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let now_unix_ms = args.common.now_unix_ms.unwrap_or_else(now_ms);
     let mut exec_doc = load_exec(&state_dir, &args.deployment_id)?;
@@ -5944,6 +7897,12 @@ fn command_stop(args: DeploymentControlArgs) -> Result<Value> {
             None,
         ),
     );
+    if get_path(&exec_doc, &["meta", "ext", "remote"]).is_some() {
+        undeploy_remote_slot(&exec_doc, "stable")?;
+        undeploy_remote_slot(&exec_doc, "candidate")?;
+        release_remote_slot_port(&state_dir, &args.deployment_id, "stable");
+        release_remote_slot_port(&state_dir, &args.deployment_id, "candidate");
+    }
     let exec_snapshot = exec_doc.clone();
     prepare_runtime_terminal_state(
         &state_dir,
@@ -6011,6 +7970,10 @@ fn command_rollback(args: DeploymentControlArgs) -> Result<Value> {
             json!({ "reason": args.reason }),
         );
     }
+    command_rollback_execution(args)
+}
+
+fn command_rollback_execution(args: DeploymentControlArgs) -> Result<Value> {
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let now_unix_ms = args.common.now_unix_ms.unwrap_or_else(now_ms);
     let mut exec_doc = load_exec(&state_dir, &args.deployment_id)?;
@@ -6047,6 +8010,10 @@ fn command_rollback(args: DeploymentControlArgs) -> Result<Value> {
             None,
         ),
     );
+    if get_path(&exec_doc, &["meta", "ext", "remote"]).is_some() {
+        undeploy_remote_slot(&exec_doc, "candidate")?;
+        release_remote_slot_port(&state_dir, &args.deployment_id, "candidate");
+    }
     let exec_snapshot = exec_doc.clone();
     prepare_runtime_terminal_state(
         &state_dir,
@@ -6109,6 +8076,10 @@ fn command_pause(args: DeploymentControlArgs) -> Result<Value> {
             json!({ "reason": args.reason }),
         );
     }
+    command_pause_execution(args)
+}
+
+fn command_pause_execution(args: DeploymentControlArgs) -> Result<Value> {
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let now_unix_ms = args.common.now_unix_ms.unwrap_or_else(now_ms);
     let mut exec_doc = load_exec(&state_dir, &args.deployment_id)?;
@@ -6177,6 +8148,10 @@ fn command_rerun(args: DeploymentRerunArgs) -> Result<Value> {
             json!({ "reason": args.reason, "from_step": args.from_step.unwrap_or(0) }),
         );
     }
+    command_rerun_execution(args)
+}
+
+fn command_rerun_execution(args: DeploymentRerunArgs) -> Result<Value> {
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let now_unix_ms = args.common.now_unix_ms.unwrap_or_else(now_ms);
     let mut exec_doc = load_exec(&state_dir, &args.deployment_id)?;
@@ -6264,6 +8239,10 @@ fn command_incident_capture(args: IncidentCaptureArgs) -> Result<Value> {
     if remote_mode_selected(args.target.as_deref())? {
         return remote_command_incident_capture(&args);
     }
+    command_incident_capture_execution(args)
+}
+
+fn command_incident_capture_execution(args: IncidentCaptureArgs) -> Result<Value> {
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let now_unix_ms = args.common.now_unix_ms.unwrap_or_else(now_ms);
     let mut exec_doc = load_exec(&state_dir, &args.deployment_id)?;
@@ -6308,6 +8287,10 @@ fn command_incident_get(args: IncidentGetArgs) -> Result<Value> {
     if remote_mode_selected(args.target.as_deref())? {
         return remote_command_incident_get(&args);
     }
+    command_incident_get_state(args)
+}
+
+fn command_incident_get_state(args: IncidentGetArgs) -> Result<Value> {
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let (db_path, rebuilt) = maybe_rebuild_phasec(&state_dir, args.rebuild_index)?;
     let Some((meta, bundle, incident_dir)) =
@@ -6350,6 +8333,10 @@ fn command_incident_list(args: IncidentListArgs) -> Result<Value> {
     if remote_mode_selected(args.target.as_deref())? {
         return remote_command_incident_list(&args);
     }
+    command_incident_list_state(args)
+}
+
+fn command_incident_list_state(args: IncidentListArgs) -> Result<Value> {
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let (db_path, rebuilt) = maybe_rebuild_phasec(&state_dir, args.rebuild_index)?;
     let mut items = Vec::new();
@@ -6425,6 +8412,10 @@ fn command_regress_from_incident(args: RegressFromIncidentArgs) -> Result<Value>
     if remote_mode_selected(args.target.as_deref())? {
         return remote_command_regress_from_incident(&args);
     }
+    command_regress_from_incident_state(args)
+}
+
+fn command_regress_from_incident_state(args: RegressFromIncidentArgs) -> Result<Value> {
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let now_unix_ms = args.common.now_unix_ms.unwrap_or_else(now_ms);
     let Some((mut meta, bundle, incident_dir)) =
@@ -6468,31 +8459,8 @@ fn command_regress_from_incident(args: RegressFromIncidentArgs) -> Result<Value>
         "application/json",
         &request_bytes,
     );
-    let synthetic_case_path = out_dir.join("regression.case.json");
-    let synthetic_report = || -> Result<Value> {
-        let case_doc = json!({
-            "schema_version": "x07.regression.case@0.1.0",
-            "incident_id": args.incident_id,
-            "name": args.name,
-            "target": get_path(&meta, &["target"]).cloned().unwrap_or_else(|| json!({})),
-        });
-        let _ = write_json(&synthetic_case_path, &case_doc)?;
-        Ok(json!({
-            "schema_version": "x07.wasm.regression.report@0.1.0",
-            "command": "x07-wasm app regress from-incident",
-            "ok": true,
-            "exit_code": 0,
-            "diagnostics": [],
-            "result": {
-                "incident_id": args.incident_id,
-                "name": args.name,
-                "generated": ["regression.case.json"]
-            }
-        }))
-    };
-    let report: Value = if let Some(x07_wasm) = which("x07-wasm") {
+    let report: Value = {
         let mut argv = vec![
-            x07_wasm,
             "app".to_string(),
             "regress".to_string(),
             "from-incident".to_string(),
@@ -6506,15 +8474,50 @@ fn command_regress_from_incident(args: RegressFromIncidentArgs) -> Result<Value>
         if args.dry_run {
             argv.push("--dry-run".to_string());
         }
-        let (code, stdout, stderr) = run_capture(&argv, Some(&root_dir()))?;
+        let (tool, code, stdout, stderr) = run_wasm_tool_capture(&argv, Some(&root_dir()))?;
         if code == 0 {
             serde_json::from_slice(&stdout).context("parse regress report")?
         } else {
-            let _msg = String::from_utf8_lossy(&stderr).trim().to_string();
-            synthetic_report()?
+            let stderr_msg = String::from_utf8_lossy(&stderr).trim().to_string();
+            let message = if stderr_msg.is_empty() {
+                "wasm regression tool failed".to_string()
+            } else {
+                stderr_msg
+            };
+            return Ok(cli_report(
+                "regress from-incident",
+                false,
+                i64::from(code.max(1)),
+                json!({
+                    "schema_version": "lp.regression.run.result@0.1.0",
+                    "incident_id": args.incident_id,
+                    "regression_id": null,
+                    "ok": false,
+                    "tool": { "name": "x07 wasm", "command": "app regress from-incident" },
+                    "dry_run": args.dry_run,
+                    "out_dir": out_dir.to_string_lossy(),
+                    "incident_status_after": get_str(&meta, &["regression_status"]).unwrap_or_else(|| "unknown".to_string()),
+                    "target_artifact": json!({
+                        "kind": "lp.incident.bundle@0.1.0",
+                        "digest": digest_value(&canon_json_bytes(&bundle)),
+                        "store_uri": format!(
+                            "file:incidents/{}/{}/{}/incident.bundle.json",
+                            get_str(&meta, &["target", "app_id"]).unwrap_or_default(),
+                            get_str(&meta, &["target", "environment"]).unwrap_or_default(),
+                            args.incident_id,
+                        ),
+                    }),
+                    "generated": [],
+                }),
+                Some(&args.incident_id),
+                vec![result_diag(
+                    "LP_REGRESSION_TOOL_FAILED",
+                    "run",
+                    &message,
+                    "error",
+                )],
+            ));
         }
-    } else {
-        synthetic_report()?
     };
     let report_path = incident_dir.join("regression.report.json");
     let report_bytes = write_json(&report_path, &report)?;
@@ -6561,7 +8564,7 @@ fn command_regress_from_incident(args: RegressFromIncidentArgs) -> Result<Value>
         "incident_id": args.incident_id,
         "regression_id": regression_id,
         "ok": true,
-        "tool": { "name": "x07-wasm", "command": "app regress from-incident" },
+        "tool": { "name": "x07 wasm", "command": "app regress from-incident" },
         "dry_run": args.dry_run,
         "out_dir": out_dir.to_string_lossy(),
         "incident_status_after": "generated",
@@ -6862,7 +8865,7 @@ struct HttpRequest {
 
 enum UiHttpResponse {
     Json(u16, Value),
-    Bytes(u16, &'static str, Vec<u8>),
+    Bytes(u16, String, Vec<u8>),
 }
 
 fn ui_manifest_doc() -> Value {
@@ -6936,7 +8939,7 @@ fn handle_ui_client(mut stream: TcpStream, state_dir: &Path) -> Result<()> {
             write_http_response(&mut stream, status, "application/json", &body)
         }
         UiHttpResponse::Bytes(status, content_type, body) => {
-            write_http_response(&mut stream, status, content_type, &body)
+            write_http_response(&mut stream, status, &content_type, &body)
         }
     }
 }
@@ -6955,10 +8958,6 @@ fn remote_common_args(state_dir: &Path) -> CommonStateArgs {
         now_unix_ms: None,
         json: true,
     }
-}
-
-fn remote_local_target() -> Option<String> {
-    Some(LOCAL_TARGET_SENTINEL.to_string())
 }
 
 fn request_header<'a>(request: &'a HttpRequest, name: &str) -> Option<&'a str> {
@@ -6988,6 +8987,247 @@ fn request_query_usize(request: &HttpRequest, name: &str) -> Option<usize> {
         .and_then(|value| value.parse::<usize>().ok())
 }
 
+fn load_router_state_doc(state_dir: &Path, exec_id: &str) -> Result<Value> {
+    load_json(&remote_router_state_path(state_dir, exec_id))
+}
+
+fn choose_edge_slot(router_state: &Value, request: &HttpRequest) -> &'static str {
+    let weight = get_u64(router_state, &["candidate_weight_pct"]).unwrap_or(0).min(100);
+    if weight == 0 {
+        return "stable";
+    }
+    if weight == 100 {
+        return "candidate";
+    }
+    let route_key_header =
+        get_str(router_state, &["route_key_header"]).unwrap_or_else(|| REMOTE_ROUTE_KEY_HEADER.to_string());
+    let route_key = request_header(request, &route_key_header)
+        .unwrap_or(request.path.as_str());
+    let digest = Sha256::digest(route_key.as_bytes());
+    let bucket = u64::from(u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]])) % 100;
+    if bucket < weight { "candidate" } else { "stable" }
+}
+
+fn bump_router_counter(state_dir: &Path, exec_id: &str, slot: &str) -> Result<()> {
+    let path = state_dir
+        .join(".x07lp")
+        .join("router")
+        .join(exec_id)
+        .join("counters.json");
+    let mut counters = if path.exists() {
+        load_json(&path)?
+    } else {
+        json!({"stable_requests": 0, "candidate_requests": 0})
+    };
+    let key = if slot == "candidate" {
+        "candidate_requests"
+    } else {
+        "stable_requests"
+    };
+    let current = get_u64(&counters, &[key]).unwrap_or(0);
+    ensure_object(&mut counters).insert(key.to_string(), json!(current + 1));
+    let _ = write_json(&path, &counters)?;
+    Ok(())
+}
+
+fn strip_edge_exec_prefix(path: &str, exec_id: &str) -> String {
+    let prefix = format!("{REMOTE_EDGE_ROUTE_PREFIX}/{exec_id}");
+    let trimmed = path.strip_prefix(&prefix).unwrap_or(path);
+    if trimmed.is_empty() { "/".to_string() } else { trimmed.to_string() }
+}
+
+fn pack_static_asset_response(work_dir: &Path, request_path: &str) -> Result<UiHttpResponse> {
+    let manifest = load_json(&work_dir.join("app.pack.json"))?;
+    let asset_path = if request_path == "/" || request_path.is_empty() {
+        get_str(&manifest, &["frontend", "index_path"]).unwrap_or_else(|| "/index.html".to_string())
+    } else {
+        request_path.to_string()
+    };
+    if let Some(asset) = get_path(&manifest, &["assets"]).and_then(Value::as_array).and_then(|items| {
+        items.iter().find(|asset| get_str(asset, &["serve_path"]).as_deref() == Some(asset_path.as_str()))
+    }) {
+        let file_path = get_str(asset, &["file", "path"]).ok_or_else(|| anyhow!("asset missing file path"))?;
+        let body = fs::read(work_dir.join(&file_path))?;
+        let content_type = get_path(asset, &["headers"])
+            .and_then(Value::as_array)
+            .and_then(|headers| {
+                headers.iter().find_map(|header| {
+                    let name = get_str(header, &["k"])?;
+                    if name.eq_ignore_ascii_case("content-type") {
+                        get_str(header, &["v"])
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap_or_else(|| media_type_for_http(&work_dir.join(&file_path)).to_string());
+        return Ok(UiHttpResponse::Bytes(200, content_type, body));
+    }
+    if asset_path != "/index.html" {
+        return pack_static_asset_response(work_dir, "/index.html");
+    }
+    Ok(UiHttpResponse::Json(
+        404,
+        cli_report(
+            "edge",
+            false,
+            4,
+            json!({}),
+            None,
+            vec![result_diag(
+                "LP_HTTP_NOT_FOUND",
+                "run",
+                "edge asset not found",
+                "error",
+            )],
+        ),
+    ))
+}
+
+fn proxy_edge_request(request: &HttpRequest, upstream_base: &str, upstream_path: &str) -> Result<UiHttpResponse> {
+    let mut url = format!(
+        "{}{}",
+        upstream_base.trim_end_matches('/'),
+        if upstream_path.starts_with('/') {
+            upstream_path.to_string()
+        } else {
+            format!("/{upstream_path}")
+        }
+    );
+    if !request.query.is_empty() {
+        let query = request
+            .query
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        url.push('?');
+        url.push_str(&query);
+    }
+    let mut upstream = remote_agent().request(&request.method, &url);
+    for (name, value) in &request.headers {
+        if matches!(
+            name.as_str(),
+            "host" | "content-length" | "connection" | "accept-encoding"
+        ) {
+            continue;
+        }
+        upstream = upstream.set(name, value);
+    }
+    let response = if request.body.is_empty() {
+        upstream.call()
+    } else {
+        upstream.send_bytes(&request.body)
+    };
+    match response {
+        Ok(response) => {
+            let status = response.status();
+            let content_type = response
+                .header("content-type")
+                .unwrap_or("application/octet-stream")
+                .to_string();
+            let mut body = Vec::new();
+            let mut reader = response.into_reader();
+            reader.read_to_end(&mut body)?;
+            Ok(UiHttpResponse::Bytes(status, content_type, body))
+        }
+        Err(UreqError::Status(status, response)) => {
+            let content_type = response
+                .header("content-type")
+                .unwrap_or("application/octet-stream")
+                .to_string();
+            let mut body = Vec::new();
+            let mut reader = response.into_reader();
+            reader.read_to_end(&mut body)?;
+            Ok(UiHttpResponse::Bytes(status, content_type, body))
+        }
+        Err(UreqError::Transport(err)) => Ok(UiHttpResponse::Json(
+            500,
+            cli_report(
+                "edge",
+                false,
+                18,
+                json!({}),
+                None,
+                vec![result_diag(
+                    "LP_REMOTE_RUNTIME_PROBE_FAILED",
+                    "run",
+                    &format!("edge upstream request failed: {err}"),
+                    "error",
+                )],
+            ),
+        )),
+    }
+}
+
+fn dispatch_edge_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpResponse> {
+    let segments: Vec<&str> = request
+        .path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let Some(exec_id) = segments.get(1) else {
+        return Ok(UiHttpResponse::Json(
+            404,
+            cli_report(
+                "edge",
+                false,
+                4,
+                json!({}),
+                None,
+                vec![result_diag(
+                    "LP_HTTP_NOT_FOUND",
+                    "run",
+                    "edge execution route not found",
+                    "error",
+                )],
+            ),
+        ));
+    };
+    let router_state = load_router_state_doc(state_dir, exec_id)?;
+    let slot = choose_edge_slot(&router_state, &request);
+    let _ = bump_router_counter(state_dir, exec_id, slot);
+    let rel_path = strip_edge_exec_prefix(&request.path, exec_id);
+    let api_prefix = get_str(&router_state, &["api_prefix"]).unwrap_or_else(|| "/api".to_string());
+    if rel_path == api_prefix || rel_path.starts_with(&(api_prefix.clone() + "/")) {
+        let upstream_key = if slot == "candidate" {
+            "candidate_addr"
+        } else {
+            "stable_addr"
+        };
+        let upstream =
+            get_str(&router_state, &[upstream_key]).unwrap_or_else(|| "http://127.0.0.1:0".to_string());
+        return proxy_edge_request(&request, &upstream, &rel_path);
+    }
+    let work_dir_key = if slot == "candidate" {
+        "candidate_work_dir"
+    } else {
+        "stable_work_dir"
+    };
+    let work_dir = get_str(&router_state, &[work_dir_key])
+        .ok_or_else(|| anyhow!("router state missing {work_dir_key}"))?;
+    pack_static_asset_response(Path::new(&work_dir), &rel_path)
+}
+
+fn remote_accept_required_secrets(body_doc: &Value) -> Vec<String> {
+    if let Some(items) = body_doc.get("required_secrets").and_then(Value::as_array) {
+        let mut ids = BTreeSet::new();
+        for item in items {
+            if let Some(secret_id) = item.as_str() {
+                let trimmed = secret_id.trim();
+                if !trimmed.is_empty() {
+                    ids.insert(trimmed.to_string());
+                }
+            }
+        }
+        return ids.into_iter().collect();
+    }
+    body_doc
+        .get("capabilities")
+        .map(required_secret_ids_from_capabilities_doc)
+        .unwrap_or_default()
+}
+
 fn remote_fixture_name(raw: Option<&str>) -> Option<String> {
     raw.and_then(|value| {
         Path::new(value)
@@ -7000,22 +9240,169 @@ fn remote_fixture_name(raw: Option<&str>) -> Option<String> {
 fn resolve_remote_fixture_inputs(fixture: Option<&str>) -> (Option<String>, Option<String>) {
     match remote_fixture_name(fixture).as_deref() {
         Some("remote_rollback") => (
-            Some("spec/fixtures/phaseB/rollback/deploy.plan.json".to_string()),
-            Some("spec/fixtures/phaseB/rollback".to_string()),
+            Some("spec/fixtures/phaseD-oss/remote_rollback/deploy.plan.json".to_string()),
+            Some("spec/fixtures/phaseD-oss/remote_rollback".to_string()),
         ),
         Some("remote_pause_rerun") => (
-            Some("spec/fixtures/phaseC/pause_and_rerun/deploy.plan.json".to_string()),
-            Some("spec/fixtures/phaseB/promote".to_string()),
+            Some("spec/fixtures/phaseD-oss/remote_pause_rerun/deploy.plan.json".to_string()),
+            Some("spec/fixtures/phaseD-oss/remote_pause_rerun".to_string()),
         ),
         Some("remote_query_index_rebuild")
         | Some("remote_query")
         | Some("remote_promote")
         | None => (
-            Some("spec/fixtures/phaseB/promote/deploy.plan.json".to_string()),
-            Some("spec/fixtures/phaseB/promote".to_string()),
+            Some("spec/fixtures/phaseD-oss/remote_promote/deploy.plan.json".to_string()),
+            Some("spec/fixtures/phaseD-oss/remote_promote".to_string()),
         ),
         _ => (None, None),
     }
+}
+
+fn remote_accept_target_name(exec_doc: &Value) -> String {
+    get_str(exec_doc, &["meta", "ext", "remote", "target_profile", "name"])
+        .or_else(|| get_str(exec_doc, &["meta", "ext", "remote", "target_profile", "target_name"]))
+        .unwrap_or_else(|| "default".to_string())
+}
+
+fn nonempty_secret_value(value: Option<&Value>) -> Option<String> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn resolve_remote_secret_value(
+    store: &Value,
+    exec_doc: &Value,
+    target_name: &str,
+    secret_id: &str,
+) -> Option<(String, String)> {
+    let app_id = get_str(exec_doc, &["meta", "target", "app_id"]).unwrap_or_default();
+    let environment = get_str(exec_doc, &["meta", "target", "environment"]).unwrap_or_default();
+    let mut candidates: Vec<(String, Vec<String>)> = Vec::new();
+    if !app_id.is_empty() && !environment.is_empty() {
+        candidates.push((
+            format!("app_env:{app_id}/{environment}"),
+            vec![
+                "apps".to_string(),
+                app_id.clone(),
+                "envs".to_string(),
+                environment.clone(),
+                secret_id.to_string(),
+            ],
+        ));
+        candidates.push((
+            format!("app_env:{app_id}/{environment}"),
+            vec![
+                "apps".to_string(),
+                app_id.clone(),
+                "environments".to_string(),
+                environment.clone(),
+                secret_id.to_string(),
+            ],
+        ));
+    }
+    if !app_id.is_empty() {
+        candidates.push((
+            format!("app:{app_id}"),
+            vec![
+                "apps".to_string(),
+                app_id.clone(),
+                "defaults".to_string(),
+                secret_id.to_string(),
+            ],
+        ));
+        candidates.push((
+            format!("app:{app_id}"),
+            vec!["apps".to_string(), app_id.clone(), secret_id.to_string()],
+        ));
+    }
+    if !environment.is_empty() {
+        candidates.push((
+            format!("env:{environment}"),
+            vec!["envs".to_string(), environment.clone(), secret_id.to_string()],
+        ));
+        candidates.push((
+            format!("env:{environment}"),
+            vec![
+                "environments".to_string(),
+                environment.clone(),
+                secret_id.to_string(),
+            ],
+        ));
+    }
+    candidates.push((
+        format!("target:{target_name}"),
+        vec![
+            "targets".to_string(),
+            target_name.to_string(),
+            secret_id.to_string(),
+        ],
+    ));
+    for (scope, path) in candidates {
+        let path_refs = path.iter().map(String::as_str).collect::<Vec<_>>();
+        if let Some(value) = nonempty_secret_value(get_path(store, &path_refs)) {
+            return Some((scope, value));
+        }
+    }
+    None
+}
+
+fn validate_remote_accept_secrets(
+    state_dir: &Path,
+    exec_doc: &Value,
+    body_doc: &Value,
+) -> Result<Option<UiHttpResponse>> {
+    let required_secrets = remote_accept_required_secrets(body_doc);
+    if required_secrets.is_empty() {
+        return Ok(None);
+    }
+    let target_name = remote_accept_target_name(exec_doc);
+    let store = load_remote_secret_store(state_dir)?;
+    let mut resolved_scopes = Vec::new();
+    let missing: Vec<String> = required_secrets
+        .iter()
+        .filter(|secret_id| {
+            match resolve_remote_secret_value(&store, exec_doc, &target_name, secret_id) {
+                Some((scope, _value)) => {
+                    resolved_scopes.push(json!({
+                        "secret_id": secret_id,
+                        "scope": scope,
+                    }));
+                    false
+                }
+                None => true,
+            }
+        })
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(UiHttpResponse::Json(
+        200,
+        cli_report(
+            "deploy accept",
+            false,
+            13,
+            json!({
+                "op": "accept",
+                "ok": false,
+                "target": target_name,
+                "required_secrets": required_secrets,
+                "resolved_scopes": resolved_scopes,
+                "missing_secrets": missing,
+            }),
+            None,
+            vec![result_diag(
+                "LP_REMOTE_SECRET_NOT_FOUND",
+                "run",
+                "referenced remote secret was not found",
+                "error",
+            )],
+        ),
+    )))
 }
 
 fn ensure_remote_authorized(request: &HttpRequest) -> Result<()> {
@@ -7058,13 +9445,37 @@ fn persist_remote_accept_docs(
     decision_doc: &Value,
     change_doc: Option<&Value>,
 ) -> Result<(String, String, String)> {
-    let run_id = get_str(run_doc, &["run_id"]).ok_or_else(|| anyhow!("missing run_id"))?;
-    let exec_id = get_str(exec_doc, &["exec_id"]).ok_or_else(|| anyhow!("missing exec_id"))?;
-    let decision_id =
+    let original_run_id = get_str(run_doc, &["run_id"]).ok_or_else(|| anyhow!("missing run_id"))?;
+    let original_exec_id = get_str(exec_doc, &["exec_id"]).ok_or_else(|| anyhow!("missing exec_id"))?;
+    let original_decision_id =
         get_str(decision_doc, &["decision_id"]).ok_or_else(|| anyhow!("missing decision_id"))?;
-    let _ = write_json(&run_path(state_dir, &run_id), run_doc)?;
-    let _ = write_json(&exec_path(state_dir, &exec_id), exec_doc)?;
-    let _ = write_json(&decision_path(state_dir, &decision_id), decision_doc)?;
+    let unique_seed = format!(
+        "{}:{}:{}:{}",
+        original_run_id,
+        original_exec_id,
+        original_decision_id,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or_default()
+    );
+    let run_id = gen_id("lprun", &format!("remote_accept:{unique_seed}:run"));
+    let exec_id = gen_id("lpexec", &format!("remote_accept:{unique_seed}:exec"));
+    let decision_id = gen_id("lpdec", &format!("remote_accept:{unique_seed}:decision"));
+    let replacements = BTreeMap::from([
+        (original_run_id.clone(), run_id.clone()),
+        (original_exec_id.clone(), exec_id.clone()),
+        (original_decision_id.clone(), decision_id.clone()),
+    ]);
+    let mut rewritten_run = run_doc.clone();
+    let mut rewritten_exec = exec_doc.clone();
+    let mut rewritten_decision = decision_doc.clone();
+    rewrite_remote_accept_ids(&mut rewritten_run, &replacements);
+    rewrite_remote_accept_ids(&mut rewritten_exec, &replacements);
+    rewrite_remote_accept_ids(&mut rewritten_decision, &replacements);
+    let _ = write_json(&run_path(state_dir, &run_id), &rewritten_run)?;
+    let _ = write_json(&exec_path(state_dir, &exec_id), &rewritten_exec)?;
+    let _ = write_json(&decision_path(state_dir, &decision_id), &rewritten_decision)?;
     if let Some(change_doc) = change_doc {
         if let Some(change_id) = get_str(change_doc, &["change_id"]) {
             let _ = write_json(
@@ -7074,6 +9485,31 @@ fn persist_remote_accept_docs(
         }
     }
     Ok((run_id, exec_id, decision_id))
+}
+
+fn rewrite_remote_accept_ids(value: &mut Value, replacements: &BTreeMap<String, String>) {
+    match value {
+        Value::Object(map) => {
+            for child in map.values_mut() {
+                rewrite_remote_accept_ids(child, replacements);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                rewrite_remote_accept_ids(child, replacements);
+            }
+        }
+        Value::String(text) => {
+            let mut updated = text.clone();
+            for (from, to) in replacements {
+                if updated.contains(from) {
+                    updated = updated.replace(from, to);
+                }
+            }
+            *text = updated;
+        }
+        _ => {}
+    }
 }
 
 fn materialize_remote_http_doc(
@@ -7091,6 +9527,177 @@ fn materialize_remote_http_doc(
             .join(format!("{}-{}.json", kind, now_ms()));
     let _ = write_json(&path, doc)?;
     Ok(Some(path.to_string_lossy().into_owned()))
+}
+
+fn remote_stream_root(state_dir: &Path, kind: &str) -> PathBuf {
+    state_dir.join(".x07lp").join("remote_streams").join(kind)
+}
+
+fn remote_stream_path(state_dir: &Path, kind: &str, exec_id: &str) -> PathBuf {
+    remote_stream_root(state_dir, kind).join(format!("{exec_id}.jsonl"))
+}
+
+fn append_remote_stream_entry(
+    state_dir: &Path,
+    kind: &str,
+    exec_id: &str,
+    entry: &Value,
+) -> Result<()> {
+    let path = remote_stream_path(state_dir, kind, exec_id);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(&canon_json_bytes(entry))?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+fn remote_stream_context(state_dir: &Path, exec_id: &str) -> (Option<String>, Option<String>) {
+    let exec_doc = load_json(&exec_path(state_dir, exec_id)).ok();
+    let run_id = exec_doc
+        .as_ref()
+        .and_then(|doc| get_str(doc, &["run_id"]));
+    let slot = exec_doc.as_ref().map(|doc| {
+        let outcome = get_str(doc, &["meta", "outcome"]).unwrap_or_else(|| "unknown".to_string());
+        if matches!(outcome.as_str(), "promoted" | "rolled_back") {
+            "stable".to_string()
+        } else {
+            "candidate".to_string()
+        }
+    });
+    (run_id, slot)
+}
+
+fn remote_stream_entry_id(
+    prefix: &str,
+    exec_id: &str,
+    kind: &str,
+    message: &str,
+    emitted_unix_ms: u64,
+) -> String {
+    let material = format!("{prefix}:{exec_id}:{kind}:{emitted_unix_ms}:{message}");
+    let digest = sha256_hex(material.as_bytes());
+    format!("{prefix}_{}", &digest[..24])
+}
+
+fn remote_event_payload(message: &str, details: Value) -> Value {
+    let mut payload = match details {
+        Value::Object(map) => map,
+        other => {
+            let mut map = Map::new();
+            map.insert("details".to_string(), other);
+            map
+        }
+    };
+    payload.insert("message".to_string(), json!(message));
+    Value::Object(payload)
+}
+
+fn record_remote_event(
+    state_dir: &Path,
+    exec_id: &str,
+    event_kind: &str,
+    message: &str,
+    details: Value,
+) -> Result<()> {
+    let emitted_unix_ms = now_ms();
+    let (run_id, slot) = remote_stream_context(state_dir, exec_id);
+    append_remote_stream_entry(
+        state_dir,
+        "events",
+        exec_id,
+        &json!({
+            "event_id": remote_stream_entry_id("lpevt", exec_id, event_kind, message, emitted_unix_ms),
+            "kind": event_kind,
+            "exec_id": exec_id,
+            "run_id": run_id,
+            "slot": slot,
+            "emitted_unix_ms": emitted_unix_ms,
+            "data": remote_event_payload(message, details),
+        }),
+    )
+}
+
+fn record_remote_log(
+    state_dir: &Path,
+    exec_id: &str,
+    level: &str,
+    message: &str,
+    fields: Value,
+) -> Result<()> {
+    let emitted_unix_ms = now_ms();
+    let (run_id, slot) = remote_stream_context(state_dir, exec_id);
+    append_remote_stream_entry(
+        state_dir,
+        "logs",
+        exec_id,
+        &json!({
+            "log_id": remote_stream_entry_id("lplog", exec_id, level, message, emitted_unix_ms),
+            "exec_id": exec_id,
+            "run_id": run_id,
+            "slot": slot,
+            "level": level,
+            "message": message,
+            "emitted_unix_ms": emitted_unix_ms,
+            "fields": fields,
+        }),
+    )
+}
+
+fn read_remote_stream_items(
+    state_dir: &Path,
+    kind: &str,
+    exec_id: Option<&str>,
+    slot: Option<&str>,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<(Vec<Value>, String, Option<String>)> {
+    let root = remote_stream_root(state_dir, kind);
+    let start = cursor
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut files = Vec::new();
+    if let Some(exec_id) = exec_id {
+        files.push(remote_stream_path(state_dir, kind, exec_id));
+    } else if root.is_dir() {
+        for entry in fs::read_dir(&root)? {
+            let entry = entry?;
+            if entry.path().extension().and_then(OsStr::to_str) == Some("jsonl") {
+                files.push(entry.path());
+            }
+        }
+        files.sort();
+    }
+    let mut items = Vec::new();
+    for path in files {
+        if !path.exists() {
+            continue;
+        }
+        let reader = BufReader::new(fs::File::open(path)?);
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let item = serde_json::from_str::<Value>(&line).context("parse remote stream line")?;
+            if let Some(slot) = slot {
+                if get_str(&item, &["slot"]).as_deref() != Some(slot) {
+                    continue;
+                }
+            }
+            items.push(item);
+        }
+    }
+    let total = items.len();
+    let end = total.min(start.saturating_add(limit.max(1)));
+    let slice = if start >= total {
+        Vec::new()
+    } else {
+        items[start..end].to_vec()
+    };
+    let next = (end < total).then(|| end.to_string());
+    Ok((slice, start.to_string(), next))
 }
 
 fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpResponse> {
@@ -7171,35 +9778,17 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
         ("POST", ["v1", "deploy", "accept"]) => {
             let body_doc = parse_http_body(&request.body)?;
             let fixture = remote_fixture_name(body_doc.get("fixture").and_then(Value::as_str));
-            if matches!(
-                fixture.as_deref(),
-                Some("missing-secret") | Some("missing_secret") | Some("remote_missing_secret")
-            ) {
-                UiHttpResponse::Json(
-                    200,
-                    cli_report(
-                        "deploy accept",
-                        false,
-                        13,
-                        json!({ "op": "accept", "ok": false }),
-                        None,
-                        vec![result_diag(
-                            "LP_REMOTE_SECRET_NOT_FOUND",
-                            "run",
-                            "referenced remote secret was not found",
-                            "error",
-                        )],
-                    ),
-                )
+            let run_doc = body_doc
+                .get("run")
+                .cloned()
+                .ok_or_else(|| anyhow!("missing run document"))?;
+            let exec_doc = body_doc
+                .get("execution")
+                .cloned()
+                .ok_or_else(|| anyhow!("missing execution document"))?;
+            if let Some(response) = validate_remote_accept_secrets(state_dir, &exec_doc, &body_doc)? {
+                response
             } else {
-                let run_doc = body_doc
-                    .get("run")
-                    .cloned()
-                    .ok_or_else(|| anyhow!("missing run document"))?;
-                let exec_doc = body_doc
-                    .get("execution")
-                    .cloned()
-                    .ok_or_else(|| anyhow!("missing execution document"))?;
                 let decision_doc = body_doc
                     .get("decision")
                     .cloned()
@@ -7212,6 +9801,28 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
                     &decision_doc,
                     change_doc.as_ref(),
                 )?;
+                let _ = record_remote_event(
+                    state_dir,
+                    &exec_id,
+                    "deploy.accept",
+                    "remote deploy accepted",
+                    json!({
+                        "run_id": run_id,
+                        "decision_id": decision_id,
+                        "fixture": fixture,
+                        "required_secrets": body_doc.get("required_secrets").cloned().unwrap_or_else(|| json!([])),
+                    }),
+                );
+                let _ = record_remote_log(
+                    state_dir,
+                    &exec_id,
+                    "info",
+                    "accepted remote deployment",
+                    json!({
+                        "run_id": run_id,
+                        "decision_id": decision_id,
+                    }),
+                );
                 UiHttpResponse::Json(
                     200,
                     cli_report(
@@ -7263,31 +9874,61 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
             };
             let fixture = remote_fixture_name(body_doc.get("fixture").and_then(Value::as_str));
             let (plan, metrics_dir) = resolve_remote_fixture_inputs(fixture.as_deref());
-            UiHttpResponse::Json(
-                200,
-                command_run(DeployRunArgs {
-                    deployment_id: exec_id,
-                    accepted_run: Some(run_id),
-                    plan,
-                    metrics_dir,
-                    pause_scale: body_doc.get("pause_scale").and_then(Value::as_f64),
-                    target: remote_local_target(),
-                    fixture,
-                    common,
-                })?,
-            )
+            let report = command_run_execution(DeployRunArgs {
+                deployment_id: exec_id.clone(),
+                accepted_run: Some(run_id.clone()),
+                plan,
+                metrics_dir,
+                pause_scale: body_doc.get("pause_scale").and_then(Value::as_f64),
+                target: None,
+                fixture: fixture.clone(),
+                common,
+            })?;
+            let ok = report.get("ok").and_then(Value::as_bool).unwrap_or(false);
+            let _ = record_remote_event(
+                state_dir,
+                &exec_id,
+                "deploy.run",
+                if ok {
+                    "remote deployment run finished"
+                } else {
+                    "remote deployment run failed"
+                },
+                json!({
+                    "run_id": run_id,
+                    "fixture": fixture,
+                    "ok": ok,
+                    "outcome": get_path(&report, &["result", "outcome"]).cloned().unwrap_or(Value::Null),
+                    "latest_weight_pct": get_path(&report, &["result", "latest_weight_pct"]).cloned().unwrap_or(Value::Null),
+                }),
+            );
+            let _ = record_remote_log(
+                state_dir,
+                &exec_id,
+                if ok { "info" } else { "error" },
+                if ok {
+                    "deploy run completed"
+                } else {
+                    "deploy run returned a failure report"
+                },
+                json!({
+                    "run_id": run_id,
+                    "diagnostics": report.get("diagnostics").cloned().unwrap_or_else(|| json!([])),
+                }),
+            );
+            UiHttpResponse::Json(200, report)
         }
         ("GET", ["v1", "deployments", exec_id]) => UiHttpResponse::Json(
             200,
-            command_status(DeploymentStatusArgs {
+            command_status_state(DeploymentStatusArgs {
                 deployment_id: (*exec_id).to_string(),
-                target: remote_local_target(),
+                target: None,
                 common,
             })?,
         ),
         ("GET", ["v1", "deployments", exec_id, "query"]) => UiHttpResponse::Json(
             200,
-            command_query(DeployQueryArgs {
+            command_query_state(DeployQueryArgs {
                 deployment_id: Some((*exec_id).to_string()),
                 app_id: None,
                 env: None,
@@ -7296,61 +9937,109 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
                 limit: request_query_usize(&request, "limit"),
                 latest: false,
                 rebuild_index: request_query_bool(&request, "rebuild_index", false),
-                target: remote_local_target(),
+                target: None,
                 common,
             })?,
         ),
         ("POST", ["v1", "deployments", exec_id, "stop"]) => {
             let body_doc = parse_http_body(&request.body)?;
-            UiHttpResponse::Json(
-                200,
-                command_stop(DeploymentControlArgs {
-                    deployment_id: (*exec_id).to_string(),
-                    reason: get_http_string(&body_doc, "reason", "remote_stop"),
-                    target: remote_local_target(),
-                    common,
-                })?,
-            )
+            let report = command_stop_execution(DeploymentControlArgs {
+                deployment_id: (*exec_id).to_string(),
+                reason: get_http_string(&body_doc, "reason", "remote_stop"),
+                target: None,
+                common,
+            })?;
+            let _ = record_remote_event(
+                state_dir,
+                exec_id,
+                "deploy.stop",
+                "remote deployment stopped",
+                json!({ "ok": report.get("ok").and_then(Value::as_bool).unwrap_or(false) }),
+            );
+            let _ = record_remote_log(
+                state_dir,
+                exec_id,
+                "info",
+                "processed stop control action",
+                json!({ "result": report.get("result").cloned().unwrap_or(Value::Null) }),
+            );
+            UiHttpResponse::Json(200, report)
         }
         ("POST", ["v1", "deployments", exec_id, "rollback"]) => {
             let body_doc = parse_http_body(&request.body)?;
-            UiHttpResponse::Json(
-                200,
-                command_rollback(DeploymentControlArgs {
-                    deployment_id: (*exec_id).to_string(),
-                    reason: get_http_string(&body_doc, "reason", "remote_rollback"),
-                    target: remote_local_target(),
-                    common,
-                })?,
-            )
+            let report = command_rollback_execution(DeploymentControlArgs {
+                deployment_id: (*exec_id).to_string(),
+                reason: get_http_string(&body_doc, "reason", "remote_rollback"),
+                target: None,
+                common,
+            })?;
+            let _ = record_remote_event(
+                state_dir,
+                exec_id,
+                "deploy.rollback",
+                "remote deployment rolled back",
+                json!({ "ok": report.get("ok").and_then(Value::as_bool).unwrap_or(false) }),
+            );
+            let _ = record_remote_log(
+                state_dir,
+                exec_id,
+                "info",
+                "processed rollback control action",
+                json!({ "result": report.get("result").cloned().unwrap_or(Value::Null) }),
+            );
+            UiHttpResponse::Json(200, report)
         }
         ("POST", ["v1", "deployments", exec_id, "pause"]) => {
             let body_doc = parse_http_body(&request.body)?;
-            UiHttpResponse::Json(
-                200,
-                command_pause(DeploymentControlArgs {
-                    deployment_id: (*exec_id).to_string(),
-                    reason: get_http_string(&body_doc, "reason", "remote_pause"),
-                    target: remote_local_target(),
-                    common,
-                })?,
-            )
+            let report = command_pause_execution(DeploymentControlArgs {
+                deployment_id: (*exec_id).to_string(),
+                reason: get_http_string(&body_doc, "reason", "remote_pause"),
+                target: None,
+                common,
+            })?;
+            let _ = record_remote_event(
+                state_dir,
+                exec_id,
+                "deploy.pause",
+                "remote deployment paused",
+                json!({ "ok": report.get("ok").and_then(Value::as_bool).unwrap_or(false) }),
+            );
+            let _ = record_remote_log(
+                state_dir,
+                exec_id,
+                "info",
+                "processed pause control action",
+                json!({ "result": report.get("result").cloned().unwrap_or(Value::Null) }),
+            );
+            UiHttpResponse::Json(200, report)
         }
         ("POST", ["v1", "deployments", exec_id, "rerun"]) => {
             let body_doc = parse_http_body(&request.body)?;
-            UiHttpResponse::Json(
-                200,
-                command_rerun(DeploymentRerunArgs {
-                    deployment_id: (*exec_id).to_string(),
-                    from_step: body_doc
-                        .get("from_step")
-                        .and_then(Value::as_u64)
-                        .map(|value| value as usize),
-                    reason: get_http_string(&body_doc, "reason", "remote_rerun"),
-                    target: remote_local_target(),
-                    common,
-                })?,
-            )
+            let report = command_rerun_execution(DeploymentRerunArgs {
+                deployment_id: (*exec_id).to_string(),
+                from_step: body_doc
+                    .get("from_step")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as usize),
+                reason: get_http_string(&body_doc, "reason", "remote_rerun"),
+                target: None,
+                common,
+            })?;
+            let _ = record_remote_event(
+                state_dir,
+                exec_id,
+                "deploy.rerun",
+                "remote deployment rerun requested",
+                json!({ "ok": report.get("ok").and_then(Value::as_bool).unwrap_or(false) }),
+            );
+            let _ = record_remote_log(
+                state_dir,
+                exec_id,
+                "info",
+                "processed rerun control action",
+                json!({ "result": report.get("result").cloned().unwrap_or(Value::Null) }),
+            );
+            UiHttpResponse::Json(200, report)
         }
         ("POST", ["v1", "incidents", "capture"]) => {
             let body_doc = parse_http_body(&request.body)?;
@@ -7360,86 +10049,141 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
                 materialize_remote_http_doc(state_dir, "response", body_doc.get("response"))?;
             let trace_path =
                 materialize_remote_http_doc(state_dir, "trace", body_doc.get("trace"))?;
-            UiHttpResponse::Json(
-                200,
-                command_incident_capture(IncidentCaptureArgs {
-                    deployment_id: get_http_string(&body_doc, "deployment_id", ""),
-                    reason: get_http_string(&body_doc, "reason", "remote_incident"),
-                    request: request_path,
-                    response: response_path,
-                    trace: trace_path,
-                    classification: get_http_string(&body_doc, "classification", "unknown"),
-                    source: get_http_string(&body_doc, "source", "remote"),
-                    target: remote_local_target(),
-                    common,
-                })?,
-            )
+            let deployment_id = get_http_string(&body_doc, "deployment_id", "");
+            let report = command_incident_capture_execution(IncidentCaptureArgs {
+                deployment_id: deployment_id.clone(),
+                reason: get_http_string(&body_doc, "reason", "remote_incident"),
+                request: request_path,
+                response: response_path,
+                trace: trace_path,
+                classification: get_http_string(&body_doc, "classification", "unknown"),
+                source: get_http_string(&body_doc, "source", "remote"),
+                target: None,
+                common,
+            })?;
+            if !deployment_id.is_empty() {
+                let _ = record_remote_event(
+                    state_dir,
+                    &deployment_id,
+                    "incident.capture",
+                    "remote incident captured",
+                    json!({
+                        "ok": report.get("ok").and_then(Value::as_bool).unwrap_or(false),
+                        "incident_id": get_path(&report, &["result", "incident_id"]).cloned().unwrap_or(Value::Null),
+                    }),
+                );
+            }
+            UiHttpResponse::Json(200, report)
         }
         ("GET", ["v1", "incidents"]) => UiHttpResponse::Json(
             200,
-            command_incident_list(IncidentListArgs {
+            command_incident_list_state(IncidentListArgs {
                 deployment_id: request_query_string(&request, "deployment_id"),
                 app_id: request_query_string(&request, "app_id"),
                 env: request_query_string(&request, "env"),
                 limit: request_query_usize(&request, "limit"),
                 rebuild_index: request_query_bool(&request, "rebuild_index", false),
-                target: remote_local_target(),
+                target: None,
                 common,
             })?,
         ),
         ("GET", ["v1", "incidents", incident_id]) => UiHttpResponse::Json(
             200,
-            command_incident_get(IncidentGetArgs {
+            command_incident_get_state(IncidentGetArgs {
                 incident_id: (*incident_id).to_string(),
                 rebuild_index: request_query_bool(&request, "rebuild_index", false),
-                target: remote_local_target(),
+                target: None,
                 common,
             })?,
         ),
         ("POST", ["v1", "incidents", incident_id, "regress"]) => {
             let body_doc = parse_http_body(&request.body)?;
+            let report = command_regress_from_incident_state(RegressFromIncidentArgs {
+                incident_id: (*incident_id).to_string(),
+                name: get_http_string(&body_doc, "name", "incident"),
+                out_dir: get_http_optional_string(&body_doc, "out_dir"),
+                dry_run: get_http_bool(&body_doc, "dry_run", false),
+                target: None,
+                common,
+            })?;
+            if let Some(exec_id) = get_str(&report, &["result", "deployment_id"]) {
+                let _ = record_remote_event(
+                    state_dir,
+                    &exec_id,
+                    "incident.regress",
+                    "remote regression generated from incident",
+                    json!({
+                        "ok": report.get("ok").and_then(Value::as_bool).unwrap_or(false),
+                        "incident_id": incident_id,
+                    }),
+                );
+            }
+            UiHttpResponse::Json(200, report)
+        }
+        ("GET", ["v1", "events"]) => {
+            let limit = request_query_usize(&request, "limit").unwrap_or(100);
+            let exec_id = request_query_string(&request, "exec_id")
+                .or_else(|| request_query_string(&request, "deployment_id"));
+            let slot = request_query_string(&request, "slot");
+            let (items, cursor, next_cursor) = read_remote_stream_items(
+                state_dir,
+                "events",
+                exec_id.as_deref(),
+                slot.as_deref(),
+                request_query_string(&request, "cursor").as_deref(),
+                limit,
+            )?;
             UiHttpResponse::Json(
                 200,
-                command_regress_from_incident(RegressFromIncidentArgs {
-                    incident_id: (*incident_id).to_string(),
-                    name: get_http_string(&body_doc, "name", "incident"),
-                    out_dir: get_http_optional_string(&body_doc, "out_dir"),
-                    dry_run: get_http_bool(&body_doc, "dry_run", false),
-                    target: remote_local_target(),
-                    common,
-                })?,
+                cli_report(
+                    "events",
+                    true,
+                    0,
+                    json!({
+                        "schema_version": "lp.remote.events.result@0.1.0",
+                        "exec_id": exec_id,
+                        "slot": slot,
+                        "items": items,
+                        "cursor": cursor,
+                        "next_cursor": next_cursor
+                    }),
+                    None,
+                    Vec::new(),
+                ),
             )
         }
-        ("GET", ["v1", "events"]) => UiHttpResponse::Json(
-            200,
-            cli_report(
-                "events",
-                true,
-                0,
-                json!({
-                    "items": [],
-                    "cursor": request_query_string(&request, "cursor"),
-                    "next_cursor": null
-                }),
-                None,
-                Vec::new(),
-            ),
-        ),
-        ("GET", ["v1", "logs"]) => UiHttpResponse::Json(
-            200,
-            cli_report(
+        ("GET", ["v1", "logs"]) => {
+            let limit = request_query_usize(&request, "limit").unwrap_or(100);
+            let exec_id = request_query_string(&request, "exec_id")
+                .or_else(|| request_query_string(&request, "deployment_id"));
+            let slot = request_query_string(&request, "slot");
+            let (items, cursor, next_cursor) = read_remote_stream_items(
+                state_dir,
                 "logs",
-                true,
-                0,
-                json!({
-                    "items": [],
-                    "cursor": request_query_string(&request, "cursor"),
-                    "next_cursor": null
-                }),
-                None,
-                Vec::new(),
-            ),
-        ),
+                exec_id.as_deref(),
+                slot.as_deref(),
+                request_query_string(&request, "cursor").as_deref(),
+                limit,
+            )?;
+            UiHttpResponse::Json(
+                200,
+                cli_report(
+                    "logs",
+                    true,
+                    0,
+                    json!({
+                        "schema_version": "lp.remote.logs.result@0.1.0",
+                        "exec_id": exec_id,
+                        "slot": slot,
+                        "items": items,
+                        "cursor": cursor,
+                        "next_cursor": next_cursor
+                    }),
+                    None,
+                    Vec::new(),
+                ),
+            )
+        }
         _ => UiHttpResponse::Json(
             404,
             cli_report(
@@ -7461,6 +10205,9 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
 }
 
 fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpResponse> {
+    if request.path.starts_with(&format!("{REMOTE_EDGE_ROUTE_PREFIX}/")) {
+        return dispatch_edge_request(request, state_dir);
+    }
     let body_doc = parse_http_body(&request.body)?;
     let common = CommonStateArgs {
         state_dir: Some(state_dir.to_string_lossy().into_owned()),
@@ -7776,7 +10523,7 @@ fn serve_ui_static(request_path: &str) -> Result<UiHttpResponse> {
     if !dist.exists() {
         return Ok(UiHttpResponse::Bytes(
             200,
-            "text/html; charset=utf-8",
+            "text/html; charset=utf-8".to_string(),
             b"<!doctype html><html><head><meta charset='utf-8'><title>x07 Command Center</title></head><body><main><h1>x07 Command Center</h1><p>Build ui/command-center to serve the web UI.</p></main></body></html>".to_vec(),
         ));
     }
@@ -7794,12 +10541,16 @@ fn serve_ui_static(request_path: &str) -> Result<UiHttpResponse> {
     if !path.exists() {
         return Ok(UiHttpResponse::Bytes(
             200,
-            "text/html; charset=utf-8",
+            "text/html; charset=utf-8".to_string(),
             b"<!doctype html><html><head><meta charset='utf-8'><title>x07 Command Center</title></head><body><main><h1>x07 Command Center</h1><p>Build ui/command-center to serve the web UI.</p></main></body></html>".to_vec(),
         ));
     }
     let body = fs::read(&path)?;
-    Ok(UiHttpResponse::Bytes(200, media_type_for_http(&path), body))
+    Ok(UiHttpResponse::Bytes(
+        200,
+        media_type_for_http(&path).to_string(),
+        body,
+    ))
 }
 
 fn media_type_for_http(path: &Path) -> &'static str {

@@ -1,0 +1,11 @@
+version: 0.1
+
+storage:
+  delete:
+    enabled: true
+  filesystem:
+    rootdirectory: /var/lib/registry
+
+http:
+  addr: :5000
+

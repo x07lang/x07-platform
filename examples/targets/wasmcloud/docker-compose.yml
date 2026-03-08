@@ -1,0 +1,51 @@
+services:
+  nats:
+    image: nats:2.12.4-alpine
+    command:
+      - "--js"
+      - "--http_port=8222"
+    ports:
+      - "4222:4222"
+      - "8222:8222"
+
+  registry:
+    image: registry:2.8.3
+    ports:
+      - "15000:5000"
+    volumes:
+      - ./registry-config/config.yml:/etc/docker/registry/config.yml:ro
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.147.0
+    command:
+      - "--config=/etc/otelcol-contrib/config.yaml"
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - ${X07LP_OTLP_EXPORT_HOST_DIR:-./otel-output}:/var/lib/x07lp-otel
+
+  wasmcloud:
+    image: wasmcloud/wasmcloud:1.9.2
+    depends_on:
+      - nats
+      - otel-collector
+    environment:
+      WASMCLOUD_LATTICE: default
+      WASMCLOUD_NATS_HOST: nats
+      WASMCLOUD_NATS_PORT: "4222"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      WASMCLOUD_OCI_ALLOWED_INSECURE: registry:5000,127.0.0.1:15000
+    ports:
+      - "4000:4000"
+      - "26000-26255:26000-26255"
+
+  wadm:
+    image: ghcr.io/wasmcloud/wadm:0.21.1
+    depends_on:
+      - nats
+    environment:
+      WADM_NATS_SERVER: nats://nats:4222
+      WADM_LATTICE: default

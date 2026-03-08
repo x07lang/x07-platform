@@ -7,7 +7,7 @@ Public surface:
 - `x07lp` CLI for `change`, `deploy`, `target`, `adapter`, `incident`, `regress`, `app`, `platform`, `ui`, and `schema` workflows
 - local content-addressed state under `.x07lp/` or `--state-dir`
 - local runtime, routing, signed control actions, incident capture, regression generation, and query/index support for `x07.app.pack@0.1.0`
-- self-hosted remote target management, remote deploy API, and reference adapter work for the OSS remote path
+- self-hosted remote target management, remote deploy API, remote event/log streams, and reference adapter work for the OSS remote path
 - MCP router/worker integration under `gateway/mcp/`
 - local Command Center HTTP surface served by `x07lpd`
 
@@ -26,3 +26,9 @@ Developer commands:
 - Lock deps: `x07 pkg lock --project x07.json`
 - Bundle CLI: `x07 bundle --project x07.json --profile os --out out/x07lp`
 - Run checks: `./scripts/ci/check_all.sh`
+
+CI note:
+- The platform CI scripts prefer sibling workspace builds from `../x07/target/debug` and `../x07-wasm-backend/target/release` when those directories exist so the repo tests the current release train rather than an older installed toolchain.
+
+Reference stack:
+- self-hosted wasmCloud target assets: `examples/targets/wasmcloud/`

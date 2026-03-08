@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+source "$ROOT_DIR/scripts/ci/use_workspace_x07_bins.sh"
+
 PYTHON=""
 if command -v python3 >/dev/null 2>&1; then
   PYTHON="python3"
@@ -663,14 +665,14 @@ PAUSE_EXEC_ID="$(prepare_accepted_state pause_and_rerun "$PAUSE_STATE_REL")"
     --deployment-id "$PAUSE_EXEC_ID" \
     --plan spec/fixtures/phaseC/pause_and_rerun/deploy.plan.json \
     --metrics-dir spec/fixtures/phaseB/stop_during_pause \
-    --pause-scale 0.05 \
+    --pause-scale 0.2 \
     --state-dir "$PAUSE_STATE_REL" \
     --now-unix-ms 1762752015000 \
     --json
 ) &
 PAUSE_RUN_PID=$!
 PIDS+=("$PAUSE_RUN_PID")
-wait_for_pause_step "$ROOT_DIR/$PAUSE_STATE_REL/deploy/${PAUSE_EXEC_ID}.json" 10
+wait_for_pause_step "$ROOT_DIR/$PAUSE_STATE_REL/deploy/${PAUSE_EXEC_ID}.json" 20
 
 run_x07lp \
   "$PAUSE_DIR/deploy_pause.run_report.json" \

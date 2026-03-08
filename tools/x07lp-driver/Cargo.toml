@@ -1,18 +1,24 @@
 [package]
 name = "x07lp-driver"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 
 [dependencies]
+async-nats = "0.39"
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
 ed25519-dalek = { version = "2.2", features = ["pkcs8", "rand_core"] }
 hex = "0.4"
+oci-client = "0.15.0"
+oci-wasm = "0.3.0"
 rand = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "fs", "time"] }
 ureq = { version = "2.12", features = ["json"] }
+wadm-client = "0.10.0"
 walkdir = "2"
+wasmcloud-control-interface = "3.0.1"

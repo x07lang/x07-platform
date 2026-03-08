@@ -1,0 +1,19 @@
+{
+  "schema_version": "lp.target.profile@0.1.0",
+  "name": "oss-wasmcloud",
+  "kind": "oss_remote",
+  "base_url": "http://127.0.0.1:17443",
+  "api_version": "v1",
+  "auth": {
+    "kind": "static_bearer",
+    "token_ref": "file:///Users/you/.config/x07lp/tokens/oss-wasmcloud.token"
+  },
+  "runtime_provider": "wasmcloud",
+  "routing_provider": "edge_http_v1",
+  "oci_registry": "127.0.0.1:15000",
+  "lattice_id": "default",
+  "default_namespace": "x07",
+  "default_env": "prod",
+  "telemetry_collector_hint": "http://127.0.0.1:4318"
+}
+

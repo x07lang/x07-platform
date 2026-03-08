@@ -1,0 +1,42 @@
+{
+  "schema_version": "lp.cli.report@0.1.0",
+  "command": "regress from-incident",
+  "ok": true,
+  "exit_code": 0,
+  "result": {
+    "schema_version": "lp.regression.run.result@0.1.0",
+    "incident_id": "__ANY__",
+    "regression_id": "__ANY__",
+    "ok": true,
+    "tool": {
+      "name": "x07 wasm",
+      "command": "app regress from-incident"
+    },
+    "dry_run": false,
+    "out_dir": "__ANY__",
+    "incident_status_after": "generated",
+    "request": {
+      "digest": {
+        "sha256": "__ANY__",
+        "bytes_len": "__ANY__"
+      }
+    },
+    "report": {
+      "digest": {
+        "sha256": "__ANY__",
+        "bytes_len": "__ANY__"
+      }
+    },
+    "generated": [
+      {
+        "role": "__ANY__",
+        "digest": {
+          "sha256": "__ANY__",
+          "bytes_len": "__ANY__"
+        },
+        "media_type": "__ANY__",
+        "store_uri": "__ANY__"
+      }
+    ]
+  }
+}

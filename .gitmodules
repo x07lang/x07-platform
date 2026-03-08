@@ -1,0 +1,3 @@
+[submodule "contracts"]
+	path = contracts
+	url = ../x07-platform-contracts

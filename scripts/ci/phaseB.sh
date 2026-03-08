@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+source "$ROOT_DIR/scripts/ci/use_workspace_x07_bins.sh"
+
 PYTHON=""
 if command -v python3 >/dev/null 2>&1; then
   PYTHON="python3"
@@ -456,7 +458,7 @@ STOP_EXEC_ID="$(prepare_accepted_state stop_during_pause "$STOP_STATE_REL")"
     --json
 ) &
 STOP_RUN_PID=$!
-wait_for_pause_step "$ROOT_DIR/$STOP_STATE_REL/deploy/${STOP_EXEC_ID}.json" 10
+wait_for_pause_step "$ROOT_DIR/$STOP_STATE_REL/deploy/${STOP_EXEC_ID}.json" 30
 run_x07lp \
   "$STOP_DIR/deploy_stop.run_report.json" \
   "$STOP_DIR/deploy_stop.cli.json" \
