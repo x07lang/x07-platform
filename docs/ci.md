@@ -12,6 +12,6 @@ This covers:
 - Lockfile drift (`x07 pkg lock --check`)
 - accept-path goldens using fixture packs under `spec/fixtures/`
 - local deploy execution + query coverage using the deploy gates under `scripts/ci/`
-- self-hosted remote target coverage and adapter conformance using `./scripts/ci/phaseD-oss.sh`
+- self-hosted remote target coverage and adapter conformance using `./scripts/ci/remote-oss.sh`, including HTTPS trust enforcement, authenticated/TLS OCI publishing, and encrypted server-side secret-store checks
 - MCP architecture manifest lock + checks (`gateway/mcp/arch/manifest.x07arch.json`)
 - MCP smoke tests (`x07 test --manifest gateway/mcp/tests/tests.json`)

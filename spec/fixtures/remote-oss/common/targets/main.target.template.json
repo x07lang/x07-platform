@@ -9,11 +9,22 @@
     "token_ref": "__TOKEN_REF__"
   },
   "tls": {
-    "mode": "system"
+    "mode": "__TLS_MODE__",
+    "ca_bundle_path": "__CA_BUNDLE_PATH__",
+    "pinned_spki_sha256": "__PINNED_SPKI_SHA256__"
   },
   "runtime_provider": "wasmcloud",
   "routing_provider": "edge_http_v1",
   "oci_registry": "__OCI_REGISTRY__",
+  "oci_auth": {
+    "kind": "basic",
+    "username_ref": "__OCI_USERNAME_REF__",
+    "password_ref": "__OCI_PASSWORD_REF__"
+  },
+  "oci_tls": {
+    "mode": "ca_bundle",
+    "ca_bundle_path": "__OCI_CA_BUNDLE_PATH__"
+  },
   "telemetry_collector_hint": "__TELEMETRY_COLLECTOR__",
   "default_namespace": "ci",
   "default_env": "staging"

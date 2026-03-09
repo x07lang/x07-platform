@@ -1,0 +1,17 @@
+{
+	auto_https off
+	admin off
+}
+
+https://127.0.0.1:17443, https://localhost:17443 {
+	tls /certs/dev-cert.pem /certs/dev-cert.key.pem
+	reverse_proxy host.docker.internal:17080
+}
+
+https://127.0.0.1:15443, https://localhost:15443, https://gateway:5443 {
+	tls /certs/dev-cert.pem /certs/dev-cert.key.pem
+	basic_auth {
+		x07lp-oci-dev-user $2a$14$U.eedu8cXJ2MhOvuBoQztuBDp3OLdbWrXMyZR9M4J32xyhwV5qOvG
+	}
+	reverse_proxy registry:5000
+}

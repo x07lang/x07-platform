@@ -589,6 +589,36 @@
         "begin",
         [
           "let",
+          "path",
+          [
+            "std.os.env.get",
+            [
+              "bytes.lit",
+              "PATH"
+            ]
+          ]
+        ],
+        [
+          "if",
+          [
+            ">",
+            [
+              "bytes.len",
+              "path"
+            ],
+            0
+          ],
+          [
+            "return",
+            [
+              "bytes.lit",
+              "x07-wasm"
+            ]
+          ],
+          0
+        ],
+        [
+          "let",
           "home",
           [
             "std.os.env.get",

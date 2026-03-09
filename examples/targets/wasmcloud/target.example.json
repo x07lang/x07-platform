@@ -2,18 +2,30 @@
   "schema_version": "lp.target.profile@0.1.0",
   "name": "oss-wasmcloud",
   "kind": "oss_remote",
-  "base_url": "http://127.0.0.1:17443",
+  "base_url": "https://localhost:17443",
   "api_version": "v1",
   "auth": {
     "kind": "static_bearer",
     "token_ref": "file:///Users/you/.config/x07lp/tokens/oss-wasmcloud.token"
   },
+  "tls": {
+    "mode": "ca_bundle",
+    "ca_bundle_path": "/Users/you/projects/x07-platform/examples/targets/wasmcloud/certs/out/dev-ca.pem"
+  },
   "runtime_provider": "wasmcloud",
   "routing_provider": "edge_http_v1",
-  "oci_registry": "127.0.0.1:15000",
+  "oci_registry": "localhost:15443",
+  "oci_auth": {
+    "kind": "basic",
+    "username_ref": "file:///Users/you/.config/x07lp/targets/oss-wasmcloud.oci.username",
+    "password_ref": "file:///Users/you/.config/x07lp/targets/oss-wasmcloud.oci.password"
+  },
+  "oci_tls": {
+    "mode": "ca_bundle",
+    "ca_bundle_path": "/Users/you/projects/x07-platform/examples/targets/wasmcloud/certs/out/dev-ca.pem"
+  },
   "lattice_id": "default",
   "default_namespace": "x07",
   "default_env": "prod",
   "telemetry_collector_hint": "http://127.0.0.1:4318"
 }
-

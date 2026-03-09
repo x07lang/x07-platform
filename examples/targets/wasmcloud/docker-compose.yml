@@ -10,10 +10,25 @@ services:
 
   registry:
     image: registry:2.8.3
-    ports:
-      - "15000:5000"
+    expose:
+      - "5000"
     volumes:
       - ./registry-config/config.yml:/etc/docker/registry/config.yml:ro
+
+  gateway:
+    image: caddy:2.10.2-alpine
+    depends_on:
+      - registry
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "17443:17443"
+      - "15443:15443"
+    expose:
+      - "5443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ${X07LP_DEV_CERT_DIR:-./certs/out}:/certs:ro
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.147.0
@@ -31,16 +46,22 @@ services:
     depends_on:
       - nats
       - otel-collector
+      - gateway
     environment:
       WASMCLOUD_LATTICE: default
       WASMCLOUD_NATS_HOST: nats
       WASMCLOUD_NATS_PORT: "4222"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
-      WASMCLOUD_OCI_ALLOWED_INSECURE: registry:5000,127.0.0.1:15000
+      WASMCLOUD_OCI_REGISTRY: gateway:5443
+      WASMCLOUD_OCI_REGISTRY_USER: x07lp-oci-dev-user
+      WASMCLOUD_OCI_REGISTRY_PASSWORD: x07lp-oci-dev-pass
+      WASMCLOUD_TLS_CA_PATH: /etc/x07lp/certs/dev-ca.pem
     ports:
       - "4000:4000"
       - "26000-26255:26000-26255"
+    volumes:
+      - ${X07LP_DEV_CERT_DIR:-./certs/out}/dev-ca.pem:/etc/x07lp/certs/dev-ca.pem:ro
 
   wadm:
     image: ghcr.io/wasmcloud/wadm:0.21.1

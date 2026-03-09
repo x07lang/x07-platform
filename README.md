@@ -10,6 +10,7 @@ Public surface:
 - self-hosted remote target management, remote deploy API, remote event/log streams, and reference adapter work for the OSS remote path
 - MCP router/worker integration under `gateway/mcp/`
 - local Command Center HTTP surface served by `x07lpd`
+- compose-backed self-hosted reference target with HTTPS control-plane ingress, authenticated/TLS OCI publishing, and encrypted server-side secret storage
 
 Repo entrypoints:
 - CLI: `cli/src/main.x07.json`
@@ -32,3 +33,4 @@ CI note:
 
 Reference stack:
 - self-hosted wasmCloud target assets: `examples/targets/wasmcloud/`
+- the wasmCloud reference target now expects the generated dev CA under `examples/targets/wasmcloud/certs/out/` and uses `https://localhost:17443` plus `https://localhost:15443` for the creator-facing path

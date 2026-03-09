@@ -5,6 +5,6 @@
   "imports": [],
   "decls": [
     { "kind": "export", "names": ["lp.cli.version_v1.str_v1"] },
-    { "kind": "defn", "name": "lp.cli.version_v1.str_v1", "params": [], "result": "bytes", "body": ["bytes.lit", "0.2.1"] }
+    { "kind": "defn", "name": "lp.cli.version_v1.str_v1", "params": [], "result": "bytes", "body": ["bytes.lit", "0.2.2"] }
   ]
 }

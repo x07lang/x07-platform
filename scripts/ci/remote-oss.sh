@@ -19,45 +19,79 @@ fi
 cargo build --manifest-path "$DRIVER_MANIFEST" >/dev/null
 
 CURL_BIN="${CURL_BIN:-curl}"
-DAEMON_ADDR="${X07LP_PHASED_OSS_DAEMON_ADDR:-127.0.0.1:17443}"
-REMOTE_BASE_URL="${X07LP_PHASED_OSS_BASE_URL:-http://${DAEMON_ADDR}}"
-OCI_REGISTRY="${X07LP_PHASED_OSS_OCI_REGISTRY:-127.0.0.1:15000}"
-BEARER_TOKEN="${X07LP_PHASED_OSS_BEARER_TOKEN:-x07lp-oss-dev-token}"
-STACK_COMPOSE_FILE="${X07LP_PHASED_OSS_COMPOSE_FILE:-examples/targets/wasmcloud/docker-compose.yml}"
-STACK_PROJECT="${X07LP_PHASED_OSS_STACK_PROJECT:-x07_phased_oss}"
-TARGET_NAME="${X07LP_PHASED_OSS_TARGET_NAME:-phaseD-oss-main}"
-CAP_MISMATCH_TARGET="${X07LP_PHASED_OSS_CAP_MISMATCH_TARGET:-phaseD-oss-cap-mismatch}"
-MISSING_SECRET_TARGET="${X07LP_PHASED_OSS_MISSING_SECRET_TARGET:-phaseD-oss-missing-secret}"
-TELEMETRY_COLLECTOR_URL="${X07LP_PHASED_OSS_OTLP_URL:-http://127.0.0.1:4318}"
+PUBLIC_GATEWAY_ADDR="${X07LP_REMOTE_OSS_DAEMON_ADDR:-localhost:17443}"
+DAEMON_BIND_ADDR="${X07LP_REMOTE_OSS_DAEMON_BIND_ADDR:-127.0.0.1:17080}"
+REMOTE_BASE_URL="${X07LP_REMOTE_OSS_BASE_URL:-https://${PUBLIC_GATEWAY_ADDR}}"
+OCI_REGISTRY="${X07LP_REMOTE_OSS_OCI_REGISTRY:-localhost:15443}"
+BEARER_TOKEN="${X07LP_REMOTE_OSS_BEARER_TOKEN:-x07lp-oss-dev-token}"
+OCI_USERNAME="${X07LP_REMOTE_OSS_OCI_USERNAME:-x07lp-oci-dev-user}"
+OCI_PASSWORD="${X07LP_REMOTE_OSS_OCI_PASSWORD:-x07lp-oci-dev-pass}"
+STACK_COMPOSE_FILE="${X07LP_REMOTE_OSS_COMPOSE_FILE:-examples/targets/wasmcloud/docker-compose.yml}"
+STACK_PROJECT="${X07LP_REMOTE_OSS_STACK_PROJECT:-x07_remote_oss}"
+TARGET_NAME="${X07LP_REMOTE_OSS_TARGET_NAME:-remote-oss-main}"
+CAP_MISMATCH_TARGET="${X07LP_REMOTE_OSS_CAP_MISMATCH_TARGET:-remote-oss-cap-mismatch}"
+MISSING_SECRET_TARGET="${X07LP_REMOTE_OSS_MISSING_SECRET_TARGET:-remote-oss-missing-secret}"
+PINNED_TARGET="${X07LP_REMOTE_OSS_PINNED_TARGET:-remote-oss-pinned}"
+BAD_CA_TARGET="${X07LP_REMOTE_OSS_BAD_CA_TARGET:-remote-oss-bad-ca}"
+BAD_PIN_TARGET="${X07LP_REMOTE_OSS_BAD_PIN_TARGET:-remote-oss-bad-pin}"
+BAD_OCI_AUTH_TARGET="${X07LP_REMOTE_OSS_BAD_OCI_AUTH_TARGET:-remote-oss-bad-oci-auth}"
+BAD_OCI_TLS_TARGET="${X07LP_REMOTE_OSS_BAD_OCI_TLS_TARGET:-remote-oss-bad-oci-tls}"
+TELEMETRY_COLLECTOR_URL="${X07LP_REMOTE_OSS_OTLP_URL:-http://127.0.0.1:4318}"
 
-if [ -n "${X07LP_PHASED_OSS_REMOTE_MODE:-}" ]; then
-  REMOTE_MODE="${X07LP_PHASED_OSS_REMOTE_MODE}"
+if [ -n "${X07LP_REMOTE_OSS_REMOTE_MODE:-}" ]; then
+  REMOTE_MODE="${X07LP_REMOTE_OSS_REMOTE_MODE}"
 elif [ -f "${ROOT_DIR}/${STACK_COMPOSE_FILE}" ] && command -v docker >/dev/null 2>&1; then
   REMOTE_MODE="compose"
 else
   REMOTE_MODE="local"
 fi
 
-TMP_DIR="${ROOT_DIR}/_tmp/ci_phaseD_oss"
+if [ "$REMOTE_MODE" = "local" ] && [ -z "${X07LP_REMOTE_OSS_BASE_URL:-}" ]; then
+  REMOTE_BASE_URL="http://${PUBLIC_GATEWAY_ADDR}"
+fi
+
+TMP_DIR="${ROOT_DIR}/_tmp/ci_remote_oss"
 PROFILE_PATH="${TMP_DIR}/${TARGET_NAME}.target.json"
 CAP_MISMATCH_PROFILE_PATH="${TMP_DIR}/${CAP_MISMATCH_TARGET}.target.json"
 MISSING_SECRET_PROFILE_PATH="${TMP_DIR}/${MISSING_SECRET_TARGET}.target.json"
-TOKEN_DIR="${HOME}/.config/x07lp/tokens"
+PINNED_PROFILE_PATH="${TMP_DIR}/${PINNED_TARGET}.target.json"
+BAD_CA_PROFILE_PATH="${TMP_DIR}/${BAD_CA_TARGET}.target.json"
+BAD_PIN_PROFILE_PATH="${TMP_DIR}/${BAD_PIN_TARGET}.target.json"
+BAD_OCI_AUTH_PROFILE_PATH="${TMP_DIR}/${BAD_OCI_AUTH_TARGET}.target.json"
+BAD_OCI_TLS_PROFILE_PATH="${TMP_DIR}/${BAD_OCI_TLS_TARGET}.target.json"
+TOKEN_DIR="${TMP_DIR}/tokens"
 TOKEN_PATH="${TOKEN_DIR}/${TARGET_NAME}.token"
 CAP_MISMATCH_TOKEN_PATH="${TOKEN_DIR}/${CAP_MISMATCH_TARGET}.token"
 MISSING_SECRET_TOKEN_PATH="${TOKEN_DIR}/${MISSING_SECRET_TARGET}.token"
+PINNED_TOKEN_PATH="${TOKEN_DIR}/${PINNED_TARGET}.token"
+BAD_CA_TOKEN_PATH="${TOKEN_DIR}/${BAD_CA_TARGET}.token"
+BAD_PIN_TOKEN_PATH="${TOKEN_DIR}/${BAD_PIN_TARGET}.token"
+BAD_OCI_AUTH_TOKEN_PATH="${TOKEN_DIR}/${BAD_OCI_AUTH_TARGET}.token"
+BAD_OCI_TLS_TOKEN_PATH="${TOKEN_DIR}/${BAD_OCI_TLS_TARGET}.token"
+OCI_CRED_DIR="${TMP_DIR}/oci-creds"
+OCI_USERNAME_PATH="${OCI_CRED_DIR}/registry.username"
+OCI_PASSWORD_PATH="${OCI_CRED_DIR}/registry.password"
+OCI_BAD_PASSWORD_PATH="${OCI_CRED_DIR}/registry.bad.password"
 OTLP_EXPORT_DIR="${TMP_DIR}/otel-output"
 OTLP_EXPORT_FILE="${OTLP_EXPORT_DIR}/collector-metrics.jsonl"
-REMOTE_SECRET_STORE_PATH="${TMP_DIR}/remote-secret-store.json"
+DEV_CERT_DIR="${TMP_DIR}/dev-certs"
+REMOTE_CA_CERT_PATH="${DEV_CERT_DIR}/dev-ca.pem"
+REMOTE_CERT_PATH="${DEV_CERT_DIR}/dev-cert.pem"
+BAD_CA_CERT_PATH="${TMP_DIR}/bad-ca.pem"
+REMOTE_SECRET_STORE_SOURCE_PATH="${TMP_DIR}/remote-secret-store.plain.json"
+REMOTE_SECRET_STORE_PATH="${TMP_DIR}/remote-secret-store.enc.json"
+REMOTE_SECRET_MASTER_KEY_PATH="${TMP_DIR}/remote-secret-store.key"
+BAD_SECRET_MASTER_KEY_PATH="${TMP_DIR}/remote-secret-store.bad.key"
 
-PHASEA_PACK="spec/fixtures/phaseA/pack_min/app.pack.json"
-PHASEA_PACK_BAD="spec/fixtures/phaseA/pack_min/app.pack.bad.json"
-PHASEB_CHANGE="spec/fixtures/phaseB/common/change_request.app_min.json"
+PACK_FIXTURE="spec/fixtures/phaseA/pack_min/app.pack.json"
+PACK_DIGEST_MISMATCH_FIXTURE="spec/fixtures/phaseA/pack_min/app.pack.bad.json"
+CHANGE_FIXTURE="spec/fixtures/phaseB/common/change_request.app_min.json"
 
 rm -rf "$TMP_DIR"
-mkdir -p "$TMP_DIR" "$TOKEN_DIR" "$OTLP_EXPORT_DIR"
+mkdir -p "$TMP_DIR" "$TOKEN_DIR" "$OCI_CRED_DIR" "$OTLP_EXPORT_DIR"
 
 PIDS=()
+DAEMON_PID=""
 cleanup() {
   if command -v docker >/dev/null 2>&1; then
     if docker compose version >/dev/null 2>&1; then
@@ -66,6 +100,7 @@ cleanup() {
       (cd "$ROOT_DIR" && docker-compose -p "$STACK_PROJECT" -f "$STACK_COMPOSE_FILE" down -v >/dev/null 2>&1 || true)
     fi
   fi
+  stop_daemon || true
   for pid in "${PIDS[@]:-}"; do
     if [ -n "${pid:-}" ] && kill -0 "$pid" >/dev/null 2>&1; then
       kill "$pid" >/dev/null 2>&1 || true
@@ -84,6 +119,94 @@ dc() {
     echo "docker compose not available" >&2
     exit 1
   fi
+}
+
+write_text_file() {
+  local path="$1"
+  local value="$2"
+  mkdir -p "$(dirname "$path")"
+  printf '%s' "$value" >"$path"
+  chmod 600 "$path"
+}
+
+generate_dev_certificates() {
+  (
+    cd "$ROOT_DIR"
+    ./examples/targets/wasmcloud/scripts/gen-dev-cert.sh "$DEV_CERT_DIR" >/dev/null
+  )
+}
+
+generate_bad_ca_certificate() {
+  openssl req \
+    -x509 \
+    -newkey rsa:2048 \
+    -sha256 \
+    -days 365 \
+    -nodes \
+    -subj "/CN=x07lp bad ca" \
+    -keyout "${TMP_DIR}/bad-ca.key.pem" \
+    -out "$BAD_CA_CERT_PATH" >/dev/null 2>&1
+  chmod 600 "${TMP_DIR}/bad-ca.key.pem"
+  chmod 644 "$BAD_CA_CERT_PATH"
+}
+
+compute_spki_pin() {
+  local cert_path="$1"
+  local hex
+  hex="$(
+    openssl x509 -in "$cert_path" -pubkey -noout \
+      | openssl pkey -pubin -outform der \
+      | openssl dgst -sha256 -binary \
+      | xxd -p -c 256
+  )"
+  printf 'sha256:%s' "$hex"
+}
+
+pack_remote_secret_store() {
+  (
+    cd "$ROOT_DIR"
+    X07LP_REMOTE_SECRET_MASTER_KEY_FILE="$REMOTE_SECRET_MASTER_KEY_PATH" \
+      "$DRIVER_BIN" secret-store-pack \
+        --input "$(repo_path_arg "$REMOTE_SECRET_STORE_SOURCE_PATH")" \
+        --output "$(repo_path_arg "$REMOTE_SECRET_STORE_PATH")" >/dev/null
+  )
+}
+
+start_daemon() {
+  local key_path="${1:-$REMOTE_SECRET_MASTER_KEY_PATH}"
+  (
+    cd "$ROOT_DIR"
+    X07LP_REMOTE_BEARER_TOKEN="$BEARER_TOKEN" \
+    X07LP_REMOTE_SECRET_STORE_PATH="$REMOTE_SECRET_STORE_PATH" \
+    X07LP_REMOTE_SECRET_MASTER_KEY_FILE="$key_path" \
+    X07LP_REMOTE_OTLP_EXPORT_PATH="$OTLP_EXPORT_FILE" \
+      "$DRIVER_BIN" ui-serve --addr "$DAEMON_BIND_ADDR" --state-dir "$TMP_DIR/remote_state" >/dev/null 2>&1
+  ) &
+  DAEMON_PID="$!"
+  PIDS+=("$DAEMON_PID")
+}
+
+stop_daemon() {
+  local pattern="x07lp-driver ui-serve --addr ${DAEMON_BIND_ADDR} --state-dir ${TMP_DIR}/remote_state"
+  if [ -z "${DAEMON_PID:-}" ]; then
+    pkill -f "$pattern" >/dev/null 2>&1 || true
+    return 0
+  fi
+  local pid="$DAEMON_PID"
+  if [ -n "${pid:-}" ] && kill -0 "$pid" >/dev/null 2>&1; then
+    kill "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+  fi
+  pkill -f "$pattern" >/dev/null 2>&1 || true
+  DAEMON_PID=""
+}
+
+restart_daemon_with_key() {
+  local key_path="$1"
+  stop_daemon
+  sleep 1
+  start_daemon "$key_path"
+  wait_for_http "${REMOTE_BASE_URL}/v1/health" 60
 }
 
 decode_solve_output_b64() {
@@ -160,7 +283,7 @@ run_x07lp() {
       return 0
       ;;
     *)
-      echo "unsupported phaseD-oss command: $*" >&2
+      echo "unsupported remote-oss command: $*" >&2
       return 1
       ;;
   esac
@@ -307,8 +430,7 @@ validate_report_result_schema() {
 
 write_token() {
   local path="$1"
-  printf '%s' "$BEARER_TOKEN" >"$path"
-  chmod 600 "$path"
+  write_text_file "$path" "$BEARER_TOKEN"
 }
 
 render_target_profile() {
@@ -317,7 +439,16 @@ render_target_profile() {
   local name="$3"
   local token_path="$4"
   local expected_caps="${5:-}"
-  "$PYTHON" - "$template_path" "$out_path" "$name" "$REMOTE_BASE_URL" "$OCI_REGISTRY" "$token_path" "$expected_caps" "$TELEMETRY_COLLECTOR_URL" <<'PY'
+  local tls_mode="${6:-ca_bundle}"
+  local ca_bundle_path="${7:-$REMOTE_CA_CERT_PATH}"
+  local pinned_spki="${8:-}"
+  local oci_username_path="${9:-$OCI_USERNAME_PATH}"
+  local oci_password_path="${10:-$OCI_PASSWORD_PATH}"
+  local oci_ca_bundle_path="${11:-$REMOTE_CA_CERT_PATH}"
+  "$PYTHON" \
+    - "$template_path" "$out_path" "$name" "$REMOTE_BASE_URL" "$OCI_REGISTRY" "$token_path" \
+    "$expected_caps" "$TELEMETRY_COLLECTOR_URL" "$tls_mode" "$ca_bundle_path" "$pinned_spki" \
+    "$oci_username_path" "$oci_password_path" "$oci_ca_bundle_path" <<'PY'
 import json
 import pathlib
 import sys
@@ -329,11 +460,22 @@ oci_registry = sys.argv[5]
 token_path = sys.argv[6]
 expected_caps = sys.argv[7]
 telemetry_collector = sys.argv[8]
+tls_mode = sys.argv[9]
+ca_bundle_path = sys.argv[10]
+pinned_spki = sys.argv[11]
+oci_username_path = sys.argv[12]
+oci_password_path = sys.argv[13]
+oci_ca_bundle_path = sys.argv[14]
 doc = json.loads(template.read_text(encoding='utf-8'))
 
 def replace(node):
     if isinstance(node, dict):
-        return {k: replace(v) for k, v in node.items()}
+        result = {}
+        for k, v in node.items():
+            value = replace(v)
+            if value is not None:
+                result[k] = value
+        return result
     if isinstance(node, list):
         return [replace(v) for v in node]
     if node == '__NAME__':
@@ -344,6 +486,18 @@ def replace(node):
         return oci_registry
     if node == '__TOKEN_REF__':
         return f'file://{token_path}'
+    if node == '__TLS_MODE__':
+        return tls_mode
+    if node == '__CA_BUNDLE_PATH__':
+        return ca_bundle_path
+    if node == '__PINNED_SPKI_SHA256__':
+        return pinned_spki or None
+    if node == '__OCI_USERNAME_REF__':
+        return f'file://{oci_username_path}'
+    if node == '__OCI_PASSWORD_REF__':
+        return f'file://{oci_password_path}'
+    if node == '__OCI_CA_BUNDLE_PATH__':
+        return oci_ca_bundle_path
     if node == '__EXPECTED_CAPABILITIES_DIGEST__':
         return expected_caps or 'sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff'
     if node == '__TELEMETRY_COLLECTOR__':
@@ -361,7 +515,7 @@ wait_for_http() {
   local timeout_secs="${2:-30}"
   local deadline=$((SECONDS + timeout_secs))
   while [ "$SECONDS" -lt "$deadline" ]; do
-    if "$CURL_BIN" -fsS "$url" >/dev/null 2>&1; then
+    if "$CURL_BIN" -fsS --cacert "$REMOTE_CA_CERT_PATH" "$url" >/dev/null 2>&1; then
       return 0
     fi
     sleep 1
@@ -377,7 +531,7 @@ wait_for_http_statuses() {
   local deadline=$((SECONDS + timeout_secs))
   while [ "$SECONDS" -lt "$deadline" ]; do
     local code
-    code="$("$CURL_BIN" -sS -o /dev/null -w '%{http_code}' "$url" || true)"
+    code="$("$CURL_BIN" --cacert "$REMOTE_CA_CERT_PATH" -sS -o /dev/null -w '%{http_code}' "$url" || true)"
     IFS=',' read -r -a allowed_codes <<<"$allowed_csv"
     for allowed in "${allowed_codes[@]}"; do
       if [ "$code" = "$allowed" ]; then
@@ -475,6 +629,7 @@ PY
 fetch_capabilities() {
   local out_path="$1"
   "$CURL_BIN" -fsS \
+    --cacert "$REMOTE_CA_CERT_PATH" \
     -H "Authorization: Bearer ${BEARER_TOKEN}" \
     "${REMOTE_BASE_URL}/v1/capabilities" \
     >"$out_path"
@@ -485,6 +640,7 @@ fetch_remote_stream() {
   local query="$2"
   local out_path="$3"
   "$CURL_BIN" -fsS \
+    --cacert "$REMOTE_CA_CERT_PATH" \
     -H "Authorization: Bearer ${BEARER_TOKEN}" \
     "${REMOTE_BASE_URL}/${endpoint}?${query}" \
     >"$out_path"
@@ -517,6 +673,18 @@ for diag in doc.get('diagnostics', []):
         codes.append(diag['code'])
 if sys.argv[2] not in codes:
     raise SystemExit(f'missing diagnostic {sys.argv[2]} in {codes}')
+PY
+}
+
+assert_report_not_ok() {
+  local report_path="$1"
+  "$PYTHON" - "$report_path" <<'PY'
+import json
+import pathlib
+import sys
+doc = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+if doc.get('ok') is not False:
+    raise SystemExit(f'expected ok=false in {sys.argv[1]}')
 PY
 }
 
@@ -570,30 +738,25 @@ start_stack() {
       echo "compose mode requested but missing $STACK_COMPOSE_FILE" >&2
       exit 1
     fi
-    (cd "$ROOT_DIR" && X07LP_OTLP_EXPORT_HOST_DIR="$OTLP_EXPORT_DIR" dc up -d)
-    (
-      cd "$ROOT_DIR"
-      X07LP_REMOTE_BEARER_TOKEN="$BEARER_TOKEN" \
-      X07LP_REMOTE_SECRET_STORE_PATH="$REMOTE_SECRET_STORE_PATH" \
-      X07LP_REMOTE_OTLP_EXPORT_PATH="$OTLP_EXPORT_FILE" \
-        "$DRIVER_BIN" ui-serve --addr "$DAEMON_ADDR" --state-dir "$TMP_DIR/remote_state" >/dev/null 2>&1
-    ) &
-    PIDS+=("$!")
+    (cd "$ROOT_DIR" && X07LP_OTLP_EXPORT_HOST_DIR="$OTLP_EXPORT_DIR" X07LP_DEV_CERT_DIR="$DEV_CERT_DIR" dc up -d)
+    start_daemon
   elif [ "$REMOTE_MODE" = "local" ]; then
     (
       cd "$ROOT_DIR"
       X07LP_REMOTE_BEARER_TOKEN="$BEARER_TOKEN" \
       X07LP_REMOTE_SECRET_STORE_PATH="$REMOTE_SECRET_STORE_PATH" \
-        "$DRIVER_BIN" ui-serve --addr "$DAEMON_ADDR" --state-dir "$TMP_DIR/remote_state" >/dev/null 2>&1
+      X07LP_REMOTE_SECRET_MASTER_KEY_FILE="$REMOTE_SECRET_MASTER_KEY_PATH" \
+        "$DRIVER_BIN" ui-serve --addr "$PUBLIC_GATEWAY_ADDR" --state-dir "$TMP_DIR/remote_state" >/dev/null 2>&1
     ) &
-    PIDS+=("$!")
+    DAEMON_PID="$!"
+    PIDS+=("$DAEMON_PID")
   elif [ "$REMOTE_MODE" != "external" ]; then
-    echo "unsupported X07LP_PHASED_OSS_REMOTE_MODE=$REMOTE_MODE" >&2
+    echo "unsupported X07LP_REMOTE_OSS_REMOTE_MODE=$REMOTE_MODE" >&2
     exit 1
   fi
   wait_for_http "${REMOTE_BASE_URL}/v1/health" 60
   if [ "$REMOTE_MODE" = "compose" ]; then
-    wait_for_http_statuses "http://${OCI_REGISTRY}/v2/" "200,401" 60
+    wait_for_http_statuses "https://${OCI_REGISTRY}/v2/" "200,401" 60
     wait_for_http "http://127.0.0.1:8222/varz" 60
     wait_for_tcp "127.0.0.1" "4000" 60
     wait_for_tcp "127.0.0.1" "4318" 60
@@ -603,8 +766,21 @@ start_stack() {
 write_token "$TOKEN_PATH"
 write_token "$CAP_MISMATCH_TOKEN_PATH"
 write_token "$MISSING_SECRET_TOKEN_PATH"
+write_token "$PINNED_TOKEN_PATH"
+write_token "$BAD_CA_TOKEN_PATH"
+write_token "$BAD_PIN_TOKEN_PATH"
+write_token "$BAD_OCI_AUTH_TOKEN_PATH"
+write_token "$BAD_OCI_TLS_TOKEN_PATH"
+write_text_file "$OCI_USERNAME_PATH" "$OCI_USERNAME"
+write_text_file "$OCI_PASSWORD_PATH" "$OCI_PASSWORD"
+write_text_file "$OCI_BAD_PASSWORD_PATH" "wrong-${OCI_PASSWORD}"
+write_text_file "$REMOTE_SECRET_MASTER_KEY_PATH" "$(openssl rand -hex 32)"
+write_text_file "$BAD_SECRET_MASTER_KEY_PATH" "$(openssl rand -hex 32)"
+generate_dev_certificates
+generate_bad_ca_certificate
+REMOTE_SPKI_PIN="$(compute_spki_pin "$REMOTE_CERT_PATH")"
 
-cat >"$REMOTE_SECRET_STORE_PATH" <<JSON
+cat >"$REMOTE_SECRET_STORE_SOURCE_PATH" <<JSON
 {
   "schema_version": "lp.remote.secret.store.internal@0.1.0",
   "targets": {
@@ -618,10 +794,16 @@ cat >"$REMOTE_SECRET_STORE_PATH" <<JSON
   }
 }
 JSON
+pack_remote_secret_store
 
-render_target_profile "spec/fixtures/phaseD-oss/common/targets/main.target.template.json" "$PROFILE_PATH" "$TARGET_NAME" "$TOKEN_PATH"
-render_target_profile "spec/fixtures/phaseD-oss/common/targets/cap-mismatch.target.template.json" "$CAP_MISMATCH_PROFILE_PATH" "$CAP_MISMATCH_TARGET" "$CAP_MISMATCH_TOKEN_PATH" "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-render_target_profile "spec/fixtures/phaseD-oss/common/targets/missing-secret.target.template.json" "$MISSING_SECRET_PROFILE_PATH" "$MISSING_SECRET_TARGET" "$MISSING_SECRET_TOKEN_PATH"
+render_target_profile "spec/fixtures/remote-oss/common/targets/main.target.template.json" "$PROFILE_PATH" "$TARGET_NAME" "$TOKEN_PATH"
+render_target_profile "spec/fixtures/remote-oss/common/targets/cap-mismatch.target.template.json" "$CAP_MISMATCH_PROFILE_PATH" "$CAP_MISMATCH_TARGET" "$CAP_MISMATCH_TOKEN_PATH" "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+render_target_profile "spec/fixtures/remote-oss/common/targets/missing-secret.target.template.json" "$MISSING_SECRET_PROFILE_PATH" "$MISSING_SECRET_TARGET" "$MISSING_SECRET_TOKEN_PATH"
+render_target_profile "spec/fixtures/remote-oss/common/targets/main.target.template.json" "$PINNED_PROFILE_PATH" "$PINNED_TARGET" "$PINNED_TOKEN_PATH" "" "pinned_spki" "$REMOTE_CA_CERT_PATH" "$REMOTE_SPKI_PIN"
+render_target_profile "spec/fixtures/remote-oss/common/targets/main.target.template.json" "$BAD_CA_PROFILE_PATH" "$BAD_CA_TARGET" "$BAD_CA_TOKEN_PATH" "" "ca_bundle" "$BAD_CA_CERT_PATH"
+render_target_profile "spec/fixtures/remote-oss/common/targets/main.target.template.json" "$BAD_PIN_PROFILE_PATH" "$BAD_PIN_TARGET" "$BAD_PIN_TOKEN_PATH" "" "pinned_spki" "$REMOTE_CA_CERT_PATH" "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+render_target_profile "spec/fixtures/remote-oss/common/targets/main.target.template.json" "$BAD_OCI_AUTH_PROFILE_PATH" "$BAD_OCI_AUTH_TARGET" "$BAD_OCI_AUTH_TOKEN_PATH" "" "ca_bundle" "$REMOTE_CA_CERT_PATH" "" "$OCI_USERNAME_PATH" "$OCI_BAD_PASSWORD_PATH" "$REMOTE_CA_CERT_PATH"
+render_target_profile "spec/fixtures/remote-oss/common/targets/main.target.template.json" "$BAD_OCI_TLS_PROFILE_PATH" "$BAD_OCI_TLS_TARGET" "$BAD_OCI_TLS_TOKEN_PATH" "" "ca_bundle" "$REMOTE_CA_CERT_PATH" "" "$OCI_USERNAME_PATH" "$OCI_PASSWORD_PATH" "$BAD_CA_CERT_PATH"
 
 start_stack
 
@@ -634,15 +816,22 @@ check_schema_validate_ok \
   "${TMP_DIR}/capabilities.validate.cli.json"
 assert_report_matches_template \
   "$CAPS_JSON" \
-  "${ROOT_DIR}/spec/fixtures/phaseD-oss/remote_capabilities/expected/v1.capabilities.json"
+  "${ROOT_DIR}/spec/fixtures/remote-oss/remote_capabilities/expected/v1.capabilities.json"
 
 run_x07lp "${TMP_DIR}/target.add.run_report.json" "${TMP_DIR}/target.add.cli.json" target add --profile "$(repo_path_arg "$PROFILE_PATH")" --json
 run_x07lp "${TMP_DIR}/target.add.cap_mismatch.run_report.json" "${TMP_DIR}/target.add.cap_mismatch.cli.json" target add --profile "$(repo_path_arg "$CAP_MISMATCH_PROFILE_PATH")" --json
 run_x07lp "${TMP_DIR}/target.add.missing_secret.run_report.json" "${TMP_DIR}/target.add.missing_secret.cli.json" target add --profile "$(repo_path_arg "$MISSING_SECRET_PROFILE_PATH")" --json
+run_x07lp "${TMP_DIR}/target.add.pinned.run_report.json" "${TMP_DIR}/target.add.pinned.cli.json" target add --profile "$(repo_path_arg "$PINNED_PROFILE_PATH")" --json
+run_x07lp "${TMP_DIR}/target.add.bad_oci_auth.run_report.json" "${TMP_DIR}/target.add.bad_oci_auth.cli.json" target add --profile "$(repo_path_arg "$BAD_OCI_AUTH_PROFILE_PATH")" --json
+run_x07lp "${TMP_DIR}/target.add.bad_oci_tls.run_report.json" "${TMP_DIR}/target.add.bad_oci_tls.cli.json" target add --profile "$(repo_path_arg "$BAD_OCI_TLS_PROFILE_PATH")" --json
+run_x07lp "${TMP_DIR}/target.add.bad_ca.run_report.json" "${TMP_DIR}/target.add.bad_ca.cli.json" target add --profile "$(repo_path_arg "$BAD_CA_PROFILE_PATH")" --json || true
+run_x07lp "${TMP_DIR}/target.add.bad_pin.run_report.json" "${TMP_DIR}/target.add.bad_pin.cli.json" target add --profile "$(repo_path_arg "$BAD_PIN_PROFILE_PATH")" --json || true
 validate_cli_report "${TMP_DIR}/target.add.cli.json" "${TMP_DIR}"
+assert_negative_code "${TMP_DIR}/target.add.bad_ca.cli.json" "LP_REMOTE_TARGET_UNREACHABLE"
+assert_negative_code "${TMP_DIR}/target.add.bad_pin.cli.json" "LP_REMOTE_TARGET_UNREACHABLE"
 
 run_x07lp "${TMP_DIR}/remote_promote.accept.run_report.json" "${TMP_DIR}/remote_promote.accept.cli.json" \
-  deploy accept --target "$TARGET_NAME" --pack-manifest "$PHASEA_PACK" --change "$PHASEB_CHANGE" --json
+  deploy accept --target "$TARGET_NAME" --pack-manifest "$PACK_FIXTURE" --change "$CHANGE_FIXTURE" --json
 PROMOTE_RUN_ID="$("$PYTHON" - "${TMP_DIR}/remote_promote.accept.cli.json" <<'PY'
 import json, pathlib, sys
 doc = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
@@ -665,10 +854,10 @@ validate_cli_report "${TMP_DIR}/remote_promote.query.summary.cli.json" "${TMP_DI
 validate_cli_report "${TMP_DIR}/remote_promote.query.full.cli.json" "${TMP_DIR}/remote_promote.query.full"
 validate_report_result_schema "contracts/spec/schemas/lp.deploy.query.result.schema.json" "${TMP_DIR}/remote_promote.query.summary.cli.json" "${TMP_DIR}/remote_promote.query.summary" "deploy.query.summary"
 validate_report_result_schema "contracts/spec/schemas/lp.deploy.query.result.schema.json" "${TMP_DIR}/remote_promote.query.full.cli.json" "${TMP_DIR}/remote_promote.query.full" "deploy.query.full"
-assert_report_matches_template "${TMP_DIR}/remote_promote.query.summary.cli.json" "${ROOT_DIR}/spec/fixtures/phaseD-oss/remote_promote/expected/query.summary.report.json"
-assert_report_matches_template "${TMP_DIR}/remote_promote.query.full.cli.json" "${ROOT_DIR}/spec/fixtures/phaseD-oss/remote_promote/expected/query.full.report.json"
+assert_report_matches_template "${TMP_DIR}/remote_promote.query.summary.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_promote/expected/query.summary.report.json"
+assert_report_matches_template "${TMP_DIR}/remote_promote.query.full.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_promote/expected/query.full.report.json"
 normalize_remote_query_full "${TMP_DIR}/remote_promote.query.full.cli.json" "${TMP_DIR}/remote_promote.query.full.normalized.json"
-assert_report_matches_template "${TMP_DIR}/remote_promote.query.full.normalized.json" "${ROOT_DIR}/spec/fixtures/phaseD-oss/remote_parity/expected/query.full.normalized.json"
+assert_report_matches_template "${TMP_DIR}/remote_promote.query.full.normalized.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_parity/expected/query.full.normalized.json"
 
 fetch_remote_stream "v1/events" "exec_id=${PROMOTE_EXEC_ID}&limit=50" "${TMP_DIR}/remote_promote.events.cli.json"
 fetch_remote_stream "v1/logs" "exec_id=${PROMOTE_EXEC_ID}&slot=candidate&limit=50" "${TMP_DIR}/remote_promote.logs.cli.json"
@@ -680,7 +869,7 @@ assert_report_items_non_empty "${TMP_DIR}/remote_promote.events.cli.json"
 assert_report_items_non_empty "${TMP_DIR}/remote_promote.logs.cli.json"
 
 run_x07lp "${TMP_DIR}/remote_rollback.accept.run_report.json" "${TMP_DIR}/remote_rollback.accept.cli.json" \
-  deploy accept --target "$TARGET_NAME" --pack-manifest "$PHASEA_PACK" --change "$PHASEB_CHANGE" --json
+  deploy accept --target "$TARGET_NAME" --pack-manifest "$PACK_FIXTURE" --change "$CHANGE_FIXTURE" --json
 ROLLBACK_RUN_ID="$("$PYTHON" - "${TMP_DIR}/remote_rollback.accept.cli.json" <<'PY'
 import json, pathlib, sys
 doc = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
@@ -688,9 +877,9 @@ print(doc.get('result', {}).get('run_id') or '')
 PY
 )"
 run_x07lp "${TMP_DIR}/remote_rollback.run.run_report.json" "${TMP_DIR}/remote_rollback.run.cli.json" \
-  deploy run --target "$TARGET_NAME" --accepted-run "$ROLLBACK_RUN_ID" --fixture spec/fixtures/phaseD-oss/remote_rollback --json || true
+  deploy run --target "$TARGET_NAME" --accepted-run "$ROLLBACK_RUN_ID" --fixture spec/fixtures/remote-oss/remote_rollback --json || true
 assert_negative_code "${TMP_DIR}/remote_rollback.run.cli.json" "LP_SLO_DECISION_ROLLBACK"
-assert_report_matches_template "${TMP_DIR}/remote_rollback.run.cli.json" "${ROOT_DIR}/spec/fixtures/phaseD-oss/remote_rollback/expected/deploy.run.report.json"
+assert_report_matches_template "${TMP_DIR}/remote_rollback.run.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_rollback/expected/deploy.run.report.json"
 ROLLBACK_EXEC_ID="$("$PYTHON" - "${TMP_DIR}/remote_rollback.run.cli.json" <<'PY'
 import json, pathlib, sys
 doc = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
@@ -698,10 +887,10 @@ print(doc.get('result', {}).get('deployment_id') or doc.get('result', {}).get('e
 PY
 )"
 run_remote_query_view "$ROLLBACK_EXEC_ID" "summary" "${TMP_DIR}/remote_rollback.query.summary.run_report.json" "${TMP_DIR}/remote_rollback.query.summary.cli.json"
-assert_report_matches_template "${TMP_DIR}/remote_rollback.query.summary.cli.json" "${ROOT_DIR}/spec/fixtures/phaseD-oss/remote_rollback/expected/query.summary.report.json"
+assert_report_matches_template "${TMP_DIR}/remote_rollback.query.summary.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_rollback/expected/query.summary.report.json"
 
 run_x07lp "${TMP_DIR}/remote_pause.accept.run_report.json" "${TMP_DIR}/remote_pause.accept.cli.json" \
-  deploy accept --target "$TARGET_NAME" --pack-manifest "$PHASEA_PACK" --change "$PHASEB_CHANGE" --json
+  deploy accept --target "$TARGET_NAME" --pack-manifest "$PACK_FIXTURE" --change "$CHANGE_FIXTURE" --json
 PAUSE_RUN_ID="$("$PYTHON" - "${TMP_DIR}/remote_pause.accept.cli.json" <<'PY'
 import json, pathlib, sys
 doc = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
@@ -716,25 +905,25 @@ PY
 )"
 (
   run_x07lp "${TMP_DIR}/remote_pause.run.run_report.json" "${TMP_DIR}/remote_pause.run.cli.json" \
-    deploy run --target "$TARGET_NAME" --accepted-run "$PAUSE_RUN_ID" --fixture spec/fixtures/phaseD-oss/remote_pause_rerun --json
+    deploy run --target "$TARGET_NAME" --accepted-run "$PAUSE_RUN_ID" --fixture spec/fixtures/remote-oss/remote_pause_rerun --json
 ) &
 PAUSE_RUN_PID=$!
 PIDS+=("$PAUSE_RUN_PID")
 wait_for_pause_step "${TMP_DIR}/remote_state/deploy/${PAUSE_EXEC_ID}.json" 20
 run_x07lp "${TMP_DIR}/remote_pause.control.run_report.json" "${TMP_DIR}/remote_pause.control.cli.json" \
   deploy pause --target "$TARGET_NAME" --deployment "$PAUSE_EXEC_ID" --reason "ci pause" --json
-assert_report_matches_template "${TMP_DIR}/remote_pause.control.cli.json" "${ROOT_DIR}/spec/fixtures/phaseD-oss/remote_pause_rerun/expected/pause.report.json"
+assert_report_matches_template "${TMP_DIR}/remote_pause.control.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_pause_rerun/expected/pause.report.json"
 wait_for_control_state "${TMP_DIR}/remote_state/deploy/${PAUSE_EXEC_ID}.json" paused 20
 wait "$PAUSE_RUN_PID" || true
 run_x07lp "${TMP_DIR}/remote_rerun.control.run_report.json" "${TMP_DIR}/remote_rerun.control.cli.json" \
   deploy rerun --target "$TARGET_NAME" --deployment "$PAUSE_EXEC_ID" --reason "ci rerun" --json
-assert_report_matches_template "${TMP_DIR}/remote_rerun.control.cli.json" "${ROOT_DIR}/spec/fixtures/phaseD-oss/remote_pause_rerun/expected/rerun.report.json"
+assert_report_matches_template "${TMP_DIR}/remote_rerun.control.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_pause_rerun/expected/rerun.report.json"
 
 for view in summary timeline decisions artifacts full; do
   run_remote_query_view "$PROMOTE_EXEC_ID" "$view" "${TMP_DIR}/remote_query.${view}.run_report.json" "${TMP_DIR}/remote_query.${view}.cli.json"
   assert_report_matches_template \
     "${TMP_DIR}/remote_query.${view}.cli.json" \
-    "${ROOT_DIR}/spec/fixtures/phaseD-oss/remote_query/expected/query.${view}.report.json"
+    "${ROOT_DIR}/spec/fixtures/remote-oss/remote_query/expected/query.${view}.report.json"
 done
 
 run_x07lp "${TMP_DIR}/remote_incident_capture.capture.run_report.json" "${TMP_DIR}/remote_incident_capture.capture.cli.json" \
@@ -745,7 +934,7 @@ run_x07lp "${TMP_DIR}/remote_incident_capture.capture.run_report.json" "${TMP_DI
   --trace spec/fixtures/phaseC/common/trace.json --json
 assert_report_matches_template \
   "${TMP_DIR}/remote_incident_capture.capture.cli.json" \
-  "${ROOT_DIR}/spec/fixtures/phaseD-oss/remote_incident_capture/expected/incident.capture.report.json"
+  "${ROOT_DIR}/spec/fixtures/remote-oss/remote_incident_capture/expected/incident.capture.report.json"
 INCIDENT_ID="$("$PYTHON" - "${TMP_DIR}/remote_incident_capture.capture.cli.json" <<'PY'
 import json, pathlib, sys
 doc = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
@@ -757,26 +946,66 @@ run_x07lp "${TMP_DIR}/remote_regression_from_incident.regress.run_report.json" "
   --out-dir "$TMP_DIR/remote_regress" --json
 assert_report_matches_template \
   "${TMP_DIR}/remote_regression_from_incident.regress.cli.json" \
-  "${ROOT_DIR}/spec/fixtures/phaseD-oss/remote_regression_from_incident/expected/regress.report.json"
+  "${ROOT_DIR}/spec/fixtures/remote-oss/remote_regression_from_incident/expected/regress.report.json"
 
 run_x07lp "${TMP_DIR}/remote_missing_secret.accept.run_report.json" "${TMP_DIR}/remote_missing_secret.accept.cli.json" \
-  deploy accept --target "$MISSING_SECRET_TARGET" --pack-manifest "$PHASEA_PACK" --change "$PHASEB_CHANGE" \
+  deploy accept --target "$MISSING_SECRET_TARGET" --pack-manifest "$PACK_FIXTURE" --change "$CHANGE_FIXTURE" \
   --ops-profile arch/app/ops/ops_secret_allow.json --json || true
 assert_negative_code "${TMP_DIR}/remote_missing_secret.accept.cli.json" "LP_REMOTE_SECRET_NOT_FOUND"
-assert_report_matches_template "${TMP_DIR}/remote_missing_secret.accept.cli.json" "${ROOT_DIR}/spec/fixtures/phaseD-oss/remote_missing_secret/expected/deploy.accept.report.json"
+assert_report_matches_template "${TMP_DIR}/remote_missing_secret.accept.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_missing_secret/expected/deploy.accept.report.json"
+
+restart_daemon_with_key "$BAD_SECRET_MASTER_KEY_PATH"
+run_x07lp "${TMP_DIR}/remote_secret_store.bad_key.run_report.json" "${TMP_DIR}/remote_secret_store.bad_key.cli.json" \
+  deploy accept --target "$TARGET_NAME" --pack-manifest "$PACK_FIXTURE" --change "$CHANGE_FIXTURE" \
+  --ops-profile arch/app/ops/ops_secret_allow.json --json || true
+assert_negative_code "${TMP_DIR}/remote_secret_store.bad_key.cli.json" "LP_REMOTE_SECRET_STORE_INVALID"
+restart_daemon_with_key "$REMOTE_SECRET_MASTER_KEY_PATH"
+
+chmod 0644 "$REMOTE_SECRET_STORE_PATH"
+run_x07lp "${TMP_DIR}/remote_secret_store.bad_perm.run_report.json" "${TMP_DIR}/remote_secret_store.bad_perm.cli.json" \
+  deploy accept --target "$TARGET_NAME" --pack-manifest "$PACK_FIXTURE" --change "$CHANGE_FIXTURE" \
+  --ops-profile arch/app/ops/ops_secret_allow.json --json || true
+assert_negative_code "${TMP_DIR}/remote_secret_store.bad_perm.cli.json" "LP_REMOTE_SECRET_STORE_INVALID"
+chmod 0600 "$REMOTE_SECRET_STORE_PATH"
+
+run_x07lp "${TMP_DIR}/remote_oci_auth.accept.run_report.json" "${TMP_DIR}/remote_oci_auth.accept.cli.json" \
+  deploy accept --target "$BAD_OCI_AUTH_TARGET" --pack-manifest "$PACK_FIXTURE" --change "$CHANGE_FIXTURE" --json
+BAD_OCI_AUTH_RUN_ID="$("$PYTHON" - "${TMP_DIR}/remote_oci_auth.accept.cli.json" <<'PY'
+import json, pathlib, sys
+doc = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+print(doc.get('result', {}).get('run_id') or '')
+PY
+)"
+run_x07lp "${TMP_DIR}/remote_oci_auth.run.run_report.json" "${TMP_DIR}/remote_oci_auth.run.cli.json" \
+  deploy run --target "$BAD_OCI_AUTH_TARGET" --accepted-run "$BAD_OCI_AUTH_RUN_ID" --json || true
+assert_report_not_ok "${TMP_DIR}/remote_oci_auth.run.cli.json"
+assert_negative_code "${TMP_DIR}/remote_oci_auth.run.cli.json" "LP_RUNTIME_START_FAILED"
+
+run_x07lp "${TMP_DIR}/remote_oci_tls.accept.run_report.json" "${TMP_DIR}/remote_oci_tls.accept.cli.json" \
+  deploy accept --target "$BAD_OCI_TLS_TARGET" --pack-manifest "$PACK_FIXTURE" --change "$CHANGE_FIXTURE" --json
+BAD_OCI_TLS_RUN_ID="$("$PYTHON" - "${TMP_DIR}/remote_oci_tls.accept.cli.json" <<'PY'
+import json, pathlib, sys
+doc = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+print(doc.get('result', {}).get('run_id') or '')
+PY
+)"
+run_x07lp "${TMP_DIR}/remote_oci_tls.run.run_report.json" "${TMP_DIR}/remote_oci_tls.run.cli.json" \
+  deploy run --target "$BAD_OCI_TLS_TARGET" --accepted-run "$BAD_OCI_TLS_RUN_ID" --json || true
+assert_report_not_ok "${TMP_DIR}/remote_oci_tls.run.cli.json"
+assert_negative_code "${TMP_DIR}/remote_oci_tls.run.cli.json" "LP_RUNTIME_START_FAILED"
 
 run_x07lp "${TMP_DIR}/remote_upload_digest_mismatch.accept.run_report.json" "${TMP_DIR}/remote_upload_digest_mismatch.accept.cli.json" \
-  deploy accept --target "$TARGET_NAME" --pack-manifest "$PHASEA_PACK_BAD" --change "$PHASEB_CHANGE" --json || true
+  deploy accept --target "$TARGET_NAME" --pack-manifest "$PACK_DIGEST_MISMATCH_FIXTURE" --change "$CHANGE_FIXTURE" --json || true
 assert_negative_code "${TMP_DIR}/remote_upload_digest_mismatch.accept.cli.json" "LP_REMOTE_UPLOAD_DIGEST_MISMATCH"
-assert_report_matches_template "${TMP_DIR}/remote_upload_digest_mismatch.accept.cli.json" "${ROOT_DIR}/spec/fixtures/phaseD-oss/remote_upload_digest_mismatch/expected/deploy.accept.report.json"
+assert_report_matches_template "${TMP_DIR}/remote_upload_digest_mismatch.accept.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_upload_digest_mismatch/expected/deploy.accept.report.json"
 
 run_x07lp "${TMP_DIR}/remote_capabilities_mismatch.run_report.json" "${TMP_DIR}/remote_capabilities_mismatch.cli.json" \
   deploy run --target "$CAP_MISMATCH_TARGET" --accepted-run "$PROMOTE_RUN_ID" --json || true
 assert_negative_code "${TMP_DIR}/remote_capabilities_mismatch.cli.json" "LP_REMOTE_CAPABILITIES_UNSUPPORTED"
-assert_report_matches_template "${TMP_DIR}/remote_capabilities_mismatch.cli.json" "${ROOT_DIR}/spec/fixtures/phaseD-oss/remote_capabilities_mismatch/expected/deploy.run.report.json"
+assert_report_matches_template "${TMP_DIR}/remote_capabilities_mismatch.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_capabilities_mismatch/expected/deploy.run.report.json"
 
 run_x07lp "${TMP_DIR}/remote_lease_conflict.accept.run_report.json" "${TMP_DIR}/remote_lease_conflict.accept.cli.json" \
-  deploy accept --target "$TARGET_NAME" --pack-manifest "$PHASEA_PACK" --change "$PHASEB_CHANGE" --json
+  deploy accept --target "$TARGET_NAME" --pack-manifest "$PACK_FIXTURE" --change "$CHANGE_FIXTURE" --json
 LEASE_CONFLICT_RUN_ID="$("$PYTHON" - "${TMP_DIR}/remote_lease_conflict.accept.cli.json" <<'PY'
 import json, pathlib, sys
 doc = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
@@ -792,7 +1021,7 @@ PY
 (
   run_x07lp "${TMP_DIR}/remote_lease_conflict.a.run_report.json" "${TMP_DIR}/remote_lease_conflict.a.cli.json" \
     deploy run --target "$TARGET_NAME" --accepted-run "$LEASE_CONFLICT_RUN_ID" \
-    --fixture spec/fixtures/phaseD-oss/remote_pause_rerun --pause-scale 0.2 --json
+    --fixture spec/fixtures/remote-oss/remote_pause_rerun --pause-scale 0.2 --json
 ) &
 LEASE_CONFLICT_PID=$!
 PIDS+=("$LEASE_CONFLICT_PID")
@@ -800,25 +1029,25 @@ wait_for_pause_step "${TMP_DIR}/remote_state/deploy/${LEASE_CONFLICT_EXEC_ID}.js
 sleep 3
 run_x07lp "${TMP_DIR}/remote_lease_conflict.b.run_report.json" "${TMP_DIR}/remote_lease_conflict.b.cli.json" \
   deploy run --target "$TARGET_NAME" --accepted-run "$LEASE_CONFLICT_RUN_ID" \
-  --fixture spec/fixtures/phaseD-oss/remote_pause_rerun --pause-scale 0.2 --json || true
+  --fixture spec/fixtures/remote-oss/remote_pause_rerun --pause-scale 0.2 --json || true
 assert_negative_code "${TMP_DIR}/remote_lease_conflict.b.cli.json" "LP_REMOTE_LEASE_CONFLICT"
-assert_report_matches_template "${TMP_DIR}/remote_lease_conflict.b.cli.json" "${ROOT_DIR}/spec/fixtures/phaseD-oss/remote_lease_conflict/expected/deploy.run.report.json"
+assert_report_matches_template "${TMP_DIR}/remote_lease_conflict.b.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_lease_conflict/expected/deploy.run.report.json"
 wait "$LEASE_CONFLICT_PID" || true
 
 run_x07lp "${TMP_DIR}/remote_incident_trace_missing.regress.run_report.json" "${TMP_DIR}/remote_incident_trace_missing.regress.cli.json" \
   regress from-incident --target "$TARGET_NAME" --incident-id incident_missing_trace --json || true
 assert_negative_code "${TMP_DIR}/remote_incident_trace_missing.regress.cli.json" "LP_INCIDENT_TRACE_MISSING"
-assert_report_matches_template "${TMP_DIR}/remote_incident_trace_missing.regress.cli.json" "${ROOT_DIR}/spec/fixtures/phaseD-oss/remote_incident_trace_missing/expected/regress.report.json"
+assert_report_matches_template "${TMP_DIR}/remote_incident_trace_missing.regress.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_incident_trace_missing/expected/regress.report.json"
 
 run_x07lp "${TMP_DIR}/remote_query_index_rebuild.query.run_report.json" "${TMP_DIR}/remote_query_index_rebuild.query.cli.json" \
   deploy query --target "$TARGET_NAME" --deployment "$PROMOTE_EXEC_ID" --view summary --rebuild-index --json
-assert_report_matches_template "${TMP_DIR}/remote_query_index_rebuild.query.cli.json" "${ROOT_DIR}/spec/fixtures/phaseD-oss/remote_query_index_rebuild/expected/query.summary.report.json"
+assert_report_matches_template "${TMP_DIR}/remote_query_index_rebuild.query.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_query_index_rebuild/expected/query.summary.report.json"
 
 (
   cd "$ROOT_DIR"
   "$DRIVER_BIN" adapter-conformance --target "$TARGET_NAME" --state-dir "$TMP_DIR/remote_state" --json >"${TMP_DIR}/remote_conformance.cli.json"
 )
 cp "${TMP_DIR}/remote_conformance.cli.json" "${TMP_DIR}/remote_conformance.run_report.json"
-assert_report_matches_template "${TMP_DIR}/remote_conformance.cli.json" "${ROOT_DIR}/spec/fixtures/phaseD-oss/remote_conformance/expected/adapter.conformance.report.json"
+assert_report_matches_template "${TMP_DIR}/remote_conformance.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_conformance/expected/adapter.conformance.report.json"
 
-echo "phaseD-oss ci expectations passed"
+echo "remote-oss ci expectations passed"

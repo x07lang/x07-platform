@@ -1,16 +1,21 @@
+use aes_gcm_siv::{Aes256GcmSiv, KeyInit, Nonce, aead::Aead};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::{Args, Parser, Subcommand};
 use ed25519_dalek::{Signer, SigningKey};
+use native_tls::{Certificate as NativeTlsCertificate, TlsConnector};
 use oci_client::{
     Reference as OciReference,
-    client::{Client as OciClient, ClientConfig as OciClientConfig, ClientProtocol},
+    client::{
+        Certificate as OciCertificate, CertificateEncoding as OciCertificateEncoding,
+        Client as OciClient, ClientConfig as OciClientConfig, ClientProtocol,
+    },
     manifest::OciImageManifest,
     secrets::RegistryAuth,
 };
 use oci_wasm::{ToConfig, WasmConfig};
-use rand::rngs::OsRng;
+use rand::{RngCore, rngs::OsRng};
 use rusqlite::{Connection, params};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
@@ -19,18 +24,21 @@ use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::runtime::Runtime as TokioRuntime;
 use ureq::{Agent, Error as UreqError};
+use url::Url;
 use wadm_client::{Client as WadmClient, ClientConnectOptions as WadmClientConnectOptions};
 use walkdir::WalkDir;
 use wasmcloud_control_interface::{
     Client as WasmcloudCtlClient, ClientBuilder as WasmcloudCtlClientBuilder,
 };
+use x509_parser::prelude::*;
 
 const DEFAULT_STATE_DIR: &str = "out/x07lp_state";
 const DEFAULT_UI_ADDR: &str = "127.0.0.1:17090";
@@ -44,10 +52,13 @@ const REMOTE_COMPONENT_REGISTRY: &str = "lp.impl.component_registry.oci_v1";
 const REMOTE_ARTIFACT_KIND: &str = "x07.app.pack@0.1.0";
 const REMOTE_SERVER_ID: &str = "x07lpd-oss-self-hosted";
 const DEFAULT_REMOTE_BEARER_TOKEN: &str = "x07lp-oss-dev-token";
-const DEFAULT_REMOTE_SECRET_STORE_FILE: &str = "remote-secret-store.json";
+const DEFAULT_REMOTE_SECRET_STORE_FILE: &str = "remote-secret-store.enc.json";
 const DEFAULT_REMOTE_OTLP_EXPORT_FILE: &str = "collector-metrics.jsonl";
 const DEFAULT_REMOTE_NATS_URL: &str = "nats://127.0.0.1:4222";
 const DEFAULT_REMOTE_LATTICE: &str = "default";
+const REMOTE_SECRET_MASTER_KEY_FILE_ENV: &str = "X07LP_REMOTE_SECRET_MASTER_KEY_FILE";
+const REMOTE_SECRET_STORE_SCHEMA_VERSION: &str = "lp.remote.secret.store.encrypted.internal@0.1.0";
+const REMOTE_SECRET_STORE_ALG: &str = "aes-256-gcm-siv";
 const REMOTE_EDGE_ROUTE_PREFIX: &str = "/r";
 const REMOTE_ROUTE_KEY_HEADER: &str = "X-LP-Route-Key";
 const REMOTE_HTTP_SERVER_PROVIDER_IMAGE: &str = "ghcr.io/wasmcloud/http-server:0.27.0";
@@ -88,6 +99,31 @@ struct RemoteProviderDeployment {
     host_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetTlsMode {
+    System,
+    CaBundle,
+    PinnedSpki,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetOciTlsMode {
+    System,
+    CaBundle,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedOciAuth {
+    username_ref: String,
+    password_ref: String,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedOciTls {
+    mode: TargetOciTlsMode,
+    ca_bundle_path: Option<PathBuf>,
+}
+
 #[derive(Parser, Debug)]
 #[command(disable_help_subcommand = true, version = TOOL_VERSION)]
 struct Cli {
@@ -120,6 +156,8 @@ enum Commands {
     TargetUse(TargetUseArgs),
     TargetRemove(TargetRemoveArgs),
     AdapterConformance(AdapterConformanceArgs),
+    #[command(hide = true)]
+    SecretStorePack(SecretStorePackArgs),
     UiServe(UiServeArgs),
 }
 
@@ -385,6 +423,14 @@ struct AdapterConformanceArgs {
     common: CommonStateArgs,
 }
 
+#[derive(Args, Debug)]
+struct SecretStorePackArgs {
+    #[arg(long)]
+    input: String,
+    #[arg(long)]
+    output: String,
+}
+
 fn main() -> std::process::ExitCode {
     match real_main() {
         Ok(code) => std::process::ExitCode::from(code as u8),
@@ -422,6 +468,7 @@ fn real_main() -> Result<i32> {
         Commands::TargetUse(args) => command_target_use(args)?,
         Commands::TargetRemove(args) => command_target_remove(args)?,
         Commands::AdapterConformance(args) => command_adapter_conformance(args)?,
+        Commands::SecretStorePack(args) => command_secret_store_pack(args)?,
     };
     println!("{}", String::from_utf8(canon_json_bytes(&report))?);
     Ok(report.get("exit_code").and_then(Value::as_i64).unwrap_or(0) as i32)
@@ -579,12 +626,151 @@ fn ensure_x07lp_config_layout() -> Result<()> {
     Ok(())
 }
 
+fn ensure_regular_file(path: &Path, label: &str) -> Result<()> {
+    let metadata = fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    if !metadata.is_file() {
+        bail!("{label} must be a file: {}", path.display());
+    }
+    Ok(())
+}
+
+fn validate_sha256_prefixed(value: &str, label: &str) -> Result<()> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        bail!("{label} must start with sha256:");
+    };
+    if hex.len() != 64 || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        bail!("{label} must be a 32-byte sha256 digest");
+    }
+    Ok(())
+}
+
 fn target_name_is_valid(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+fn parse_url(raw: &str) -> Result<Url> {
+    Url::parse(raw).with_context(|| format!("invalid URL: {raw}"))
+}
+
+fn loopback_url(url: &Url) -> bool {
+    url.host_str().map(loopback_host).unwrap_or(false)
+}
+
+fn text_ref_path(raw: &str) -> Result<PathBuf> {
+    let path = raw
+        .strip_prefix("file://")
+        .ok_or_else(|| anyhow!("unsupported ref scheme: expected file://"))?;
+    expand_user_path(path)
+}
+
+fn load_text_ref(raw: &str) -> Result<String> {
+    let path = text_ref_path(raw)?;
+    let value = fs::read_to_string(&path)
+        .with_context(|| format!("read {}", path.display()))?
+        .trim()
+        .to_string();
+    if value.is_empty() {
+        bail!("empty ref content: {}", path.display());
+    }
+    Ok(value)
+}
+
+fn load_pem_certificates(path: &Path) -> Result<Vec<Vec<u8>>> {
+    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let text = String::from_utf8(bytes).with_context(|| format!("decode {}", path.display()))?;
+    let begin = "-----BEGIN CERTIFICATE-----";
+    let end = "-----END CERTIFICATE-----";
+    let mut certs = Vec::new();
+    let mut offset = 0usize;
+    while let Some(start_rel) = text[offset..].find(begin) {
+        let start = offset + start_rel;
+        let end_rel = text[start..]
+            .find(end)
+            .ok_or_else(|| anyhow!("unterminated certificate PEM in {}", path.display()))?;
+        let finish = start + end_rel + end.len();
+        certs.push(text[start..finish].as_bytes().to_vec());
+        offset = finish;
+    }
+    if certs.is_empty() {
+        bail!("no PEM certificates found in {}", path.display());
+    }
+    Ok(certs)
+}
+
+fn native_tls_connector(ca_bundle_path: Option<&Path>) -> Result<Arc<TlsConnector>> {
+    let mut builder = TlsConnector::builder();
+    if let Some(path) = ca_bundle_path {
+        for cert in load_pem_certificates(path)? {
+            let cert = NativeTlsCertificate::from_pem(&cert)
+                .with_context(|| format!("parse PEM certificate in {}", path.display()))?;
+            builder.add_root_certificate(cert);
+        }
+    }
+    Ok(Arc::new(builder.build().context("build TLS connector")?))
+}
+
+fn sha256_prefixed(bytes: &[u8]) -> String {
+    format!("sha256:{}", sha256_hex(bytes))
+}
+
+fn spki_pin_from_cert(cert_der: &[u8]) -> Result<String> {
+    let (_rest, cert) = X509Certificate::from_der(cert_der).context("parse peer certificate")?;
+    Ok(sha256_prefixed(cert.tbs_certificate.subject_pki.raw))
+}
+
+fn tls_mode_from_profile(
+    profile: &Value,
+) -> Result<(TargetTlsMode, Option<PathBuf>, Option<String>)> {
+    let mode = match get_str(profile, &["tls", "mode"]).as_deref() {
+        Some("ca_bundle") => TargetTlsMode::CaBundle,
+        Some("pinned_spki") => TargetTlsMode::PinnedSpki,
+        Some("system") | None => TargetTlsMode::System,
+        Some(other) => bail!("unsupported tls.mode: {other}"),
+    };
+    let ca_bundle_path = get_str(profile, &["tls", "ca_bundle_path"])
+        .map(|raw| expand_user_path(&raw))
+        .transpose()?;
+    let pinned_spki_sha256 = get_str(profile, &["tls", "pinned_spki_sha256"]);
+    Ok((mode, ca_bundle_path, pinned_spki_sha256))
+}
+
+fn oci_auth_from_profile(profile: &Value) -> Result<Option<ResolvedOciAuth>> {
+    let Some(kind) = get_str(profile, &["oci_auth", "kind"]) else {
+        return Ok(None);
+    };
+    if kind != "basic" {
+        bail!("unsupported oci_auth.kind: {kind}");
+    }
+    let username_ref = get_str(profile, &["oci_auth", "username_ref"])
+        .ok_or_else(|| anyhow!("missing oci_auth.username_ref"))?;
+    let password_ref = get_str(profile, &["oci_auth", "password_ref"])
+        .ok_or_else(|| anyhow!("missing oci_auth.password_ref"))?;
+    Ok(Some(ResolvedOciAuth {
+        username_ref,
+        password_ref,
+    }))
+}
+
+fn oci_tls_from_profile(profile: &Value) -> Result<Option<ResolvedOciTls>> {
+    let Some(mode) = get_str(profile, &["oci_tls", "mode"]) else {
+        return Ok(None);
+    };
+    let mode = match mode.as_str() {
+        "system" => TargetOciTlsMode::System,
+        "ca_bundle" => TargetOciTlsMode::CaBundle,
+        other => bail!("unsupported oci_tls.mode: {other}"),
+    };
+    let ca_bundle_path = get_str(profile, &["oci_tls", "ca_bundle_path"])
+        .map(|raw| expand_user_path(&raw))
+        .transpose()?;
+    Ok(Some(ResolvedOciTls {
+        mode,
+        ca_bundle_path,
+    }))
 }
 
 fn validate_target_profile_doc(doc: &Value) -> Result<()> {
@@ -604,8 +790,66 @@ fn validate_target_profile_doc(doc: &Value) -> Result<()> {
     if get_str(doc, &["auth", "kind"]).as_deref() != Some("static_bearer") {
         bail!("invalid target auth.kind");
     }
-    if get_str(doc, &["base_url"]).unwrap_or_default().is_empty() {
+    let base_url = get_str(doc, &["base_url"]).ok_or_else(|| anyhow!("missing target base_url"))?;
+    let parsed = parse_url(&base_url)?;
+    match parsed.scheme() {
+        "https" => {}
+        "http" if loopback_url(&parsed) => {}
+        "http" => bail!("non-loopback remote targets must use https://"),
+        other => bail!("unsupported target URL scheme: {other}"),
+    }
+    if parsed.host_str().is_none() {
         bail!("missing target base_url");
+    }
+    let (tls_mode, ca_bundle_path, pinned_spki_sha256) = tls_mode_from_profile(doc)?;
+    if parsed.scheme() == "http" && !matches!(tls_mode, TargetTlsMode::System) {
+        bail!("http:// targets cannot use custom TLS trust modes");
+    }
+    if matches!(tls_mode, TargetTlsMode::CaBundle) && ca_bundle_path.is_none() {
+        bail!("tls.ca_bundle_path is required when tls.mode=ca_bundle");
+    }
+    if matches!(tls_mode, TargetTlsMode::PinnedSpki) && pinned_spki_sha256.is_none() {
+        bail!("tls.pinned_spki_sha256 is required when tls.mode=pinned_spki");
+    }
+    if let Some(path) = ca_bundle_path.as_deref() {
+        ensure_regular_file(path, "tls.ca_bundle_path")?;
+        let _ = load_pem_certificates(path)?;
+    }
+    if let Some(pin) = pinned_spki_sha256.as_deref() {
+        validate_sha256_prefixed(pin, "tls.pinned_spki_sha256")?;
+    }
+    let token_ref = get_str(doc, &["auth", "token_ref"])
+        .ok_or_else(|| anyhow!("missing target auth.token_ref"))?;
+    let _ = load_text_ref(&token_ref)?;
+    let has_registry = get_str(doc, &["oci_registry"]).is_some();
+    if let Some(registry) = get_str(doc, &["oci_registry"])
+        && registry.trim_start().starts_with("http://")
+    {
+        bail!("oci_registry must not use http://");
+    }
+    let oci_auth = oci_auth_from_profile(doc)?;
+    let oci_tls = oci_tls_from_profile(doc)?;
+    if has_registry && oci_auth.is_none() {
+        bail!("oci_auth is required when oci_registry is set");
+    }
+    if has_registry && oci_tls.is_none() {
+        bail!("oci_tls is required when oci_registry is set");
+    }
+    if let Some(oci_tls) = oci_tls.as_ref()
+        && matches!(oci_tls.mode, TargetOciTlsMode::CaBundle)
+        && oci_tls.ca_bundle_path.is_none()
+    {
+        bail!("oci_tls.ca_bundle_path is required when oci_tls.mode=ca_bundle");
+    }
+    if let Some(oci_auth) = oci_auth.as_ref() {
+        let _ = load_text_ref(&oci_auth.username_ref)?;
+        let _ = load_text_ref(&oci_auth.password_ref)?;
+    }
+    if let Some(oci_tls) = oci_tls.as_ref()
+        && let Some(path) = oci_tls.ca_bundle_path.as_deref()
+    {
+        ensure_regular_file(path, "oci_tls.ca_bundle_path")?;
+        let _ = load_pem_certificates(path)?;
     }
     Ok(())
 }
@@ -702,13 +946,45 @@ fn write_json(path: &Path, value: &Value) -> Result<Vec<u8>> {
         file.sync_all()
             .with_context(|| format!("sync {}", temp_path.display()))?;
     }
-    fs::rename(&temp_path, path).with_context(|| {
-        format!(
-            "rename {} -> {}",
-            temp_path.display(),
-            path.display()
-        )
-    })?;
+    fs::rename(&temp_path, path)
+        .with_context(|| format!("rename {} -> {}", temp_path.display(), path.display()))?;
+    Ok(bytes)
+}
+
+fn write_bytes_600(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+    }
+    let temp_path = path.with_extension(format!(
+        "{}.tmp.{}.{}",
+        path.extension().and_then(OsStr::to_str).unwrap_or("bin"),
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or_default()
+    ));
+    {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .with_context(|| format!("create {}", temp_path.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("write {}", temp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("sync {}", temp_path.display()))?;
+    }
+    fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("chmod 600 {}", temp_path.display()))?;
+    fs::rename(&temp_path, path)
+        .with_context(|| format!("rename {} -> {}", temp_path.display(), path.display()))?;
+    Ok(())
+}
+
+fn write_json_600(path: &Path, value: &Value) -> Result<Vec<u8>> {
+    let bytes = canon_json_bytes(value);
+    write_bytes_600(path, &bytes)?;
     Ok(bytes)
 }
 
@@ -1207,9 +1483,11 @@ fn remote_registry_host(raw: &str) -> String {
         .to_string()
 }
 
-fn remote_registry_base_url(raw: &str) -> String {
+fn remote_registry_base_url(raw: &str, oci_tls: Option<&ResolvedOciTls>) -> String {
     if raw.trim_start().starts_with("http://") || raw.trim_start().starts_with("https://") {
         raw.trim_end_matches('/').to_string()
+    } else if oci_tls.is_some() {
+        format!("https://{}", remote_registry_host(raw))
     } else {
         format!("http://{}", remote_registry_host(raw))
     }
@@ -1224,8 +1502,70 @@ fn remote_runtime_registry_host(raw: &str) -> String {
     }
     let host = remote_registry_host(raw);
     match host.as_str() {
+        "127.0.0.1:15443" | "localhost:15443" => "gateway:5443".to_string(),
         "127.0.0.1:15000" | "localhost:15000" => "registry:5000".to_string(),
         _ => host,
+    }
+}
+
+fn oci_auth_credentials(profile: &Value) -> Result<(String, String)> {
+    let auth = oci_auth_from_profile(profile)?
+        .ok_or_else(|| anyhow!("remote target profile missing oci_auth"))?;
+    Ok((
+        load_text_ref(&auth.username_ref)?,
+        load_text_ref(&auth.password_ref)?,
+    ))
+}
+
+fn oci_tls_config(profile: &Value) -> Result<ResolvedOciTls> {
+    oci_tls_from_profile(profile)?.ok_or_else(|| anyhow!("remote target profile missing oci_tls"))
+}
+
+fn oci_extra_root_certificates(oci_tls: &ResolvedOciTls) -> Result<Vec<OciCertificate>> {
+    let Some(path) = oci_tls.ca_bundle_path.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let mut certs = Vec::new();
+    for cert in load_pem_certificates(path)? {
+        certs.push(OciCertificate {
+            encoding: OciCertificateEncoding::Pem,
+            data: cert,
+        });
+    }
+    Ok(certs)
+}
+
+fn oci_registry_agent(oci_tls: &ResolvedOciTls) -> Result<Agent> {
+    agent_with_ca_bundle(oci_tls.ca_bundle_path.as_deref())
+}
+
+fn oci_registry_auth_header(profile: &Value) -> Result<String> {
+    let (username, password) = oci_auth_credentials(profile)?;
+    Ok(format!(
+        "Basic {}",
+        BASE64.encode(format!("{username}:{password}"))
+    ))
+}
+
+fn oci_registry_catalog(profile: &Value) -> Result<Value> {
+    let registry = get_str(profile, &["oci_registry"])
+        .ok_or_else(|| anyhow!("remote target profile missing oci_registry"))?;
+    let oci_tls = oci_tls_config(profile)?;
+    let agent = oci_registry_agent(&oci_tls)?;
+    let authz = oci_registry_auth_header(profile)?;
+    let url = format!(
+        "{}/v2/_catalog",
+        remote_registry_base_url(&registry, Some(&oci_tls))
+    );
+    match agent
+        .request("GET", &url)
+        .set("accept", "application/json")
+        .set("authorization", &authz)
+        .call()
+    {
+        Ok(response) => decode_http_json_response(response),
+        Err(UreqError::Status(_, response)) => decode_http_json_response(response),
+        Err(UreqError::Transport(err)) => bail!("registry catalog probe failed: {url}: {err}"),
     }
 }
 
@@ -1236,80 +1576,6 @@ fn remote_exec_public_listener(base_url: &str, exec_id: &str) -> String {
         REMOTE_EDGE_ROUTE_PREFIX.trim_start_matches('/'),
         exec_id
     )
-}
-
-fn resolve_registry_upload_url(base_url: &str, location: &str) -> String {
-    if location.starts_with("http://") || location.starts_with("https://") {
-        location.to_string()
-    } else if location.starts_with('/') {
-        format!("{}{}", base_url.trim_end_matches('/'), location)
-    } else {
-        format!("{}/{}", base_url.trim_end_matches('/'), location)
-    }
-}
-
-fn registry_upload_blob(
-    base_url: &str,
-    repository: &str,
-    bytes: &[u8],
-    digest: &str,
-    content_type: &str,
-) -> Result<()> {
-    let start_url = format!("{}/v2/{repository}/blobs/uploads/", base_url.trim_end_matches('/'));
-    let response = match remote_agent().request("POST", &start_url).call() {
-        Ok(response) => response,
-        Err(UreqError::Status(_, response)) => response,
-        Err(UreqError::Transport(err)) => bail!("start OCI blob upload failed: {err}"),
-    };
-    let status = response.status();
-    if status != 202 {
-        bail!("start OCI blob upload returned unexpected status {status}");
-    }
-    let upload_url = response
-        .header("location")
-        .map(|value| resolve_registry_upload_url(base_url, value))
-        .ok_or_else(|| anyhow!("OCI registry upload response missing Location header"))?;
-    let separator = if upload_url.contains('?') { "&" } else { "?" };
-    let finalize_url = format!("{upload_url}{separator}digest={digest}");
-    let response = match remote_agent()
-        .request("PUT", &finalize_url)
-        .set("content-type", content_type)
-        .send_bytes(bytes)
-    {
-        Ok(response) => response,
-        Err(UreqError::Status(_, response)) => response,
-        Err(UreqError::Transport(err)) => bail!("finalize OCI blob upload failed: {err}"),
-    };
-    if response.status() != 201 {
-        bail!(
-            "finalize OCI blob upload for {repository} returned unexpected status {}",
-            response.status()
-        );
-    }
-    Ok(())
-}
-
-fn registry_put_manifest(base_url: &str, repository: &str, tag: &str, bytes: &[u8]) -> Result<()> {
-    let url = format!(
-        "{}/v2/{repository}/manifests/{tag}",
-        base_url.trim_end_matches('/')
-    );
-    let response = match remote_agent()
-        .request("PUT", &url)
-        .set("content-type", "application/vnd.oci.image.manifest.v1+json")
-        .send_bytes(bytes)
-    {
-        Ok(response) => response,
-        Err(UreqError::Status(_, response)) => response,
-        Err(UreqError::Transport(err)) => bail!("push OCI manifest failed: {err}"),
-    };
-    if response.status() != 201 {
-        bail!(
-            "push OCI manifest for {repository}:{tag} returned unexpected status {}",
-            response.status()
-        );
-    }
-    Ok(())
 }
 
 fn remote_router_state_path(state_dir: &Path, exec_id: &str) -> PathBuf {
@@ -1404,7 +1670,10 @@ fn remote_slot_provider_id(exec_id: &str, slot: &str) -> String {
     format!("lp-{exec_id}-{slot}-httpserver")
 }
 
-fn load_backend_component_from_run(state_dir: &Path, run_doc: &Value) -> Result<(String, Vec<u8>, Value)> {
+fn load_backend_component_from_run(
+    state_dir: &Path,
+    run_doc: &Value,
+) -> Result<(String, Vec<u8>, Value)> {
     let (manifest, _manifest_raw) = load_pack_manifest_from_run(state_dir, run_doc)?;
     let component = get_path(&manifest, &["backend", "component"])
         .and_then(Value::as_object)
@@ -1503,16 +1772,17 @@ fn publish_remote_component(
 ) -> Result<(String, String, String, String)> {
     let registry = get_str(target_profile, &["oci_registry"])
         .ok_or_else(|| anyhow!("remote target profile missing oci_registry"))?;
-    let namespace = get_str(target_profile, &["default_namespace"])
-        .unwrap_or_else(|| environment.to_string());
+    let namespace =
+        get_str(target_profile, &["default_namespace"]).unwrap_or_else(|| environment.to_string());
     let repository = app_id.to_string();
     let push_ref = format!("{registry}/{namespace}/{repository}:sha256-{component_sha}");
     let push_reference = OciReference::try_from(push_ref.as_str())
         .with_context(|| format!("invalid OCI reference: {push_ref}"))?;
     let runtime_registry = remote_runtime_registry_host(&registry);
-    let (wasm_config, image_layer) =
-        WasmConfig::from_raw_component(component_bytes.to_vec(), None)
-            .context("failed to create WebAssembly OCI config from remote component")?;
+    let oci_tls = oci_tls_config(target_profile)?;
+    let (registry_username, registry_password) = oci_auth_credentials(target_profile)?;
+    let (wasm_config, image_layer) = WasmConfig::from_raw_component(component_bytes.to_vec(), None)
+        .context("failed to create WebAssembly OCI config from remote component")?;
     let config_obj = wasm_config
         .to_config()
         .context("failed to convert remote component OCI config")?;
@@ -1521,15 +1791,20 @@ fn publish_remote_component(
         format!("{app_id}-backend"),
     )]));
     let manifest = OciImageManifest::build(&[image_layer.clone()], &config_obj, annotations);
-    let protocol = if remote_registry_base_url(&registry).starts_with("http://") {
+    let registry_base_url = remote_registry_base_url(&registry, Some(&oci_tls));
+    let protocol = if registry_base_url.starts_with("http://") {
         ClientProtocol::Http
     } else {
         ClientProtocol::Https
     };
     let client = OciClient::new(OciClientConfig {
         protocol,
+        extra_root_certificates: oci_extra_root_certificates(&oci_tls)?,
+        accept_invalid_certificates: false,
+        accept_invalid_hostnames: false,
         ..Default::default()
     });
+    let registry_auth = RegistryAuth::Basic(registry_username, registry_password);
     let runtime = tokio_runtime()?;
     let push_result = runtime.block_on(async {
         client
@@ -1537,7 +1812,7 @@ fn publish_remote_component(
                 &push_reference,
                 &[image_layer],
                 config_obj,
-                &RegistryAuth::Anonymous,
+                &registry_auth,
                 Some(manifest),
             )
             .await
@@ -1547,7 +1822,7 @@ fn publish_remote_component(
     } else {
         runtime.block_on(async {
             client
-                .fetch_manifest_digest(&push_reference, &RegistryAuth::Anonymous)
+                .fetch_manifest_digest(&push_reference, &registry_auth)
                 .await
         })?
     };
@@ -1664,9 +1939,10 @@ fn prepare_remote_provider_deployment(
     let target_profile = get_path(exec_doc, &["meta", "ext", "remote", "target_profile"])
         .cloned()
         .ok_or_else(|| anyhow!("missing remote target profile"))?;
-    let base_url = get_str(&target_profile, &["base_url"]).ok_or_else(|| anyhow!("missing remote base_url"))?;
-    let app_id = get_str(exec_doc, &["meta", "target", "app_id"])
-        .unwrap_or_else(|| "unknown".to_string());
+    let base_url = get_str(&target_profile, &["base_url"])
+        .ok_or_else(|| anyhow!("missing remote base_url"))?;
+    let app_id =
+        get_str(exec_doc, &["meta", "target", "app_id"]).unwrap_or_else(|| "unknown".to_string());
     let environment = get_str(exec_doc, &["meta", "target", "environment"])
         .unwrap_or_else(|| "unknown".to_string());
     let lattice_id = get_str(&target_profile, &["lattice_id"])
@@ -1773,9 +2049,7 @@ fn persist_remote_provider_deployment(
             "candidate": deployment.component_digest,
         }),
     );
-    let ext_value = meta
-        .entry("ext".to_string())
-        .or_insert_with(|| json!({}));
+    let ext_value = meta.entry("ext".to_string()).or_insert_with(|| json!({}));
     let ext_map = ensure_object(ext_value);
     let remote_value = ext_map
         .entry("remote".to_string())
@@ -1981,7 +2255,9 @@ fn authority_host_port(raw: &str, default_port: u16) -> Option<(String, u16)> {
         return None;
     }
     if let Some((host, port)) = authority.rsplit_once(':') {
-        if !host.is_empty() && let Ok(port) = port.parse::<u16>() {
+        if !host.is_empty()
+            && let Ok(port) = port.parse::<u16>()
+        {
             return Some((host.to_string(), port));
         }
     }
@@ -1989,10 +2265,7 @@ fn authority_host_port(raw: &str, default_port: u16) -> Option<(String, u16)> {
 }
 
 fn url_host_port(raw: &str, default_port: u16) -> Option<(String, u16)> {
-    let without_scheme = raw
-        .split_once("://")
-        .map(|(_, rest)| rest)
-        .unwrap_or(raw);
+    let without_scheme = raw.split_once("://").map(|(_, rest)| rest).unwrap_or(raw);
     let authority = without_scheme.split('/').next().unwrap_or_default();
     authority_host_port(authority, default_port)
 }
@@ -2019,7 +2292,11 @@ fn tcp_probe(host: &str, port: u16, timeout: Duration) -> Result<()> {
 }
 
 fn http_probe(url: &str, ok_statuses: &[u16]) -> Result<u16> {
-    match remote_agent().request("GET", url).call() {
+    http_probe_with_agent(&remote_agent(), url, ok_statuses)
+}
+
+fn http_probe_with_agent(agent: &Agent, url: &str, ok_statuses: &[u16]) -> Result<u16> {
+    match agent.request("GET", url).call() {
         Ok(response) => Ok(response.status()),
         Err(UreqError::Status(code, _response)) if ok_statuses.contains(&code) => Ok(code),
         Err(UreqError::Status(code, _response)) => {
@@ -2027,6 +2304,12 @@ fn http_probe(url: &str, ok_statuses: &[u16]) -> Result<u16> {
         }
         Err(UreqError::Transport(err)) => bail!("GET {url} failed: {err}"),
     }
+}
+
+fn http_probe_with_profile(profile: &Value, url: &str, ok_statuses: &[u16]) -> Result<u16> {
+    enforce_profile_spki_pin(profile, url)?;
+    let agent = profile_agent(profile)?;
+    http_probe_with_agent(&agent, url, ok_statuses)
 }
 
 fn remote_probe_check(name: &str, ok: bool, details: &str) -> Value {
@@ -2048,10 +2331,16 @@ fn run_remote_runtime_probe(exec_id: &str, work_dir: &Path, remote: &Value) -> R
     let public_listener = get_str(remote, &["routing", "public_base_url"])
         .unwrap_or_else(|| remote_exec_public_listener(&base_url, exec_id));
     let candidate_upstream = get_str(remote, &["routing", "candidate_upstream"])
-        .or_else(|| get_str(remote, &["runtime", "candidate_bind_addr"]).map(|value| format!("http://{value}")))
+        .or_else(|| {
+            get_str(remote, &["runtime", "candidate_bind_addr"])
+                .map(|value| format!("http://{value}"))
+        })
         .unwrap_or_default();
     let candidate_app_name = get_str(remote, &["runtime", "candidate_app_name"])
         .unwrap_or_else(|| remote_slot_app_name(exec_id, "candidate"));
+    let target_profile = get_path(remote, &["target_profile"])
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     let lattice_id = get_str(remote, &["runtime", "lattice_id"])
         .unwrap_or_else(|| DEFAULT_REMOTE_LATTICE.to_string());
     let timeout = Duration::from_secs(2);
@@ -2059,7 +2348,8 @@ fn run_remote_runtime_probe(exec_id: &str, work_dir: &Path, remote: &Value) -> R
     let mut diagnostics = Vec::new();
 
     if !base_url.is_empty() {
-        match http_probe(
+        match http_probe_with_profile(
+            &target_profile,
             &format!("{}/v1/health", base_url.trim_end_matches('/')),
             &[200],
         ) {
@@ -2075,31 +2365,26 @@ fn run_remote_runtime_probe(exec_id: &str, work_dir: &Path, remote: &Value) -> R
                     &format!("control plane probe failed: {err}"),
                     "error",
                 ));
-                checks.push(remote_probe_check(
-                    "control_plane",
-                    false,
-                    &err.to_string(),
-                ));
+                checks.push(remote_probe_check("control_plane", false, &err.to_string()));
             }
         }
     }
 
-    if let Some(registry) = registry.as_deref() {
-        let registry_url = if registry.contains("://") {
-            format!("{}/v2/_catalog", registry.trim_end_matches('/'))
-        } else {
-            format!("http://{registry}/v2/_catalog")
-        };
-        match remote_agent().request("GET", &registry_url).call() {
-            Ok(response) => {
-                let body = decode_http_json_response(response).unwrap_or_else(|_| json!({}));
+    if registry.is_some() {
+        match oci_registry_catalog(&target_profile) {
+            Ok(body) => {
                 let repository = get_str(remote, &["publish", "repository"]).unwrap_or_default();
                 let namespace = get_str(remote, &["publish", "namespace"]).unwrap_or_default();
                 let expected = format!("{namespace}/{repository}");
                 let found = body
                     .get("repositories")
                     .and_then(Value::as_array)
-                    .map(|items| items.iter().filter_map(Value::as_str).any(|item| item == expected))
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .any(|item| item == expected)
+                    })
                     .unwrap_or(false);
                 if found {
                     checks.push(remote_probe_check(
@@ -2141,7 +2426,10 @@ fn run_remote_runtime_probe(exec_id: &str, work_dir: &Path, remote: &Value) -> R
         Ok(host_ids) => checks.push(remote_probe_check(
             "wasmcloud_runtime",
             true,
-            &format!("wasmCloud host inventory returned {} host(s)", host_ids.len()),
+            &format!(
+                "wasmCloud host inventory returned {} host(s)",
+                host_ids.len()
+            ),
         )),
         Err(err) => {
             diagnostics.push(result_diag(
@@ -2201,7 +2489,11 @@ fn run_remote_runtime_probe(exec_id: &str, work_dir: &Path, remote: &Value) -> R
                 &format!("candidate wadm status probe failed: {err}"),
                 "error",
             ));
-            checks.push(remote_probe_check("wadm_candidate", false, &err.to_string()));
+            checks.push(remote_probe_check(
+                "wadm_candidate",
+                false,
+                &err.to_string(),
+            ));
         }
     }
 
@@ -2228,7 +2520,7 @@ fn run_remote_runtime_probe(exec_id: &str, work_dir: &Path, remote: &Value) -> R
         }
     }
 
-    match http_probe(&public_listener, &[200]) {
+    match http_probe_with_profile(&target_profile, &public_listener, &[200]) {
         Ok(_) => checks.push(remote_probe_check(
             "public_listener",
             true,
@@ -2241,7 +2533,11 @@ fn run_remote_runtime_probe(exec_id: &str, work_dir: &Path, remote: &Value) -> R
                 &format!("public listener probe failed: {err}"),
                 "error",
             ));
-            checks.push(remote_probe_check("public_listener", false, &err.to_string()));
+            checks.push(remote_probe_check(
+                "public_listener",
+                false,
+                &err.to_string(),
+            ));
         }
     }
 
@@ -2284,7 +2580,10 @@ fn run_remote_runtime_probe(exec_id: &str, work_dir: &Path, remote: &Value) -> R
         }
     }
 
-    let ok = diagnostics.is_empty() && checks.iter().all(|check| get_bool(check, &["ok"]) == Some(true));
+    let ok = diagnostics.is_empty()
+        && checks
+            .iter()
+            .all(|check| get_bool(check, &["ok"]) == Some(true));
     Ok(json!({
         "schema_version": "lp.runtime.probe.remote@0.1.0",
         "command": "lp.runtime.probe.remote",
@@ -2350,7 +2649,10 @@ fn remote_otlp_payload(
     let time_unix_nano = format!("{}", 1_772_990_000_000_000_000_u64 + analysis_seq as u64);
     let attrs = vec![
         otlp_attr_doc("exec_id", json!({ "stringValue": exec_id })),
-        otlp_attr_doc("analysis_seq", json!({ "intValue": analysis_seq.to_string() })),
+        otlp_attr_doc(
+            "analysis_seq",
+            json!({ "intValue": analysis_seq.to_string() }),
+        ),
     ];
     json!({
         "resourceMetrics": [{
@@ -2433,7 +2735,9 @@ fn remote_metrics_snapshot_from_otlp_export(
     let analysis_seq = analysis_seq.to_string();
     let resource_metrics = export_line.get("resourceMetrics")?.as_array()?;
     for resource_metric in resource_metrics {
-        let scope_metrics = resource_metric.get("scopeMetrics").and_then(Value::as_array)?;
+        let scope_metrics = resource_metric
+            .get("scopeMetrics")
+            .and_then(Value::as_array)?;
         for scope_metric in scope_metrics {
             let metric_docs = scope_metric.get("metrics").and_then(Value::as_array)?;
             for metric_doc in metric_docs {
@@ -2541,13 +2845,15 @@ fn generate_remote_metrics_snapshot(
 ) -> Result<Value> {
     let remote = get_path(exec_doc, &["meta", "ext", "remote"])
         .ok_or_else(|| anyhow!("missing remote execution metadata"))?;
-    let app_id = get_str(exec_doc, &["meta", "target", "app_id"])
-        .unwrap_or_else(|| "app_min".to_string());
+    let app_id =
+        get_str(exec_doc, &["meta", "target", "app_id"]).unwrap_or_else(|| "app_min".to_string());
     let exec_id = get_str(exec_doc, &["exec_id"]).ok_or_else(|| anyhow!("missing exec_id"))?;
     let seed = remote_telemetry_seed(fixture, analysis_seq);
     emit_remote_otlp_metrics(&exec_id, analysis_seq, remote, &app_id, seed)?;
     for _ in 0..20 {
-        if let Some(snapshot) = read_remote_otlp_snapshot(state_dir, &exec_id, analysis_seq, &app_id)? {
+        if let Some(snapshot) =
+            read_remote_otlp_snapshot(state_dir, &exec_id, analysis_seq, &app_id)?
+        {
             return Ok(snapshot);
         }
         thread::sleep(Duration::from_millis(250));
@@ -2619,7 +2925,10 @@ fn run_slo_eval(profile_path: Option<&Path>, metrics_path: &Path) -> Result<(Str
             }
         );
     }
-    bail!("missing SLO profile path for metrics snapshot {}", metrics_path.display())
+    bail!(
+        "missing SLO profile path for metrics snapshot {}",
+        metrics_path.display()
+    )
 }
 
 fn runtime_state_paths(
@@ -2745,19 +3054,27 @@ fn prepare_router_terminal_state(state_dir: &Path, exec_doc: &Value, meta: &Valu
         .and_then(Value::as_array)
         .map(Vec::len)
         .unwrap_or(0);
-    let listener_addr = get_str(meta, &["public_listener"])
-        .unwrap_or_else(|| deterministic_listener(&exec_id));
+    let listener_addr =
+        get_str(meta, &["public_listener"]).unwrap_or_else(|| deterministic_listener(&exec_id));
     let stable_addr = get_str(meta, &["runtime", "stable", "bind_addr"])
         .map(|value| format!("http://{value}"))
         .unwrap_or_else(|| format!("{}/stable", listener_addr));
     let candidate_addr = get_str(meta, &["runtime", "candidate", "bind_addr"])
         .map(|value| format!("http://{value}"))
         .unwrap_or_else(|| format!("{}/candidate", listener_addr));
-    let stable_work_dir = get_str(meta, &["runtime", "stable", "work_dir"])
-        .unwrap_or_else(|| runtime_state_paths(state_dir, &exec_id, "stable")["work"].to_string_lossy().into_owned());
-    let candidate_work_dir = get_str(meta, &["runtime", "candidate", "work_dir"])
-        .unwrap_or_else(|| runtime_state_paths(state_dir, &exec_id, "candidate")["work"].to_string_lossy().into_owned());
-    let api_prefix = get_str(meta, &["routing", "api_prefix"]).unwrap_or_else(|| "/api".to_string());
+    let stable_work_dir = get_str(meta, &["runtime", "stable", "work_dir"]).unwrap_or_else(|| {
+        runtime_state_paths(state_dir, &exec_id, "stable")["work"]
+            .to_string_lossy()
+            .into_owned()
+    });
+    let candidate_work_dir =
+        get_str(meta, &["runtime", "candidate", "work_dir"]).unwrap_or_else(|| {
+            runtime_state_paths(state_dir, &exec_id, "candidate")["work"]
+                .to_string_lossy()
+                .into_owned()
+        });
+    let api_prefix =
+        get_str(meta, &["routing", "api_prefix"]).unwrap_or_else(|| "/api".to_string());
     write_router_state(
         state_dir,
         &exec_id,
@@ -3147,11 +3464,16 @@ fn build_remote_execution_meta(exec_doc: &Value, run_doc: &Value, local_meta: &V
                 "base_url": get_str(&remote, &["server", "base_url"]).unwrap_or_else(|| get_str(local_meta, &["routing", "public_listener"]).unwrap_or_default()),
                 "api_version": REMOTE_API_VERSION,
                 "auth_kind": "static_bearer",
+                "tls": Value::Null,
                 "runtime_provider": REMOTE_RUNTIME_PROVIDER,
                 "routing_provider": REMOTE_ROUTING_PROVIDER,
                 "oci_registry": Value::Null,
+                "oci_auth": Value::Null,
+                "oci_tls": Value::Null,
                 "default_namespace": Value::Null,
-                "default_env": Value::Null
+                "default_env": Value::Null,
+                "lattice_id": Value::Null,
+                "telemetry_collector_hint": Value::Null
             })
         });
     let server = get_path(&remote, &["server"]).cloned().unwrap_or_else(|| {
@@ -4754,21 +5076,17 @@ struct ResolvedTarget {
     name: String,
     base_url: String,
     token: String,
+    tls_mode: TargetTlsMode,
+    ca_bundle_path: Option<PathBuf>,
+    pinned_spki_sha256: Option<String>,
     profile: Value,
 }
 
-fn token_path_from_profile(profile: &Value, name: &str) -> Result<PathBuf> {
-    if let Some(token_ref) = get_str(profile, &["auth", "token_ref"]) {
-        let path = token_ref
-            .strip_prefix("file://")
-            .ok_or_else(|| anyhow!("unsupported token_ref scheme"))?;
-        return expand_user_path(path);
-    }
-    default_target_token_path(name)
-}
-
 fn load_target_token(profile: &Value, name: &str) -> Result<String> {
-    let token_path = token_path_from_profile(profile, name)?;
+    if let Some(token_ref) = get_str(profile, &["auth", "token_ref"]) {
+        return load_text_ref(&token_ref);
+    }
+    let token_path = default_target_token_path(name)?;
     if token_path.exists() {
         let token = fs::read_to_string(&token_path)?.trim().to_string();
         if !token.is_empty() {
@@ -4778,19 +5096,28 @@ fn load_target_token(profile: &Value, name: &str) -> Result<String> {
     Ok(remote_server_token())
 }
 
+fn resolved_target_from_profile_doc(profile: &Value) -> Result<ResolvedTarget> {
+    let name = get_str(profile, &["name"]).ok_or_else(|| anyhow!("missing target name"))?;
+    let base_url = get_str(&profile, &["base_url"]).ok_or_else(|| anyhow!("missing base_url"))?;
+    let (tls_mode, ca_bundle_path, pinned_spki_sha256) = tls_mode_from_profile(&profile)?;
+    let token = load_target_token(&profile, &name)?;
+    Ok(ResolvedTarget {
+        name,
+        base_url,
+        token,
+        tls_mode,
+        ca_bundle_path,
+        pinned_spki_sha256,
+        profile: profile.clone(),
+    })
+}
+
 fn resolve_remote_target(explicit: Option<&str>) -> Result<Option<ResolvedTarget>> {
     let Some(name) = resolve_target_name(explicit)? else {
         return Ok(None);
     };
     let profile = load_target_profile_doc(&name)?;
-    let base_url = get_str(&profile, &["base_url"]).ok_or_else(|| anyhow!("missing base_url"))?;
-    let token = load_target_token(&profile, &name)?;
-    Ok(Some(ResolvedTarget {
-        name,
-        base_url,
-        token,
-        profile,
-    }))
+    Ok(Some(resolved_target_from_profile_doc(&profile)?))
 }
 
 fn required_remote_target(explicit: Option<&str>) -> Result<ResolvedTarget> {
@@ -4821,6 +5148,8 @@ fn build_remote_capabilities_doc() -> Value {
             "weighted_canary": true,
             "otlp": true,
             "server_side_secrets": true,
+            "authenticated_oci_push": true,
+            "registry_tls": true,
             "event_stream": true,
             "signed_control_actions": true
         },
@@ -4863,12 +5192,92 @@ fn build_adapter_capabilities_doc(capabilities: &Value) -> Value {
         "supports_rerun": get_bool(capabilities, &["features", "rerun"]).unwrap_or(true),
         "supports_weighted_canary": get_bool(capabilities, &["features", "weighted_canary"]).unwrap_or(true),
         "supports_otlp": get_bool(capabilities, &["features", "otlp"]).unwrap_or(true),
-        "supports_server_side_secrets": get_bool(capabilities, &["features", "server_side_secrets"]).unwrap_or(true)
+        "supports_server_side_secrets": get_bool(capabilities, &["features", "server_side_secrets"]).unwrap_or(true),
+        "supports_authenticated_oci_push": get_bool(capabilities, &["features", "authenticated_oci_push"]).unwrap_or(true),
+        "supports_registry_tls": get_bool(capabilities, &["features", "registry_tls"]).unwrap_or(true)
     })
 }
 
 fn remote_agent() -> Agent {
     Agent::new()
+}
+
+fn agent_with_ca_bundle(ca_bundle_path: Option<&Path>) -> Result<Agent> {
+    let connector = native_tls_connector(ca_bundle_path)?;
+    Ok(ureq::AgentBuilder::new().tls_connector(connector).build())
+}
+
+fn target_agent(target: &ResolvedTarget) -> Result<Agent> {
+    agent_with_ca_bundle(target.ca_bundle_path.as_deref())
+}
+
+fn url_host_and_port(url: &Url) -> Result<(String, u16)> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow!("missing host in URL: {url}"))?
+        .to_string();
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| anyhow!("missing port in URL: {url}"))?;
+    Ok((host, port))
+}
+
+fn enforce_spki_pin(
+    tls_mode: TargetTlsMode,
+    ca_bundle_path: Option<&Path>,
+    pinned_spki_sha256: Option<&str>,
+    url: &str,
+) -> Result<()> {
+    if !matches!(tls_mode, TargetTlsMode::PinnedSpki) {
+        return Ok(());
+    }
+    let expected = pinned_spki_sha256.ok_or_else(|| anyhow!("missing pinned SPKI hash"))?;
+    let parsed = parse_url(url)?;
+    if parsed.scheme() != "https" {
+        bail!("SPKI pinning requires https://");
+    }
+    let (host, port) = url_host_and_port(&parsed)?;
+    let connector = native_tls_connector(ca_bundle_path)?;
+    let tcp = TcpStream::connect_timeout(
+        &format!("{host}:{port}")
+            .to_socket_addrs()
+            .with_context(|| format!("resolve {host}:{port}"))?
+            .next()
+            .ok_or_else(|| anyhow!("resolve {host}:{port} produced no socket addresses"))?,
+        Duration::from_secs(5),
+    )
+    .with_context(|| format!("connect {host}:{port}"))?;
+    let tls = connector
+        .connect(host.as_str(), tcp)
+        .with_context(|| format!("handshake {host}:{port}"))?;
+    let cert = tls
+        .peer_certificate()
+        .context("inspect peer certificate")?
+        .ok_or_else(|| anyhow!("missing peer certificate"))?;
+    let actual = spki_pin_from_cert(&cert.to_der().context("serialize peer certificate")?)?;
+    if actual != expected {
+        bail!("remote TLS SPKI pin mismatch: expected {expected}, got {actual}");
+    }
+    Ok(())
+}
+
+fn enforce_target_spki_pin(target: &ResolvedTarget, url: &str) -> Result<()> {
+    enforce_spki_pin(
+        target.tls_mode,
+        target.ca_bundle_path.as_deref(),
+        target.pinned_spki_sha256.as_deref(),
+        url,
+    )
+}
+
+fn profile_agent(profile: &Value) -> Result<Agent> {
+    let (_mode, ca_bundle_path, _pin) = tls_mode_from_profile(profile)?;
+    agent_with_ca_bundle(ca_bundle_path.as_deref())
+}
+
+fn enforce_profile_spki_pin(profile: &Value, url: &str) -> Result<()> {
+    let (mode, ca_bundle_path, pin) = tls_mode_from_profile(profile)?;
+    enforce_spki_pin(mode, ca_bundle_path.as_deref(), pin.as_deref(), url)
 }
 
 fn remote_server_token() -> String {
@@ -4890,6 +5299,97 @@ fn remote_secret_store_path(state_dir: &Path) -> PathBuf {
         })
 }
 
+fn empty_remote_secret_store_doc() -> Value {
+    json!({
+        "schema_version": "lp.remote.secret.store.internal@0.1.0",
+        "targets": {}
+    })
+}
+
+fn ensure_owner_only_file(path: &Path, label: &str) -> Result<()> {
+    let mode = fs::metadata(path)
+        .with_context(|| format!("stat {}", path.display()))?
+        .permissions()
+        .mode()
+        & 0o777;
+    if mode != 0o600 {
+        bail!("{label} must have mode 0600: {}", path.display());
+    }
+    Ok(())
+}
+
+fn remote_secret_master_key_path() -> Result<PathBuf> {
+    let raw = std::env::var_os(REMOTE_SECRET_MASTER_KEY_FILE_ENV)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("missing {REMOTE_SECRET_MASTER_KEY_FILE_ENV}"))?;
+    expand_user_path(&raw.to_string_lossy())
+}
+
+fn load_remote_secret_master_key() -> Result<[u8; 32]> {
+    let path = remote_secret_master_key_path()?;
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("read {}", path.display()))?
+        .trim()
+        .to_string();
+    if raw.is_empty() {
+        bail!("empty remote secret master key file: {}", path.display());
+    }
+    let decoded =
+        hex::decode(&raw).with_context(|| format!("decode master key {}", path.display()))?;
+    let bytes: [u8; 32] = decoded.try_into().map_err(|_| {
+        anyhow!(
+            "remote secret master key must be 32 bytes: {}",
+            path.display()
+        )
+    })?;
+    Ok(bytes)
+}
+
+fn encrypt_remote_secret_store_doc(doc: &Value, key: &[u8; 32]) -> Result<Value> {
+    let cipher = Aes256GcmSiv::new_from_slice(key).context("create secret-store cipher")?;
+    let mut nonce = [0u8; 12];
+    OsRng.fill_bytes(&mut nonce);
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), canon_json_bytes(doc).as_ref())
+        .map_err(|_| anyhow!("encrypt remote secret store"))?;
+    Ok(json!({
+        "schema_version": REMOTE_SECRET_STORE_SCHEMA_VERSION,
+        "alg": REMOTE_SECRET_STORE_ALG,
+        "nonce_b64": BASE64.encode(nonce),
+        "ciphertext_b64": BASE64.encode(ciphertext)
+    }))
+}
+
+fn decrypt_remote_secret_store_doc(envelope: &Value, key: &[u8; 32]) -> Result<Value> {
+    if get_str(envelope, &["schema_version"]).as_deref() != Some(REMOTE_SECRET_STORE_SCHEMA_VERSION)
+    {
+        bail!("invalid remote secret store schema_version");
+    }
+    if get_str(envelope, &["alg"]).as_deref() != Some(REMOTE_SECRET_STORE_ALG) {
+        bail!("invalid remote secret store alg");
+    }
+    let nonce = BASE64
+        .decode(
+            get_str(envelope, &["nonce_b64"])
+                .ok_or_else(|| anyhow!("missing remote secret store nonce_b64"))?,
+        )
+        .context("decode remote secret store nonce")?;
+    let ciphertext = BASE64
+        .decode(
+            get_str(envelope, &["ciphertext_b64"])
+                .ok_or_else(|| anyhow!("missing remote secret store ciphertext_b64"))?,
+        )
+        .context("decode remote secret store ciphertext")?;
+    if nonce.len() != 12 {
+        bail!("invalid remote secret store nonce length");
+    }
+    let cipher = Aes256GcmSiv::new_from_slice(key).context("create secret-store cipher")?;
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(&nonce), ciphertext.as_ref())
+        .map_err(|_| anyhow!("decrypt remote secret store"))?;
+    serde_json::from_slice(&plaintext).context("parse decrypted remote secret store")
+}
+
 fn remote_otlp_export_path(state_dir: &Path) -> PathBuf {
     std::env::var_os("X07LP_REMOTE_OTLP_EXPORT_PATH")
         .filter(|value| !value.is_empty())
@@ -4905,12 +5405,12 @@ fn remote_otlp_export_path(state_dir: &Path) -> PathBuf {
 fn load_remote_secret_store(state_dir: &Path) -> Result<Value> {
     let path = remote_secret_store_path(state_dir);
     if !path.exists() {
-        return Ok(json!({
-            "schema_version": "lp.remote.secret.store.internal@0.1.0",
-            "targets": {}
-        }));
+        return Ok(empty_remote_secret_store_doc());
     }
-    load_json(&path)
+    ensure_owner_only_file(&path, "remote secret store")?;
+    let key = load_remote_secret_master_key()?;
+    let envelope = load_json(&path)?;
+    decrypt_remote_secret_store_doc(&envelope, &key)
 }
 
 fn decode_http_json_response(response: ureq::Response) -> Result<Value> {
@@ -4929,7 +5429,8 @@ fn remote_request_json(
     body: Option<&Value>,
 ) -> Result<Value> {
     let url = format!("{}{}", target.base_url.trim_end_matches('/'), path);
-    let agent = remote_agent();
+    enforce_target_spki_pin(target, &url)?;
+    let agent = target_agent(target)?;
     let request = agent
         .request(method, &url)
         .set("accept", "application/json")
@@ -4955,7 +5456,8 @@ fn remote_put_bytes(
     content_type: &str,
 ) -> Result<Value> {
     let url = format!("{}{}", target.base_url.trim_end_matches('/'), path);
-    let agent = remote_agent();
+    enforce_target_spki_pin(target, &url)?;
+    let agent = target_agent(target)?;
     let response = agent
         .put(&url)
         .set("accept", "application/json")
@@ -4970,11 +5472,15 @@ fn remote_put_bytes(
     }
 }
 
+fn remote_health_status(target: &ResolvedTarget) -> Result<bool> {
+    Ok(remote_request_json(target, "GET", "/v1/health", None)?
+        .get("ok")
+        .and_then(Value::as_bool)
+        .unwrap_or(false))
+}
+
 fn remote_health_check(target: &ResolvedTarget) -> bool {
-    remote_request_json(target, "GET", "/v1/health", None)
-        .ok()
-        .and_then(|doc| doc.get("ok").and_then(Value::as_bool))
-        .unwrap_or(false)
+    remote_health_status(target).unwrap_or(false)
 }
 
 fn remote_capabilities(target: &ResolvedTarget) -> Result<Value> {
@@ -5027,9 +5533,12 @@ fn attach_remote_execution_context(
             "base_url": target.base_url,
             "api_version": get_str(&target.profile, &["api_version"]).unwrap_or_else(|| REMOTE_API_VERSION.to_string()),
             "auth_kind": get_str(&target.profile, &["auth", "kind"]).unwrap_or_else(|| "static_bearer".to_string()),
+            "tls": get_path(&target.profile, &["tls"]).cloned().unwrap_or(Value::Null),
             "runtime_provider": canonical_remote_provider_id(get_str(&target.profile, &["runtime_provider"]).as_deref(), REMOTE_RUNTIME_PROVIDER),
             "routing_provider": canonical_remote_provider_id(get_str(&target.profile, &["routing_provider"]).as_deref(), REMOTE_ROUTING_PROVIDER),
             "oci_registry": get_path(&target.profile, &["oci_registry"]).cloned().unwrap_or(Value::Null),
+            "oci_auth": get_path(&target.profile, &["oci_auth"]).cloned().unwrap_or(Value::Null),
+            "oci_tls": get_path(&target.profile, &["oci_tls"]).cloned().unwrap_or(Value::Null),
             "default_namespace": get_path(&target.profile, &["default_namespace"]).cloned().unwrap_or(Value::Null),
             "default_env": get_path(&target.profile, &["default_env"]).cloned().unwrap_or(Value::Null),
             "lattice_id": get_path(&target.profile, &["lattice_id"]).cloned().unwrap_or(Value::Null),
@@ -5077,7 +5586,9 @@ fn attach_remote_execution_context(
         }
     });
     let meta = ensure_object_field(exec_doc, "meta");
-    let target_meta = meta.entry("target".to_string()).or_insert_with(|| json!({}));
+    let target_meta = meta
+        .entry("target".to_string())
+        .or_insert_with(|| json!({}));
     let target_meta_map = ensure_object(target_meta);
     upsert_default(target_meta_map, "app_id", json!(app_id.clone()));
     upsert_default(target_meta_map, "environment", json!(environment.clone()));
@@ -5208,7 +5719,11 @@ fn required_secret_ids_from_capabilities_doc(capabilities: &Value) -> Vec<String
 fn load_accept_ops_docs(
     args: &DeployAcceptArgs,
 ) -> Result<(Option<Value>, Option<Value>, Vec<String>)> {
-    let Some(raw_path) = args.ops_profile.as_ref().filter(|value| !value.trim().is_empty()) else {
+    let Some(raw_path) = args
+        .ops_profile
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    else {
         return Ok((None, None, Vec::new()));
     };
     let ops_path = repo_path(raw_path);
@@ -5403,12 +5918,86 @@ fn build_target_list_item(
 fn command_target_add(args: TargetAddArgs) -> Result<Value> {
     let profile_path = repo_path(&args.profile);
     let doc = load_json(&profile_path)?;
-    let stored_path = store_target_profile_doc(&doc)?;
     let name = get_str(&doc, &["name"]).unwrap_or_default();
-    let reachable = match resolve_remote_target(Some(&name)) {
-        Ok(Some(target)) => remote_health_check(&target),
-        _ => false,
+    if let Err(err) = validate_target_profile_doc(&doc) {
+        return Ok(cli_report(
+            "target add",
+            false,
+            64,
+            json!({
+                "name": name,
+                "profile_path": profile_path.to_string_lossy()
+            }),
+            None,
+            vec![result_diag(
+                "LP_TARGET_PROFILE_INVALID",
+                "parse",
+                &err.to_string(),
+                "error",
+            )],
+        ));
+    }
+    let target = match resolved_target_from_profile_doc(&doc) {
+        Ok(target) => target,
+        Err(err) => {
+            return Ok(cli_report(
+                "target add",
+                false,
+                64,
+                json!({
+                    "name": name,
+                    "profile_path": profile_path.to_string_lossy()
+                }),
+                None,
+                vec![result_diag(
+                    "LP_TARGET_PROFILE_INVALID",
+                    "parse",
+                    &err.to_string(),
+                    "error",
+                )],
+            ));
+        }
     };
+    match remote_health_status(&target) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Ok(cli_report(
+                "target add",
+                false,
+                42,
+                json!({
+                    "name": name,
+                    "profile_path": profile_path.to_string_lossy()
+                }),
+                None,
+                vec![result_diag(
+                    "LP_REMOTE_TARGET_UNREACHABLE",
+                    "run",
+                    "remote health endpoint returned ok=false",
+                    "error",
+                )],
+            ));
+        }
+        Err(err) => {
+            return Ok(cli_report(
+                "target add",
+                false,
+                42,
+                json!({
+                    "name": name,
+                    "profile_path": profile_path.to_string_lossy()
+                }),
+                None,
+                vec![result_diag(
+                    "LP_REMOTE_TARGET_UNREACHABLE",
+                    "run",
+                    &err.to_string(),
+                    "error",
+                )],
+            ));
+        }
+    }
+    let stored_path = store_target_profile_doc(&doc)?;
     Ok(cli_report(
         "target add",
         true,
@@ -5416,7 +6005,32 @@ fn command_target_add(args: TargetAddArgs) -> Result<Value> {
         json!({
             "name": name,
             "profile_path": stored_path.to_string_lossy(),
-            "reachable": reachable
+            "reachable": true
+        }),
+        None,
+        Vec::new(),
+    ))
+}
+
+fn command_secret_store_pack(args: SecretStorePackArgs) -> Result<Value> {
+    let input_path = repo_path(&args.input);
+    let output_path = repo_path(&args.output);
+    let doc = load_json(&input_path)?;
+    if get_str(&doc, &["schema_version"]).as_deref()
+        != Some("lp.remote.secret.store.internal@0.1.0")
+    {
+        bail!("invalid remote secret store input schema_version");
+    }
+    let key = load_remote_secret_master_key()?;
+    let envelope = encrypt_remote_secret_store_doc(&doc, &key)?;
+    let _ = write_json_600(&output_path, &envelope)?;
+    Ok(cli_report(
+        "secret store pack",
+        true,
+        0,
+        json!({
+            "input": input_path.to_string_lossy(),
+            "output": output_path.to_string_lossy()
         }),
         None,
         Vec::new(),
@@ -5576,8 +6190,12 @@ fn command_adapter_conformance(args: AdapterConformanceArgs) -> Result<Value> {
     let mut diagnostics = Vec::new();
     let push_ok = match (reference_run_doc.as_ref(), reference_exec.as_ref()) {
         (Some(run_doc), Some(exec_doc)) => {
-            let digests =
-                conformance_cas_digests(&state_dir, run_doc, exec_doc, reference_decision_doc.as_ref());
+            let digests = conformance_cas_digests(
+                &state_dir,
+                run_doc,
+                exec_doc,
+                reference_decision_doc.as_ref(),
+            );
             if digests.is_empty() {
                 false
             } else {
@@ -5636,19 +6254,22 @@ fn command_adapter_conformance(args: AdapterConformanceArgs) -> Result<Value> {
         "ok": incident_ok,
         "details": if incident_ok { "incident metadata exists in remote state" } else { "no incident metadata found in remote state" }
     }));
-    let regression_ok = read_incident_meta_paths(&state_dir).iter().any(|meta_path| {
-        meta_path
-            .parent()
-            .map(|dir| dir.join("regression.report.json").exists())
-            .unwrap_or(false)
-    }) || state_dir.join("regressions").exists()
-        && fs::read_dir(state_dir.join("regressions"))
-            .map(|entries| {
-                entries
-                    .filter_map(Result::ok)
-                    .any(|entry| entry.path().extension().and_then(OsStr::to_str) == Some("json"))
-            })
-            .unwrap_or(false);
+    let regression_ok = read_incident_meta_paths(&state_dir)
+        .iter()
+        .any(|meta_path| {
+            meta_path
+                .parent()
+                .map(|dir| dir.join("regression.report.json").exists())
+                .unwrap_or(false)
+        })
+        || state_dir.join("regressions").exists()
+            && fs::read_dir(state_dir.join("regressions"))
+                .map(|entries| {
+                    entries.filter_map(Result::ok).any(|entry| {
+                        entry.path().extension().and_then(OsStr::to_str) == Some("json")
+                    })
+                })
+                .unwrap_or(false);
     scenarios.push(json!({
         "name": "remote_regression_generation",
         "ok": regression_ok,
@@ -5851,8 +6472,7 @@ fn command_accept(args: DeployAcceptArgs) -> Result<Value> {
     ensure_object_field(&mut report, "result").insert("run_id".to_string(), json!(remote_run_id));
     ensure_object_field(&mut report, "result")
         .insert("deployment_id".to_string(), json!(remote_exec_id.clone()));
-    ensure_object_field(&mut report, "result")
-        .insert("exec_id".to_string(), json!(remote_exec_id));
+    ensure_object_field(&mut report, "result").insert("exec_id".to_string(), json!(remote_exec_id));
     ensure_object_field(&mut report, "result").insert("push".to_string(), request["push"].clone());
     Ok(cli_report(
         "deploy accept",
@@ -6361,13 +6981,16 @@ fn trace_request_id(trace_doc: &Value) -> Option<String> {
 
 fn trace_trace_id(trace_doc: &Value) -> Option<String> {
     get_str(trace_doc, &["trace_id"]).or_else(|| {
-        trace_doc.get("steps").and_then(Value::as_array).and_then(|steps| {
-            if steps.is_empty() {
-                None
-            } else {
-                Some(gen_id("lptrace", &sha256_hex(&canon_json_bytes(trace_doc))))
-            }
-        })
+        trace_doc
+            .get("steps")
+            .and_then(Value::as_array)
+            .and_then(|steps| {
+                if steps.is_empty() {
+                    None
+                } else {
+                    Some(gen_id("lptrace", &sha256_hex(&canon_json_bytes(trace_doc))))
+                }
+            })
     })
 }
 
@@ -6552,9 +7175,7 @@ fn capture_incident_impl(
         .as_ref()
         .and_then(|(doc, _)| get_str(doc, &["request_id"]).or_else(|| get_str(doc, &["id"])))
         .or_else(|| trace_doc.as_ref().and_then(trace_request_id));
-    let trace_id = trace_doc
-        .as_ref()
-        .and_then(trace_trace_id);
+    let trace_id = trace_doc.as_ref().and_then(trace_trace_id);
     if let Some(existing) = find_existing_incident_for_key(
         state_dir,
         &deployment_id,
@@ -6959,10 +7580,13 @@ fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
         }),
     );
     let initial_public_listener = if remote_exec {
-        get_path(&exec_doc, &["meta", "ext", "remote", "target_profile", "base_url"])
-            .and_then(Value::as_str)
-            .map(|base| remote_exec_public_listener(base, &args.deployment_id))
-            .unwrap_or_else(|| deterministic_listener(&args.deployment_id))
+        get_path(
+            &exec_doc,
+            &["meta", "ext", "remote", "target_profile", "base_url"],
+        )
+        .and_then(Value::as_str)
+        .map(|base| remote_exec_public_listener(base, &args.deployment_id))
+        .unwrap_or_else(|| deterministic_listener(&args.deployment_id))
     } else {
         deterministic_listener(&args.deployment_id)
     };
@@ -7131,8 +7755,12 @@ fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
             }),
         );
     }
-    let routing_meta = get_path(&exec_doc, &["meta", "routing"]).cloned().unwrap_or_else(|| json!({}));
-    let runtime_meta = get_path(&exec_doc, &["meta", "runtime"]).cloned().unwrap_or_else(|| json!({}));
+    let routing_meta = get_path(&exec_doc, &["meta", "routing"])
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let runtime_meta = get_path(&exec_doc, &["meta", "runtime"])
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     let listener_addr = get_str(&exec_doc, &["meta", "public_listener"])
         .unwrap_or_else(|| deterministic_listener(&args.deployment_id));
     let stable_addr = get_str(&runtime_meta, &["stable", "bind_addr"])
@@ -7162,7 +7790,11 @@ fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
     let runtime_probe_doc = if let Some(remote) = get_path(&exec_doc, &["meta", "ext", "remote"]) {
         run_remote_runtime_probe(&args.deployment_id, &candidate_paths["work"], remote)?
     } else {
-        run_runtime_probe(&args.deployment_id, &candidate_paths["work"], ops_path.as_deref())?
+        run_runtime_probe(
+            &args.deployment_id,
+            &candidate_paths["work"],
+            ops_path.as_deref(),
+        )?
     };
     if !runtime_probe_ok(&runtime_probe_doc) {
         let _ = capture_incident_impl(
@@ -7350,8 +7982,12 @@ fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
             ensure_object(&mut exec_doc).insert("steps".to_string(), Value::Array(steps.clone()));
             let listener_addr = get_str(&exec_doc, &["meta", "public_listener"])
                 .unwrap_or_else(|| deterministic_listener(&args.deployment_id));
-            let runtime_meta = get_path(&exec_doc, &["meta", "runtime"]).cloned().unwrap_or_else(|| json!({}));
-            let routing_meta = get_path(&exec_doc, &["meta", "routing"]).cloned().unwrap_or_else(|| json!({}));
+            let runtime_meta = get_path(&exec_doc, &["meta", "runtime"])
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            let routing_meta = get_path(&exec_doc, &["meta", "routing"])
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             write_router_state(
                 &state_dir,
                 &args.deployment_id,
@@ -7579,7 +8215,10 @@ fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
                     }
                     metrics_path
                 };
-                let (decision_value, slo_report) = match run_slo_eval(slo_path.as_deref(), &metrics_path) {
+                let (decision_value, slo_report) = match run_slo_eval(
+                    slo_path.as_deref(),
+                    &metrics_path,
+                ) {
                     Ok(result) => result,
                     Err(err) => {
                         return Ok(cli_report(
@@ -8474,7 +9113,7 @@ fn command_regress_from_incident_state(args: RegressFromIncidentArgs) -> Result<
         if args.dry_run {
             argv.push("--dry-run".to_string());
         }
-        let (tool, code, stdout, stderr) = run_wasm_tool_capture(&argv, Some(&root_dir()))?;
+        let (_tool, code, stdout, stderr) = run_wasm_tool_capture(&argv, Some(&root_dir()))?;
         if code == 0 {
             serde_json::from_slice(&stdout).context("parse regress report")?
         } else {
@@ -8992,20 +9631,27 @@ fn load_router_state_doc(state_dir: &Path, exec_id: &str) -> Result<Value> {
 }
 
 fn choose_edge_slot(router_state: &Value, request: &HttpRequest) -> &'static str {
-    let weight = get_u64(router_state, &["candidate_weight_pct"]).unwrap_or(0).min(100);
+    let weight = get_u64(router_state, &["candidate_weight_pct"])
+        .unwrap_or(0)
+        .min(100);
     if weight == 0 {
         return "stable";
     }
     if weight == 100 {
         return "candidate";
     }
-    let route_key_header =
-        get_str(router_state, &["route_key_header"]).unwrap_or_else(|| REMOTE_ROUTE_KEY_HEADER.to_string());
-    let route_key = request_header(request, &route_key_header)
-        .unwrap_or(request.path.as_str());
+    let route_key_header = get_str(router_state, &["route_key_header"])
+        .unwrap_or_else(|| REMOTE_ROUTE_KEY_HEADER.to_string());
+    let route_key = request_header(request, &route_key_header).unwrap_or(request.path.as_str());
     let digest = Sha256::digest(route_key.as_bytes());
-    let bucket = u64::from(u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]])) % 100;
-    if bucket < weight { "candidate" } else { "stable" }
+    let bucket = u64::from(u32::from_be_bytes([
+        digest[0], digest[1], digest[2], digest[3],
+    ])) % 100;
+    if bucket < weight {
+        "candidate"
+    } else {
+        "stable"
+    }
 }
 
 fn bump_router_counter(state_dir: &Path, exec_id: &str, slot: &str) -> Result<()> {
@@ -9033,7 +9679,11 @@ fn bump_router_counter(state_dir: &Path, exec_id: &str, slot: &str) -> Result<()
 fn strip_edge_exec_prefix(path: &str, exec_id: &str) -> String {
     let prefix = format!("{REMOTE_EDGE_ROUTE_PREFIX}/{exec_id}");
     let trimmed = path.strip_prefix(&prefix).unwrap_or(path);
-    if trimmed.is_empty() { "/".to_string() } else { trimmed.to_string() }
+    if trimmed.is_empty() {
+        "/".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 fn pack_static_asset_response(work_dir: &Path, request_path: &str) -> Result<UiHttpResponse> {
@@ -9043,10 +9693,16 @@ fn pack_static_asset_response(work_dir: &Path, request_path: &str) -> Result<UiH
     } else {
         request_path.to_string()
     };
-    if let Some(asset) = get_path(&manifest, &["assets"]).and_then(Value::as_array).and_then(|items| {
-        items.iter().find(|asset| get_str(asset, &["serve_path"]).as_deref() == Some(asset_path.as_str()))
-    }) {
-        let file_path = get_str(asset, &["file", "path"]).ok_or_else(|| anyhow!("asset missing file path"))?;
+    if let Some(asset) = get_path(&manifest, &["assets"])
+        .and_then(Value::as_array)
+        .and_then(|items| {
+            items.iter().find(|asset| {
+                get_str(asset, &["serve_path"]).as_deref() == Some(asset_path.as_str())
+            })
+        })
+    {
+        let file_path =
+            get_str(asset, &["file", "path"]).ok_or_else(|| anyhow!("asset missing file path"))?;
         let body = fs::read(work_dir.join(&file_path))?;
         let content_type = get_path(asset, &["headers"])
             .and_then(Value::as_array)
@@ -9084,7 +9740,11 @@ fn pack_static_asset_response(work_dir: &Path, request_path: &str) -> Result<UiH
     ))
 }
 
-fn proxy_edge_request(request: &HttpRequest, upstream_base: &str, upstream_path: &str) -> Result<UiHttpResponse> {
+fn proxy_edge_request(
+    request: &HttpRequest,
+    upstream_base: &str,
+    upstream_path: &str,
+) -> Result<UiHttpResponse> {
     let mut url = format!(
         "{}{}",
         upstream_base.trim_end_matches('/'),
@@ -9195,8 +9855,8 @@ fn dispatch_edge_request(request: HttpRequest, state_dir: &Path) -> Result<UiHtt
         } else {
             "stable_addr"
         };
-        let upstream =
-            get_str(&router_state, &[upstream_key]).unwrap_or_else(|| "http://127.0.0.1:0".to_string());
+        let upstream = get_str(&router_state, &[upstream_key])
+            .unwrap_or_else(|| "http://127.0.0.1:0".to_string());
         return proxy_edge_request(&request, &upstream, &rel_path);
     }
     let work_dir_key = if slot == "candidate" {
@@ -9240,28 +9900,36 @@ fn remote_fixture_name(raw: Option<&str>) -> Option<String> {
 fn resolve_remote_fixture_inputs(fixture: Option<&str>) -> (Option<String>, Option<String>) {
     match remote_fixture_name(fixture).as_deref() {
         Some("remote_rollback") => (
-            Some("spec/fixtures/phaseD-oss/remote_rollback/deploy.plan.json".to_string()),
-            Some("spec/fixtures/phaseD-oss/remote_rollback".to_string()),
+            Some("spec/fixtures/remote-oss/remote_rollback/deploy.plan.json".to_string()),
+            Some("spec/fixtures/remote-oss/remote_rollback".to_string()),
         ),
         Some("remote_pause_rerun") => (
-            Some("spec/fixtures/phaseD-oss/remote_pause_rerun/deploy.plan.json".to_string()),
-            Some("spec/fixtures/phaseD-oss/remote_pause_rerun".to_string()),
+            Some("spec/fixtures/remote-oss/remote_pause_rerun/deploy.plan.json".to_string()),
+            Some("spec/fixtures/remote-oss/remote_pause_rerun".to_string()),
         ),
         Some("remote_query_index_rebuild")
         | Some("remote_query")
         | Some("remote_promote")
         | None => (
-            Some("spec/fixtures/phaseD-oss/remote_promote/deploy.plan.json".to_string()),
-            Some("spec/fixtures/phaseD-oss/remote_promote".to_string()),
+            Some("spec/fixtures/remote-oss/remote_promote/deploy.plan.json".to_string()),
+            Some("spec/fixtures/remote-oss/remote_promote".to_string()),
         ),
         _ => (None, None),
     }
 }
 
 fn remote_accept_target_name(exec_doc: &Value) -> String {
-    get_str(exec_doc, &["meta", "ext", "remote", "target_profile", "name"])
-        .or_else(|| get_str(exec_doc, &["meta", "ext", "remote", "target_profile", "target_name"]))
-        .unwrap_or_else(|| "default".to_string())
+    get_str(
+        exec_doc,
+        &["meta", "ext", "remote", "target_profile", "name"],
+    )
+    .or_else(|| {
+        get_str(
+            exec_doc,
+            &["meta", "ext", "remote", "target_profile", "target_name"],
+        )
+    })
+    .unwrap_or_else(|| "default".to_string())
 }
 
 fn nonempty_secret_value(value: Option<&Value>) -> Option<String> {
@@ -9321,7 +9989,11 @@ fn resolve_remote_secret_value(
     if !environment.is_empty() {
         candidates.push((
             format!("env:{environment}"),
-            vec!["envs".to_string(), environment.clone(), secret_id.to_string()],
+            vec![
+                "envs".to_string(),
+                environment.clone(),
+                secret_id.to_string(),
+            ],
         ));
         candidates.push((
             format!("env:{environment}"),
@@ -9446,7 +10118,8 @@ fn persist_remote_accept_docs(
     change_doc: Option<&Value>,
 ) -> Result<(String, String, String)> {
     let original_run_id = get_str(run_doc, &["run_id"]).ok_or_else(|| anyhow!("missing run_id"))?;
-    let original_exec_id = get_str(exec_doc, &["exec_id"]).ok_or_else(|| anyhow!("missing exec_id"))?;
+    let original_exec_id =
+        get_str(exec_doc, &["exec_id"]).ok_or_else(|| anyhow!("missing exec_id"))?;
     let original_decision_id =
         get_str(decision_doc, &["decision_id"]).ok_or_else(|| anyhow!("missing decision_id"))?;
     let unique_seed = format!(
@@ -9555,9 +10228,7 @@ fn append_remote_stream_entry(
 
 fn remote_stream_context(state_dir: &Path, exec_id: &str) -> (Option<String>, Option<String>) {
     let exec_doc = load_json(&exec_path(state_dir, exec_id)).ok();
-    let run_id = exec_doc
-        .as_ref()
-        .and_then(|doc| get_str(doc, &["run_id"]));
+    let run_id = exec_doc.as_ref().and_then(|doc| get_str(doc, &["run_id"]));
     let slot = exec_doc.as_ref().map(|doc| {
         let outcome = get_str(doc, &["meta", "outcome"]).unwrap_or_else(|| "unknown".to_string());
         if matches!(outcome.as_str(), "promoted" | "rolled_back") {
@@ -9786,58 +10457,75 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
                 .get("execution")
                 .cloned()
                 .ok_or_else(|| anyhow!("missing execution document"))?;
-            if let Some(response) = validate_remote_accept_secrets(state_dir, &exec_doc, &body_doc)? {
-                response
-            } else {
-                let decision_doc = body_doc
-                    .get("decision")
-                    .cloned()
-                    .ok_or_else(|| anyhow!("missing decision document"))?;
-                let change_doc = body_doc.get("change_request").cloned();
-                let (run_id, exec_id, decision_id) = persist_remote_accept_docs(
-                    state_dir,
-                    &run_doc,
-                    &exec_doc,
-                    &decision_doc,
-                    change_doc.as_ref(),
-                )?;
-                let _ = record_remote_event(
-                    state_dir,
-                    &exec_id,
-                    "deploy.accept",
-                    "remote deploy accepted",
-                    json!({
-                        "run_id": run_id,
-                        "decision_id": decision_id,
-                        "fixture": fixture,
-                        "required_secrets": body_doc.get("required_secrets").cloned().unwrap_or_else(|| json!([])),
-                    }),
-                );
-                let _ = record_remote_log(
-                    state_dir,
-                    &exec_id,
-                    "info",
-                    "accepted remote deployment",
-                    json!({
-                        "run_id": run_id,
-                        "decision_id": decision_id,
-                    }),
-                );
-                UiHttpResponse::Json(
+            match validate_remote_accept_secrets(state_dir, &exec_doc, &body_doc) {
+                Ok(Some(response)) => response,
+                Ok(None) => {
+                    let decision_doc = body_doc
+                        .get("decision")
+                        .cloned()
+                        .ok_or_else(|| anyhow!("missing decision document"))?;
+                    let change_doc = body_doc.get("change_request").cloned();
+                    let (run_id, exec_id, decision_id) = persist_remote_accept_docs(
+                        state_dir,
+                        &run_doc,
+                        &exec_doc,
+                        &decision_doc,
+                        change_doc.as_ref(),
+                    )?;
+                    let _ = record_remote_event(
+                        state_dir,
+                        &exec_id,
+                        "deploy.accept",
+                        "remote deploy accepted",
+                        json!({
+                            "run_id": run_id,
+                            "decision_id": decision_id,
+                            "fixture": fixture,
+                            "required_secrets": body_doc.get("required_secrets").cloned().unwrap_or_else(|| json!([])),
+                        }),
+                    );
+                    let _ = record_remote_log(
+                        state_dir,
+                        &exec_id,
+                        "info",
+                        "accepted remote deployment",
+                        json!({
+                            "run_id": run_id,
+                            "decision_id": decision_id,
+                        }),
+                    );
+                    UiHttpResponse::Json(
+                        200,
+                        cli_report(
+                            "deploy accept",
+                            true,
+                            0,
+                            json!({
+                                "run_id": run_id,
+                                "exec_id": exec_id,
+                                "decision_id": decision_id,
+                            }),
+                            get_str(&run_doc, &["run_id"]).as_deref(),
+                            Vec::new(),
+                        ),
+                    )
+                }
+                Err(err) => UiHttpResponse::Json(
                     200,
                     cli_report(
                         "deploy accept",
-                        true,
-                        0,
-                        json!({
-                            "run_id": run_id,
-                            "exec_id": exec_id,
-                            "decision_id": decision_id,
-                        }),
+                        false,
+                        12,
+                        json!({}),
                         get_str(&run_doc, &["run_id"]).as_deref(),
-                        Vec::new(),
+                        vec![result_diag(
+                            "LP_REMOTE_SECRET_STORE_INVALID",
+                            "run",
+                            &err.to_string(),
+                            "error",
+                        )],
                     ),
-                )
+                ),
             }
         }
         ("POST", ["v1", "deploy", "run"]) => {
@@ -9874,7 +10562,7 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
             };
             let fixture = remote_fixture_name(body_doc.get("fixture").and_then(Value::as_str));
             let (plan, metrics_dir) = resolve_remote_fixture_inputs(fixture.as_deref());
-            let report = command_run_execution(DeployRunArgs {
+            let report = match command_run_execution(DeployRunArgs {
                 deployment_id: exec_id.clone(),
                 accepted_run: Some(run_id.clone()),
                 plan,
@@ -9883,7 +10571,27 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
                 target: None,
                 fixture: fixture.clone(),
                 common,
-            })?;
+            }) {
+                Ok(report) => report,
+                Err(err) => cli_report(
+                    "deploy run",
+                    false,
+                    13,
+                    json!({
+                        "schema_version": "lp.deploy.remote.result@0.1.0",
+                        "op": "run",
+                        "run_id": run_id,
+                        "deployment_id": exec_id
+                    }),
+                    None,
+                    vec![result_diag(
+                        "LP_REMOTE_RUN_FAILED",
+                        "run",
+                        &err.to_string(),
+                        "error",
+                    )],
+                ),
+            };
             let ok = report.get("ok").and_then(Value::as_bool).unwrap_or(false);
             let _ = record_remote_event(
                 state_dir,
@@ -10205,7 +10913,10 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
 }
 
 fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpResponse> {
-    if request.path.starts_with(&format!("{REMOTE_EDGE_ROUTE_PREFIX}/")) {
+    if request
+        .path
+        .starts_with(&format!("{REMOTE_EDGE_ROUTE_PREFIX}/"))
+    {
         return dispatch_edge_request(request, state_dir);
     }
     let body_doc = parse_http_body(&request.body)?;

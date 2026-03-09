@@ -1,10 +1,10 @@
-# Phase D-OSS fixture expectations
+# Remote OSS fixture expectations
 
 This directory contains only the **expected outputs** used by the addendum CI script.
 
 The actual scenario inputs continue to come from:
-- the existing Phase A pack fixture (`spec/fixtures/phaseA/pack_min/`)
-- the existing Phase B change request fixture (`spec/fixtures/phaseB/common/change_request.app_min.json`)
+- the existing baseline pack fixture under `spec/fixtures/phaseA/pack_min/`
+- the existing baseline change request fixture under `spec/fixtures/phaseB/common/change_request.app_min.json`
 - the remote stack's seeded runtime/router/incident fixture state
 
 ## Parity cases

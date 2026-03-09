@@ -26,6 +26,8 @@
     "weighted_canary": true,
     "otlp": true,
     "server_side_secrets": true,
+    "authenticated_oci_push": true,
+    "registry_tls": true,
     "event_stream": true,
     "signed_control_actions": true
   },
@@ -39,7 +41,14 @@
     "scheme": "bearer",
     "token_kind": "opaque",
     "required_scopes": [
-      "lp.deploy.read"
+      "lp.deploy.read",
+      "lp.deploy.write",
+      "lp.artifacts.read",
+      "lp.artifacts.write",
+      "lp.incident.read",
+      "lp.incident.write",
+      "lp.regression.write",
+      "lp.adapter.read"
     ]
   },
   "capabilities_digest": "__ANY__"
