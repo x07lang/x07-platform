@@ -1,0 +1,19 @@
+{
+  "defaults": {
+    "arena_cap_bytes": 33554432,
+    "build": {
+      "emit_host_assets": true,
+      "format": "core"
+    },
+    "max_input_bytes": 65536,
+    "max_output_bytes": 2097152,
+    "serve": {
+      "port": 0,
+      "strict_mime": true
+    }
+  },
+  "id": "web_ui_release",
+  "schema_version": "x07.web_ui.profile@0.1.0",
+  "v": 1,
+  "wasm_profile_id": "wasm_web_ui_release"
+}

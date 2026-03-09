@@ -37,6 +37,8 @@ BAD_PIN_TARGET="${X07LP_REMOTE_OSS_BAD_PIN_TARGET:-remote-oss-bad-pin}"
 BAD_OCI_AUTH_TARGET="${X07LP_REMOTE_OSS_BAD_OCI_AUTH_TARGET:-remote-oss-bad-oci-auth}"
 BAD_OCI_TLS_TARGET="${X07LP_REMOTE_OSS_BAD_OCI_TLS_TARGET:-remote-oss-bad-oci-tls}"
 TELEMETRY_COLLECTOR_URL="${X07LP_REMOTE_OSS_OTLP_URL:-http://127.0.0.1:4318}"
+X07LP_REMOTE_SYNTHETIC_TELEMETRY="${X07LP_REMOTE_SYNTHETIC_TELEMETRY:-0}"
+export X07LP_REMOTE_SYNTHETIC_TELEMETRY
 
 if [ -n "${X07LP_REMOTE_OSS_REMOTE_MODE:-}" ]; then
   REMOTE_MODE="${X07LP_REMOTE_OSS_REMOTE_MODE}"
@@ -84,6 +86,7 @@ REMOTE_SECRET_MASTER_KEY_PATH="${TMP_DIR}/remote-secret-store.key"
 BAD_SECRET_MASTER_KEY_PATH="${TMP_DIR}/remote-secret-store.bad.key"
 
 PACK_FIXTURE="spec/fixtures/phaseA/pack_min/app.pack.json"
+ROLLBACK_PACK_FIXTURE="spec/fixtures/remote-oss/common/pack_app_min_spin/app.pack.json"
 PACK_DIGEST_MISMATCH_FIXTURE="spec/fixtures/phaseA/pack_min/app.pack.bad.json"
 CHANGE_FIXTURE="spec/fixtures/phaseB/common/change_request.app_min.json"
 
@@ -688,6 +691,43 @@ if doc.get('ok') is not False:
 PY
 }
 
+assert_metrics_snapshot_labels() {
+  local snapshot_path="$1"
+  local expected_exec_id="$2"
+  local expected_source="$3"
+  "$PYTHON" - "$snapshot_path" "$expected_exec_id" "$expected_source" <<'PY'
+import json
+import pathlib
+import sys
+
+doc = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
+labels = doc.get('labels', {})
+required = [
+    'x07.exec_id',
+    'x07.run_id',
+    'x07.pack_sha256',
+    'x07.slot',
+    'x07.app_id',
+    'x07.environment',
+    'x07.analysis_seq',
+    'x07.telemetry_source',
+]
+missing = [key for key in required if not isinstance(labels.get(key), str) or not labels.get(key)]
+if missing:
+    raise SystemExit(f'missing snapshot labels {missing} in {sys.argv[1]}')
+if labels['x07.exec_id'] != sys.argv[2]:
+    raise SystemExit(f'unexpected exec_id label in {sys.argv[1]}: {labels["x07.exec_id"]!r}')
+if labels['x07.telemetry_source'] != sys.argv[3]:
+    raise SystemExit(
+        f'unexpected telemetry source in {sys.argv[1]}: {labels["x07.telemetry_source"]!r}'
+    )
+metrics = {item.get('name') for item in doc.get('metrics', []) if isinstance(item, dict)}
+expected_metrics = {'http_error_rate', 'http_latency_p95_ms', 'http_availability'}
+if metrics != expected_metrics:
+    raise SystemExit(f'unexpected metrics set in {sys.argv[1]}: {metrics!r}')
+PY
+}
+
 normalize_remote_query_full() {
   local cli_report_path="$1"
   local out_path="$2"
@@ -850,6 +890,10 @@ PY
 )"
 run_remote_query_view "$PROMOTE_EXEC_ID" "summary" "${TMP_DIR}/remote_promote.query.summary.run_report.json" "${TMP_DIR}/remote_promote.query.summary.cli.json"
 run_remote_query_view "$PROMOTE_EXEC_ID" "full" "${TMP_DIR}/remote_promote.query.full.run_report.json" "${TMP_DIR}/remote_promote.query.full.cli.json"
+assert_metrics_snapshot_labels \
+  "${TMP_DIR}/remote_state/.x07lp/telemetry/${PROMOTE_EXEC_ID}/analysis.1.json" \
+  "$PROMOTE_EXEC_ID" \
+  "remote_runtime_probe"
 validate_cli_report "${TMP_DIR}/remote_promote.query.summary.cli.json" "${TMP_DIR}/remote_promote.query.summary"
 validate_cli_report "${TMP_DIR}/remote_promote.query.full.cli.json" "${TMP_DIR}/remote_promote.query.full"
 validate_report_result_schema "contracts/spec/schemas/lp.deploy.query.result.schema.json" "${TMP_DIR}/remote_promote.query.summary.cli.json" "${TMP_DIR}/remote_promote.query.summary" "deploy.query.summary"
@@ -869,7 +913,7 @@ assert_report_items_non_empty "${TMP_DIR}/remote_promote.events.cli.json"
 assert_report_items_non_empty "${TMP_DIR}/remote_promote.logs.cli.json"
 
 run_x07lp "${TMP_DIR}/remote_rollback.accept.run_report.json" "${TMP_DIR}/remote_rollback.accept.cli.json" \
-  deploy accept --target "$TARGET_NAME" --pack-manifest "$PACK_FIXTURE" --change "$CHANGE_FIXTURE" --json
+  deploy accept --target "$TARGET_NAME" --pack-manifest "$ROLLBACK_PACK_FIXTURE" --change "$CHANGE_FIXTURE" --json
 ROLLBACK_RUN_ID="$("$PYTHON" - "${TMP_DIR}/remote_rollback.accept.cli.json" <<'PY'
 import json, pathlib, sys
 doc = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
@@ -887,7 +931,13 @@ print(doc.get('result', {}).get('deployment_id') or doc.get('result', {}).get('e
 PY
 )"
 run_remote_query_view "$ROLLBACK_EXEC_ID" "summary" "${TMP_DIR}/remote_rollback.query.summary.run_report.json" "${TMP_DIR}/remote_rollback.query.summary.cli.json"
+assert_metrics_snapshot_labels \
+  "${TMP_DIR}/remote_state/.x07lp/telemetry/${ROLLBACK_EXEC_ID}/analysis.1.json" \
+  "$ROLLBACK_EXEC_ID" \
+  "remote_runtime_probe"
 assert_report_matches_template "${TMP_DIR}/remote_rollback.query.summary.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_rollback/expected/query.summary.report.json"
+run_x07lp "${TMP_DIR}/remote_rollback.stop.run_report.json" "${TMP_DIR}/remote_rollback.stop.cli.json" \
+  deploy stop --target "$TARGET_NAME" --deployment "$ROLLBACK_EXEC_ID" --reason "ci cleanup rollback" --json
 
 run_x07lp "${TMP_DIR}/remote_pause.accept.run_report.json" "${TMP_DIR}/remote_pause.accept.cli.json" \
   deploy accept --target "$TARGET_NAME" --pack-manifest "$PACK_FIXTURE" --change "$CHANGE_FIXTURE" --json
@@ -918,6 +968,8 @@ wait "$PAUSE_RUN_PID" || true
 run_x07lp "${TMP_DIR}/remote_rerun.control.run_report.json" "${TMP_DIR}/remote_rerun.control.cli.json" \
   deploy rerun --target "$TARGET_NAME" --deployment "$PAUSE_EXEC_ID" --reason "ci rerun" --json
 assert_report_matches_template "${TMP_DIR}/remote_rerun.control.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_pause_rerun/expected/rerun.report.json"
+run_x07lp "${TMP_DIR}/remote_pause.stop.run_report.json" "${TMP_DIR}/remote_pause.stop.cli.json" \
+  deploy stop --target "$TARGET_NAME" --deployment "$PAUSE_EXEC_ID" --reason "ci cleanup" --json
 
 for view in summary timeline decisions artifacts full; do
   run_remote_query_view "$PROMOTE_EXEC_ID" "$view" "${TMP_DIR}/remote_query.${view}.run_report.json" "${TMP_DIR}/remote_query.${view}.cli.json"

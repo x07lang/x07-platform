@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::runtime::Runtime as TokioRuntime;
 use ureq::{Agent, Error as UreqError};
 use url::Url;
@@ -57,6 +57,7 @@ const DEFAULT_REMOTE_OTLP_EXPORT_FILE: &str = "collector-metrics.jsonl";
 const DEFAULT_REMOTE_NATS_URL: &str = "nats://127.0.0.1:4222";
 const DEFAULT_REMOTE_LATTICE: &str = "default";
 const REMOTE_SECRET_MASTER_KEY_FILE_ENV: &str = "X07LP_REMOTE_SECRET_MASTER_KEY_FILE";
+const REMOTE_SYNTHETIC_TELEMETRY_ENV: &str = "X07LP_REMOTE_SYNTHETIC_TELEMETRY";
 const REMOTE_SECRET_STORE_SCHEMA_VERSION: &str = "lp.remote.secret.store.encrypted.internal@0.1.0";
 const REMOTE_SECRET_STORE_ALG: &str = "aes-256-gcm-siv";
 const REMOTE_EDGE_ROUTE_PREFIX: &str = "/r";
@@ -64,6 +65,8 @@ const REMOTE_ROUTE_KEY_HEADER: &str = "X-LP-Route-Key";
 const REMOTE_HTTP_SERVER_PROVIDER_IMAGE: &str = "ghcr.io/wasmcloud/http-server:0.27.0";
 const REMOTE_SLOT_PORT_BASE: u16 = 26_000;
 const REMOTE_SLOT_PORT_COUNT: u16 = 256;
+const REMOTE_REAL_TELEMETRY_SAMPLE_COUNT: usize = 7;
+const REMOTE_REAL_TELEMETRY_TIMEOUT_MS: u64 = 750;
 const LOCAL_TARGET_SENTINEL: &str = "__local__";
 const VALID_QUERY_VIEWS: &[&str] = &["summary", "timeline", "decisions", "artifacts", "full"];
 const REDACTED_HTTP_HEADER_NAMES: &[&str] = &[
@@ -97,6 +100,24 @@ struct RemoteProviderDeployment {
     stable: RemoteSlotDeployment,
     candidate: RemoteSlotDeployment,
     host_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RemoteTelemetryMetrics {
+    latency_p95_ms: f64,
+    error_rate: f64,
+    availability: f64,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteTelemetryContext {
+    exec_id: String,
+    run_id: String,
+    pack_sha256: String,
+    slot: String,
+    app_id: String,
+    environment: String,
+    service: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2600,21 +2621,24 @@ fn run_remote_runtime_probe(exec_id: &str, work_dir: &Path, remote: &Value) -> R
     }))
 }
 
-#[derive(Clone, Copy)]
-struct RemoteTelemetrySeed {
-    latency_p95_ms: f64,
-    error_rate: f64,
-    availability: f64,
+fn remote_synthetic_telemetry_enabled() -> bool {
+    matches!(
+        std::env::var(REMOTE_SYNTHETIC_TELEMETRY_ENV)
+            .ok()
+            .as_deref()
+            .map(str::trim),
+        Some("1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON")
+    )
 }
 
-fn remote_telemetry_seed(fixture: Option<&str>, _analysis_seq: usize) -> RemoteTelemetrySeed {
+fn remote_telemetry_seed(fixture: Option<&str>) -> RemoteTelemetryMetrics {
     match remote_fixture_name(fixture).as_deref() {
-        Some("remote_rollback") => RemoteTelemetrySeed {
+        Some("remote_rollback") => RemoteTelemetryMetrics {
             latency_p95_ms: 450.0,
             error_rate: 0.05,
             availability: 0.95,
         },
-        _ => RemoteTelemetrySeed {
+        _ => RemoteTelemetryMetrics {
             latency_p95_ms: 120.0,
             error_rate: 0.005,
             availability: 0.995,
@@ -2640,24 +2664,174 @@ fn otlp_attr_doc(key: &str, value: Value) -> Value {
     })
 }
 
+fn otlp_string_attr(key: &str, value: &str) -> Value {
+    otlp_attr_doc(key, json!({ "stringValue": value }))
+}
+
+fn otlp_int_attr(key: &str, value: usize) -> Value {
+    otlp_attr_doc(key, json!({ "intValue": value.to_string() }))
+}
+
+fn remote_telemetry_context(exec_doc: &Value, run_doc: &Value) -> Result<RemoteTelemetryContext> {
+    let exec_id = get_str(exec_doc, &["exec_id"]).ok_or_else(|| anyhow!("missing exec_id"))?;
+    let run_id = get_str(run_doc, &["run_id"]).ok_or_else(|| anyhow!("missing run_id"))?;
+    let pack_sha256 = get_str(run_doc, &["inputs", "artifact", "manifest", "digest", "sha256"])
+        .ok_or_else(|| anyhow!("missing pack manifest sha256"))?;
+    let app_id =
+        get_str(exec_doc, &["meta", "target", "app_id"]).unwrap_or_else(|| "app_min".to_string());
+    let environment = get_str(exec_doc, &["meta", "target", "environment"])
+        .unwrap_or_else(|| "unknown".to_string());
+    Ok(RemoteTelemetryContext {
+        exec_id,
+        run_id,
+        pack_sha256,
+        slot: "candidate".to_string(),
+        service: app_id.clone(),
+        app_id,
+        environment,
+    })
+}
+
+fn remote_probe_path(remote: &Value) -> String {
+    let prefix =
+        get_str(remote, &["routing", "api_prefix"]).unwrap_or_else(|| "/api".to_string());
+    let normalized = if prefix.starts_with('/') {
+        prefix
+    } else {
+        format!("/{prefix}")
+    };
+    if normalized == "/" {
+        "/ping".to_string()
+    } else {
+        format!("{}/ping", normalized.trim_end_matches('/'))
+    }
+}
+
+fn remote_candidate_probe_url(remote: &Value) -> Result<String> {
+    let base = get_str(remote, &["routing", "candidate_upstream"])
+        .or_else(|| {
+            get_str(remote, &["runtime", "candidate_bind_addr"]).map(|value| format!("http://{value}"))
+        })
+        .ok_or_else(|| anyhow!("missing remote candidate upstream"))?;
+    Ok(format!(
+        "{}{}",
+        base.trim_end_matches('/'),
+        remote_probe_path(remote)
+    ))
+}
+
+fn remote_timeout_agent(timeout: Duration) -> Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(timeout)
+        .timeout_read(timeout)
+        .timeout_write(timeout)
+        .build()
+}
+
+fn agent_with_ca_bundle_and_timeout(
+    ca_bundle_path: Option<&Path>,
+    timeout: Duration,
+) -> Result<Agent> {
+    let connector = native_tls_connector(ca_bundle_path)?;
+    Ok(ureq::AgentBuilder::new()
+        .tls_connector(connector)
+        .timeout_connect(timeout)
+        .timeout_read(timeout)
+        .timeout_write(timeout)
+        .build())
+}
+
+fn remote_probe_agent(remote: &Value, timeout: Duration) -> Result<Agent> {
+    let probe_url = remote_candidate_probe_url(remote)?;
+    let parsed = parse_url(&probe_url)?;
+    if parsed.scheme() == "https" {
+        let profile = get_path(remote, &["target_profile"])
+            .ok_or_else(|| anyhow!("missing remote target profile"))?;
+        let (_mode, ca_bundle_path, _pin) = tls_mode_from_profile(profile)?;
+        return agent_with_ca_bundle_and_timeout(ca_bundle_path.as_deref(), timeout);
+    }
+    Ok(remote_timeout_agent(timeout))
+}
+
+fn percentile_ms(values: &[f64], percentile: f64) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|left, right| left.total_cmp(right));
+    let idx = ((sorted.len() as f64 * percentile).ceil() as usize)
+        .saturating_sub(1)
+        .min(sorted.len().saturating_sub(1));
+    sorted[idx]
+}
+
+fn measure_remote_runtime_metrics(remote: &Value) -> Result<RemoteTelemetryMetrics> {
+    let timeout = Duration::from_millis(REMOTE_REAL_TELEMETRY_TIMEOUT_MS);
+    let agent = remote_probe_agent(remote, timeout)?;
+    let probe_url = remote_candidate_probe_url(remote)?;
+    let mut latencies_ms = Vec::with_capacity(REMOTE_REAL_TELEMETRY_SAMPLE_COUNT);
+    let mut successes = 0usize;
+    let mut failures = 0usize;
+    for _ in 0..REMOTE_REAL_TELEMETRY_SAMPLE_COUNT {
+        let started = Instant::now();
+        let response = agent.request("GET", &probe_url).call();
+        let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+        match response {
+            Ok(response) => {
+                latencies_ms.push(elapsed_ms);
+                if (200..400).contains(&response.status()) {
+                    successes += 1;
+                } else {
+                    failures += 1;
+                }
+            }
+            Err(UreqError::Status(code, _response)) => {
+                latencies_ms.push(elapsed_ms);
+                if (200..400).contains(&code) {
+                    successes += 1;
+                } else {
+                    failures += 1;
+                }
+            }
+            Err(UreqError::Transport(_err)) => {
+                latencies_ms.push(elapsed_ms.max(REMOTE_REAL_TELEMETRY_TIMEOUT_MS as f64));
+                failures += 1;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let total = successes + failures;
+    if total == 0 {
+        bail!("remote runtime telemetry probe did not collect any samples");
+    }
+    Ok(RemoteTelemetryMetrics {
+        latency_p95_ms: percentile_ms(&latencies_ms, 0.95),
+        error_rate: failures as f64 / total as f64,
+        availability: successes as f64 / total as f64,
+    })
+}
+
 fn remote_otlp_payload(
-    exec_id: &str,
+    context: &RemoteTelemetryContext,
     analysis_seq: usize,
-    service: &str,
-    seed: RemoteTelemetrySeed,
+    metrics: RemoteTelemetryMetrics,
+    telemetry_source: &str,
 ) -> Value {
     let time_unix_nano = format!("{}", 1_772_990_000_000_000_000_u64 + analysis_seq as u64);
     let attrs = vec![
-        otlp_attr_doc("exec_id", json!({ "stringValue": exec_id })),
-        otlp_attr_doc(
-            "analysis_seq",
-            json!({ "intValue": analysis_seq.to_string() }),
-        ),
+        otlp_string_attr("x07.exec_id", &context.exec_id),
+        otlp_string_attr("x07.run_id", &context.run_id),
+        otlp_string_attr("x07.pack_sha256", &context.pack_sha256),
+        otlp_string_attr("x07.slot", &context.slot),
+        otlp_string_attr("x07.app_id", &context.app_id),
+        otlp_string_attr("x07.environment", &context.environment),
+        otlp_string_attr("x07.telemetry_source", telemetry_source),
+        otlp_int_attr("x07.analysis_seq", analysis_seq),
     ];
     json!({
         "resourceMetrics": [{
             "resource": {
-                "attributes": [otlp_attr_doc("service.name", json!({ "stringValue": service }))]
+                "attributes": [otlp_string_attr("service.name", &context.service)]
             },
             "scopeMetrics": [{
                 "scope": {
@@ -2672,7 +2846,7 @@ fn remote_otlp_payload(
                             "dataPoints": [{
                                 "attributes": attrs.clone(),
                                 "timeUnixNano": time_unix_nano,
-                                "asDouble": seed.error_rate,
+                                "asDouble": metrics.error_rate,
                             }]
                         }
                     },
@@ -2683,7 +2857,7 @@ fn remote_otlp_payload(
                             "dataPoints": [{
                                 "attributes": attrs.clone(),
                                 "timeUnixNano": time_unix_nano,
-                                "asDouble": seed.latency_p95_ms,
+                                "asDouble": metrics.latency_p95_ms,
                             }]
                         }
                     },
@@ -2694,7 +2868,7 @@ fn remote_otlp_payload(
                             "dataPoints": [{
                                 "attributes": attrs,
                                 "timeUnixNano": time_unix_nano,
-                                "asDouble": seed.availability,
+                                "asDouble": metrics.availability,
                             }]
                         }
                     }
@@ -2727,9 +2901,9 @@ fn otlp_datapoint_value(point: &Value) -> Option<f64> {
 
 fn remote_metrics_snapshot_from_otlp_export(
     export_line: &Value,
-    exec_id: &str,
+    context: &RemoteTelemetryContext,
     analysis_seq: usize,
-    service: &str,
+    telemetry_source: &str,
 ) -> Option<Value> {
     let mut metrics = BTreeMap::new();
     let analysis_seq = analysis_seq.to_string();
@@ -2754,8 +2928,18 @@ fn remote_metrics_snapshot_from_otlp_export(
                         .and_then(Value::as_array)
                         .cloned()
                         .unwrap_or_default();
-                    if !otlp_attr_matches(&attrs, "exec_id", exec_id)
-                        || !otlp_attr_matches(&attrs, "analysis_seq", &analysis_seq)
+                    if !otlp_attr_matches(&attrs, "x07.exec_id", &context.exec_id)
+                        || !otlp_attr_matches(&attrs, "x07.run_id", &context.run_id)
+                        || !otlp_attr_matches(&attrs, "x07.pack_sha256", &context.pack_sha256)
+                        || !otlp_attr_matches(&attrs, "x07.slot", &context.slot)
+                        || !otlp_attr_matches(&attrs, "x07.app_id", &context.app_id)
+                        || !otlp_attr_matches(&attrs, "x07.environment", &context.environment)
+                        || !otlp_attr_matches(
+                            &attrs,
+                            "x07.telemetry_source",
+                            telemetry_source,
+                        )
+                        || !otlp_attr_matches(&attrs, "x07.analysis_seq", &analysis_seq)
                     {
                         continue;
                     }
@@ -2774,10 +2958,19 @@ fn remote_metrics_snapshot_from_otlp_export(
     }
     Some(json!({
         "schema_version": "x07.metrics.snapshot@0.1.0",
-        "service": service,
+        "service": context.service,
         "taken_at_utc": "2026-02-27T00:00:00Z",
         "v": 1,
-        "labels": {},
+        "labels": {
+            "x07.exec_id": context.exec_id,
+            "x07.run_id": context.run_id,
+            "x07.pack_sha256": context.pack_sha256,
+            "x07.slot": context.slot,
+            "x07.app_id": context.app_id,
+            "x07.environment": context.environment,
+            "x07.telemetry_source": telemetry_source,
+            "x07.analysis_seq": analysis_seq,
+        },
         "metrics": [
             { "name": "http_error_rate", "unit": "ratio", "value": metrics["http_error_rate"] },
             { "name": "http_latency_p95_ms", "unit": "ms", "value": metrics["http_latency_p95_ms"] },
@@ -2788,9 +2981,9 @@ fn remote_metrics_snapshot_from_otlp_export(
 
 fn read_remote_otlp_snapshot(
     state_dir: &Path,
-    exec_id: &str,
+    context: &RemoteTelemetryContext,
     analysis_seq: usize,
-    service: &str,
+    telemetry_source: &str,
 ) -> Result<Option<Value>> {
     let export_path = remote_otlp_export_path(state_dir);
     if !export_path.exists() {
@@ -2804,8 +2997,12 @@ fn read_remote_otlp_snapshot(
             continue;
         }
         let doc: Value = serde_json::from_str(&line).context("parse otlp export line")?;
-        if let Some(snapshot) =
-            remote_metrics_snapshot_from_otlp_export(&doc, exec_id, analysis_seq, service)
+        if let Some(snapshot) = remote_metrics_snapshot_from_otlp_export(
+            &doc,
+            context,
+            analysis_seq,
+            telemetry_source,
+        )
         {
             last = Some(snapshot);
         }
@@ -2814,16 +3011,16 @@ fn read_remote_otlp_snapshot(
 }
 
 fn emit_remote_otlp_metrics(
-    exec_id: &str,
+    context: &RemoteTelemetryContext,
     analysis_seq: usize,
     remote: &Value,
-    service: &str,
-    seed: RemoteTelemetrySeed,
+    metrics: RemoteTelemetryMetrics,
+    telemetry_source: &str,
 ) -> Result<()> {
     let Some(url) = remote_otlp_metrics_url(remote) else {
         bail!("missing telemetry collector hint for remote target");
     };
-    let payload = remote_otlp_payload(exec_id, analysis_seq, service, seed);
+    let payload = remote_otlp_payload(context, analysis_seq, metrics, telemetry_source);
     match remote_agent()
         .request("POST", &url)
         .set("content-type", "application/json")
@@ -2840,19 +3037,28 @@ fn emit_remote_otlp_metrics(
 fn generate_remote_metrics_snapshot(
     state_dir: &Path,
     exec_doc: &Value,
+    run_doc: &Value,
     analysis_seq: usize,
     fixture: Option<&str>,
 ) -> Result<Value> {
     let remote = get_path(exec_doc, &["meta", "ext", "remote"])
         .ok_or_else(|| anyhow!("missing remote execution metadata"))?;
-    let app_id =
-        get_str(exec_doc, &["meta", "target", "app_id"]).unwrap_or_else(|| "app_min".to_string());
-    let exec_id = get_str(exec_doc, &["exec_id"]).ok_or_else(|| anyhow!("missing exec_id"))?;
-    let seed = remote_telemetry_seed(fixture, analysis_seq);
-    emit_remote_otlp_metrics(&exec_id, analysis_seq, remote, &app_id, seed)?;
+    let context = remote_telemetry_context(exec_doc, run_doc)?;
+    let (metrics, telemetry_source) = if remote_synthetic_telemetry_enabled() {
+        (
+            remote_telemetry_seed(fixture),
+            "synthetic_fixture".to_string(),
+        )
+    } else {
+        (
+            measure_remote_runtime_metrics(remote)?,
+            "remote_runtime_probe".to_string(),
+        )
+    };
+    emit_remote_otlp_metrics(&context, analysis_seq, remote, metrics, &telemetry_source)?;
     for _ in 0..20 {
         if let Some(snapshot) =
-            read_remote_otlp_snapshot(state_dir, &exec_id, analysis_seq, &app_id)?
+            read_remote_otlp_snapshot(state_dir, &context, analysis_seq, &telemetry_source)?
         {
             return Ok(snapshot);
         }
@@ -2860,7 +3066,7 @@ fn generate_remote_metrics_snapshot(
     }
     bail!(
         "remote telemetry export did not contain metrics for {} analysis {}",
-        exec_id,
+        context.exec_id,
         analysis_seq
     )
 }
@@ -8131,6 +8337,7 @@ fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
                     let metrics_doc = match generate_remote_metrics_snapshot(
                         &state_dir,
                         &exec_doc,
+                        &run_doc,
                         analysis_counter,
                         args.fixture.as_deref(),
                     ) {
