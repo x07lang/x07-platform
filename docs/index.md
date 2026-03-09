@@ -2,6 +2,23 @@
 
 `x07-platform` is a contract-first lifecycle engine for accepting sealed artifacts (starting with `x07.app.pack@0.1.0`) and producing deterministic, machine-readable run + decision artifacts.
 
+## Vision
+
+- Turn X07 app delivery into a contract-first closed loop from change request through deploy, incident capture, and regression generation.
+- Keep the same CLI and sealed artifacts usable across local development, self-hosted remote targets, and the future hosted platform.
+- Give creators a default path that does not require learning provider-specific infrastructure, while keeping operators in control through auditable artifacts and explicit control actions.
+
+## Audience
+
+- creators who want to build and ship X07 apps without becoming infrastructure specialists
+- operators who need policy, SLO, query, control, and audit surfaces that stay machine-readable
+
+## Current goals
+
+- provide a strong OSS baseline for local deploy plus self-hosted remote deploy parity
+- keep runtime, routing, telemetry, secrets, and publish behavior behind adapters and conformance
+- preserve a clean split between the public engine and the hosted private product layer
+
 Current surface:
 
 - public `lp.*` JSON Schemas consumed from `contracts/spec/schemas/` with `x07-platform-contracts` as the authority

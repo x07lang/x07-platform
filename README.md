@@ -2,6 +2,20 @@
 
 `x07-platform` is the public lifecycle runtime and self-hosted control-plane repo for X07 sealed artifacts.
 
+Vision:
+- Make X07 application delivery contract-first, machine-readable, and auditable from change request through deploy, incident capture, and regression generation.
+- Keep the same creator-facing CLI and sealed artifacts usable across local development, self-hosted remote targets, and the future hosted platform.
+- Let creators focus on making things while humans supervise through one control surface for deploy, query, approval, pause, stop, rerun, rollback, and audit.
+
+Audience:
+- creators who want a serious default deploy and operations path without learning provider-specific infrastructure
+- operators who need deterministic reports, policy and SLO gates, audit trails, and pluggable adapters
+
+Current goals:
+- ship a strong public OSS baseline for local and self-hosted remote deploys
+- keep provider support behind adapters and conformance rather than hard-coded cloud logic
+- keep hosted-only account, tenancy, metering, and billing work out of this repo so the public engine stays reusable
+
 Public surface:
 - public `lp.*` contracts consumed from `contracts/spec/schemas/` with `x07-platform-contracts` as the authoritative source
 - `x07lp` CLI for `change`, `deploy`, `target`, `adapter`, `incident`, `regress`, `app`, `platform`, `ui`, and `schema` workflows
