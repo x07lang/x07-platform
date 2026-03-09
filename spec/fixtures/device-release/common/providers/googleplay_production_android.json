@@ -1,0 +1,18 @@
+{
+  "schema_version": "lp.device.store.provider.profile@0.1.0",
+  "provider_id": "googleplay_production_android",
+  "provider_kind": "googleplay_v1",
+  "distribution_lane": "production",
+  "target": "android",
+  "credentials_ref": "spec/fixtures/device-release/common/credentials/googleplay.ref.txt",
+  "app_ref": {
+    "package_name": "io.x07.demo.android"
+  },
+  "policy": {
+    "approval_mode": "manual"
+  },
+  "track": "production",
+  "rollout_defaults": {
+    "initial_percent": 15
+  }
+}

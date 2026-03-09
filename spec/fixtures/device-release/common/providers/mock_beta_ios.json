@@ -1,0 +1,15 @@
+{
+  "schema_version": "lp.device.store.provider.profile@0.1.0",
+  "provider_id": "mock_beta_ios",
+  "provider_kind": "mock_v1",
+  "distribution_lane": "beta",
+  "target": "ios",
+  "credentials_ref": "spec/fixtures/device-release/common/credentials/mock.ref.txt",
+  "app_ref": {
+    "bundle_id": "io.x07.demo.ios"
+  },
+  "policy": {
+    "approval_mode": "not_required"
+  },
+  "track": "beta"
+}

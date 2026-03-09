@@ -1,0 +1,10 @@
+{
+  "schema_version": "x07.device.profile@0.1.0",
+  "identity": {
+    "app_id": "com.x07.notes.ios"
+  },
+  "version": {
+    "version": "1.2.3",
+    "build": "42"
+  }
+}

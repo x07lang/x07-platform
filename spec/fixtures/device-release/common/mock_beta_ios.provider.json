@@ -1,0 +1,15 @@
+{
+  "schema_version": "lp.device.store.provider.profile@0.1.0",
+  "provider_id": "provider_mock_beta_ios",
+  "provider_kind": "mock_v1",
+  "distribution_lane": "beta",
+  "target": "ios",
+  "credentials_ref": "secrets://device/mock-beta-ios",
+  "app_ref": {
+    "bundle_id": "com.x07.notes.ios"
+  },
+  "track": "testflight",
+  "policy": {
+    "initial_percent": 100
+  }
+}

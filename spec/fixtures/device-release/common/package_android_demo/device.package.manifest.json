@@ -1,0 +1,29 @@
+{
+  "schema_version": "x07.device.package.manifest@0.1.0",
+  "kind": "device_package",
+  "target": "android",
+  "bundle_manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "profile": {
+    "id": "demo_android_release",
+    "v": 1,
+    "file": {
+      "path": "payload/profile/device.profile.json",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "bytes_len": 512
+    }
+  },
+  "capabilities": {
+    "path": "payload/profile/device.capabilities.json",
+    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "bytes_len": 256
+  },
+  "telemetry_profile": {
+    "path": "payload/profile/device.telemetry.profile.json",
+    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "bytes_len": 256
+  },
+  "package": {
+    "kind": "dir",
+    "path": "payload"
+  }
+}

@@ -68,6 +68,19 @@ run_x07lp() {
   decode_solve_output_b64 "$report_path" "$out_path"
 }
 
+golden_matches() {
+  local expected_path="$1"
+  local actual_path="$2"
+  "$PYTHON" - "$expected_path" "$actual_path" <<'PY'
+import pathlib
+import sys
+
+expected = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").rstrip("\n")
+actual = pathlib.Path(sys.argv[2]).read_text(encoding="utf-8").rstrip("\n")
+raise SystemExit(0 if expected == actual else 1)
+PY
+}
+
 check_cli_report_fields() {
   local cli_out="$1"
   local expect_ok="$2"
@@ -186,7 +199,7 @@ run_x07lp \
   --now-unix-ms "${NOW_UNIX_MS}" \
   --json
 
-cmp -s "${ROOT_DIR}/_tmp/ci_phaseA_allow.cli.json" "${ROOT_DIR}/${GOLDEN_ALLOW}" || {
+golden_matches "${ROOT_DIR}/${GOLDEN_ALLOW}" "${ROOT_DIR}/_tmp/ci_phaseA_allow.cli.json" || {
   echo "deploy accept allow output drifted" >&2
   diff -u "${ROOT_DIR}/${GOLDEN_ALLOW}" "${ROOT_DIR}/_tmp/ci_phaseA_allow.cli.json" >&2
   exit 1
@@ -230,7 +243,7 @@ run_x07lp \
   --now-unix-ms "${NOW_UNIX_MS}" \
   --json
 
-cmp -s "${ROOT_DIR}/_tmp/ci_phaseA_deny.cli.json" "${ROOT_DIR}/${GOLDEN_DENY}" || {
+golden_matches "${ROOT_DIR}/${GOLDEN_DENY}" "${ROOT_DIR}/_tmp/ci_phaseA_deny.cli.json" || {
   echo "deploy accept deny output drifted" >&2
   diff -u "${ROOT_DIR}/${GOLDEN_DENY}" "${ROOT_DIR}/_tmp/ci_phaseA_deny.cli.json" >&2
   exit 1
@@ -275,4 +288,3 @@ run_x07lp \
   --json
 check_cli_report_fields "${ROOT_DIR}/_tmp/ci_phaseA_bad_digest.cli.json" false 12 "" "LP_PACK_DIGEST_MISMATCH_FILE"
 echo "ok: bad digest"
-

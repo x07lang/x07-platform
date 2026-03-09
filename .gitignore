@@ -1,6 +1,8 @@
 .x07/
 .x07lp/
 dist/
+!adapters/modules/lp/impl/dist/
+!adapters/modules/lp/impl/dist/*.x07.json
 out/
 target/
 _tmp/

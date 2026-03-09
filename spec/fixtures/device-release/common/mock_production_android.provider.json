@@ -1,0 +1,18 @@
+{
+  "schema_version": "lp.device.store.provider.profile@0.1.0",
+  "provider_id": "provider_mock_production_android",
+  "provider_kind": "mock_v1",
+  "distribution_lane": "production",
+  "target": "android",
+  "credentials_ref": "secrets://device/mock-production-android",
+  "app_ref": {
+    "package_name": "com.x07.notes.android"
+  },
+  "track": "production",
+  "rollout_defaults": {
+    "initial_percent": 15
+  },
+  "policy": {
+    "initial_percent": 15
+  }
+}

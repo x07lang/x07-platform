@@ -1,0 +1,39 @@
+{
+  "schema_version": "x07.device.profile@0.1.0",
+  "id": "demo_android_release",
+  "v": 1,
+  "target": "android",
+  "identity": {
+    "display_name": "Demo Android Release",
+    "app_id": "io.x07.demo.android"
+  },
+  "version": {
+    "version": "2.4.6",
+    "build": 84
+  },
+  "security": {
+    "allow_dynamic_code_loading": false
+  },
+  "ui": {
+    "project": "ui",
+    "web_ui_profile_id": "device_ui_release"
+  },
+  "backend": {
+    "mode": "remote_http",
+    "base_url": "https://api.x07.io",
+    "allowed_hosts": [
+      "api.x07.io"
+    ]
+  },
+  "capabilities": {
+    "path": "profile/device.capabilities.json"
+  },
+  "telemetry_profile": {
+    "path": "profile/device.telemetry.profile.json"
+  },
+  "android": {
+    "application_id": "io.x07.demo.android",
+    "min_sdk": 24,
+    "signing_mode": "store"
+  }
+}

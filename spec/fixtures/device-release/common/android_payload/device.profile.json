@@ -1,0 +1,10 @@
+{
+  "schema_version": "x07.device.profile@0.1.0",
+  "identity": {
+    "app_id": "com.x07.notes.android"
+  },
+  "version": {
+    "version": "2.3.4",
+    "build": "84"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": "lp.device.store.provider.profile@0.1.0",
+  "provider_id": "provider_appstore_production_ios",
+  "provider_kind": "appstoreconnect_v1",
+  "distribution_lane": "production",
+  "target": "ios",
+  "credentials_ref": "secrets://device/appstore-production-ios",
+  "app_ref": {
+    "bundle_id": "com.x07.notes.ios"
+  },
+  "track": "production",
+  "policy": {
+    "phased_release": true
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "schema_version": "lp.device.release.plan@0.1.0",
+  "plan_id": "lpdrplan_invalid_ios_percent",
+  "created_unix_ms": 1760000000000,
+  "provider_profile": {
+    "kind": "lp.device.store.provider.profile@0.1.0",
+    "provider_id": "provider_appstore_production_ios"
+  },
+  "target": "ios",
+  "app": {
+    "app_id": "com.x07.notes.ios",
+    "track_or_lane": "production",
+    "version": "1.2.3",
+    "build": "42"
+  },
+  "package": {
+    "kind": "x07.device.package.manifest@0.1.0",
+    "label": "ios.package.manifest.json"
+  },
+  "strategy": {
+    "max_auto_steps": 16,
+    "max_total_wait_seconds": 3600,
+    "on_provider_error": "pause"
+  },
+  "steps": [
+    {
+      "id": "start",
+      "op": "release.start",
+      "on_fail": "pause"
+    },
+    {
+      "id": "rollout_25",
+      "op": "rollout.set_percent",
+      "percent": 25,
+      "on_fail": "pause"
+    }
+  ]
+}

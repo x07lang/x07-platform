@@ -1,0 +1,20 @@
+{
+  "schema_version": "x07.device.package.manifest@0.1.0",
+  "target": "android",
+  "profile": {
+    "kind": "x07.device.profile@0.1.0",
+    "label": "device.profile.json"
+  },
+  "capabilities": {
+    "kind": "x07.device.capabilities@0.1.0",
+    "label": "device.capabilities.json"
+  },
+  "telemetry_profile": {
+    "kind": "x07.device.telemetry.profile@0.1.0",
+    "label": "device.telemetry.profile.json"
+  },
+  "package": {
+    "kind": "dir",
+    "path": "android_payload"
+  }
+}

@@ -18,10 +18,11 @@ Current goals:
 
 Public surface:
 - public `lp.*` contracts consumed from `contracts/spec/schemas/` with `x07-platform-contracts` as the authoritative source
-- `x07lp` CLI for `change`, `deploy`, `target`, `adapter`, `incident`, `regress`, `app`, `platform`, `ui`, and `schema` workflows
+- `x07lp` CLI for `change`, `deploy`, `target`, `adapter`, `incident`, `regress`, `app`, `device`, `platform`, `ui`, and `schema` workflows
 - local content-addressed state under `.x07lp/` or `--state-dir`
 - local runtime, routing, signed control actions, incident capture, regression generation, and query/index support for `x07.app.pack@0.1.0`
 - self-hosted remote target management, remote deploy API, remote event/log streams, and reference adapter work for the OSS remote path
+- device package release planning, provider validation, staged rollout control, Command Center device-release views, and MCP tools for `lp.device.release.*`
 - MCP router/worker integration under `gateway/mcp/`
 - local Command Center HTTP surface served by `x07lpd`
 - compose-backed self-hosted reference target with HTTPS control-plane ingress, authenticated/TLS OCI publishing, and encrypted server-side secret storage
@@ -40,7 +41,13 @@ Developer commands:
 - Check contract schema index: `./scripts/gen_schema_index.sh --check`
 - Lock deps: `x07 pkg lock --project x07.json`
 - Bundle CLI: `x07 bundle --project x07.json --profile os --out out/x07lp`
+- Check device release orchestration: `./scripts/ci/device-release.sh`
 - Run checks: `./scripts/ci/check_all.sh`
+
+Device distribution note:
+- `x07lp device release-create`, `release-validate`, `release-run`, `release-query`, `release-pause`, `release-resume`, `release-halt`, `release-complete`, and `release-rollback` drive the shared device-release engine.
+- Default CI and local fixture validation use deterministic provider-matrix simulation for `appstoreconnect_v1` and `googleplay_v1`.
+- Manual live-provider validation remains explicit through `X07LP_DEVICE_PROVIDER_LIVE=1`.
 
 CI note:
 - The platform CI scripts prefer sibling workspace builds from `../x07/target/debug` and `../x07-wasm-backend/target/release` when those directories exist so the repo tests the current release train rather than an older installed toolchain.

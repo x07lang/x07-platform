@@ -1,0 +1,37 @@
+{
+  "schema_version": "lp.device.release.plan@0.1.0",
+  "plan_id": "lpdrplan_googleplay_rollback",
+  "created_unix_ms": 1760000000001,
+  "provider_profile": {
+    "kind": "lp.device.store.provider.profile@0.1.0",
+    "provider_id": "provider_googleplay_production_android"
+  },
+  "target": "android",
+  "app": {
+    "app_id": "com.x07.notes.android",
+    "track_or_lane": "production",
+    "version": "2.3.4",
+    "build": "84"
+  },
+  "package": {
+    "kind": "x07.device.package.manifest@0.1.0",
+    "label": "android.package.manifest.json"
+  },
+  "strategy": {
+    "max_auto_steps": 16,
+    "max_total_wait_seconds": 3600,
+    "on_provider_error": "pause"
+  },
+  "steps": [
+    {
+      "id": "start",
+      "op": "release.start",
+      "on_fail": "pause"
+    },
+    {
+      "id": "rollback_previous",
+      "op": "rollback.previous",
+      "on_fail": "pause"
+    }
+  ]
+}

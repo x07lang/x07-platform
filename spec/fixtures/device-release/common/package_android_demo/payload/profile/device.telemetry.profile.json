@@ -1,0 +1,11 @@
+{
+  "schema_version": "x07.device.telemetry.profile@0.1.0",
+  "transport": {
+    "protocol": "http/protobuf",
+    "endpoint": "https://telemetry.x07.io/v1/otlp"
+  },
+  "event_classes": [
+    "release.lifecycle",
+    "release.error"
+  ]
+}

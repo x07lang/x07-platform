@@ -69,6 +69,14 @@ const REMOTE_REAL_TELEMETRY_SAMPLE_COUNT: usize = 7;
 const REMOTE_REAL_TELEMETRY_TIMEOUT_MS: u64 = 750;
 const LOCAL_TARGET_SENTINEL: &str = "__local__";
 const VALID_QUERY_VIEWS: &[&str] = &["summary", "timeline", "decisions", "artifacts", "full"];
+const VALID_DEVICE_RELEASE_QUERY_VIEWS: &[&str] = &["summary", "timeline", "decisions", "full"];
+const DEVICE_PROVIDER_LIVE_ENV: &str = "X07LP_DEVICE_PROVIDER_LIVE";
+const DEVICE_RELEASE_PLAN_KIND: &str = "lp.device.release.plan@0.1.0";
+const DEVICE_RELEASE_EXECUTION_KIND: &str = "lp.device.release.execution@0.1.0";
+const DEVICE_RELEASE_QUERY_RESULT_KIND: &str = "lp.device.release.query.result@0.1.0";
+const DEVICE_RELEASE_RUN_RESULT_KIND: &str = "lp.device.release.run.result@0.1.0";
+const DEVICE_STORE_PROVIDER_PROFILE_KIND: &str = "lp.device.store.provider.profile@0.1.0";
+const DEVICE_PACKAGE_MANIFEST_KIND: &str = "x07.device.package.manifest@0.1.0";
 const REDACTED_HTTP_HEADER_NAMES: &[&str] = &[
     "authorization",
     "proxy-authorization",
@@ -177,6 +185,15 @@ enum Commands {
     TargetUse(TargetUseArgs),
     TargetRemove(TargetRemoveArgs),
     AdapterConformance(AdapterConformanceArgs),
+    DeviceReleaseCreate(DeviceReleaseCreateArgs),
+    DeviceReleaseValidate(DeviceReleaseValidateArgs),
+    DeviceReleaseRun(DeviceReleaseRunArgs),
+    DeviceReleaseQuery(DeviceReleaseQueryArgs),
+    DeviceReleasePause(DeviceReleaseControlArgs),
+    DeviceReleaseResume(DeviceReleaseControlArgs),
+    DeviceReleaseHalt(DeviceReleaseControlArgs),
+    DeviceReleaseComplete(DeviceReleaseControlArgs),
+    DeviceReleaseRollback(DeviceReleaseControlArgs),
     #[command(hide = true)]
     SecretStorePack(SecretStorePackArgs),
     UiServe(UiServeArgs),
@@ -445,6 +462,72 @@ struct AdapterConformanceArgs {
 }
 
 #[derive(Args, Debug)]
+struct DeviceReleaseCreateArgs {
+    #[arg(long)]
+    provider_profile: String,
+    #[arg(long)]
+    package_manifest: String,
+    #[arg(long)]
+    out: String,
+    #[command(flatten)]
+    common: CommonStateArgs,
+}
+
+#[derive(Args, Debug)]
+struct DeviceReleaseValidateArgs {
+    #[arg(long)]
+    plan: String,
+    #[arg(long)]
+    provider_profile: Option<String>,
+    #[command(flatten)]
+    common: CommonStateArgs,
+}
+
+#[derive(Args, Debug)]
+struct DeviceReleaseRunArgs {
+    #[arg(long)]
+    plan: String,
+    #[arg(long)]
+    provider_profile: Option<String>,
+    #[arg(long)]
+    package_manifest: Option<String>,
+    #[command(flatten)]
+    common: CommonStateArgs,
+}
+
+#[derive(Args, Debug)]
+struct DeviceReleaseQueryArgs {
+    #[arg(long = "release", alias = "release-id", alias = "release-exec-id")]
+    release_exec_id: Option<String>,
+    #[arg(long)]
+    app_id: Option<String>,
+    #[arg(long)]
+    provider_id: Option<String>,
+    #[arg(long)]
+    distribution_lane: Option<String>,
+    #[arg(long)]
+    target: Option<String>,
+    #[arg(long, default_value = "summary")]
+    view: String,
+    #[arg(long)]
+    limit: Option<usize>,
+    #[arg(long, default_value_t = false)]
+    latest: bool,
+    #[command(flatten)]
+    common: CommonStateArgs,
+}
+
+#[derive(Args, Debug)]
+struct DeviceReleaseControlArgs {
+    #[arg(long = "release", alias = "release-id", alias = "release-exec-id")]
+    release_exec_id: String,
+    #[arg(long)]
+    reason: String,
+    #[command(flatten)]
+    common: CommonStateArgs,
+}
+
+#[derive(Args, Debug)]
 struct SecretStorePackArgs {
     #[arg(long)]
     input: String,
@@ -489,6 +572,25 @@ fn real_main() -> Result<i32> {
         Commands::TargetUse(args) => command_target_use(args)?,
         Commands::TargetRemove(args) => command_target_remove(args)?,
         Commands::AdapterConformance(args) => command_adapter_conformance(args)?,
+        Commands::DeviceReleaseCreate(args) => command_device_release_create(args)?,
+        Commands::DeviceReleaseValidate(args) => command_device_release_validate(args)?,
+        Commands::DeviceReleaseRun(args) => command_device_release_run(args)?,
+        Commands::DeviceReleaseQuery(args) => command_device_release_query(args)?,
+        Commands::DeviceReleasePause(args) => {
+            command_device_release_control(args, "pause", "device.release.pause.manual")?
+        }
+        Commands::DeviceReleaseResume(args) => {
+            command_device_release_control(args, "resume", "device.release.resume.manual")?
+        }
+        Commands::DeviceReleaseHalt(args) => {
+            command_device_release_control(args, "halt", "device.release.halt.manual")?
+        }
+        Commands::DeviceReleaseComplete(args) => {
+            command_device_release_control(args, "complete", "device.release.complete.manual")?
+        }
+        Commands::DeviceReleaseRollback(args) => {
+            command_device_release_control(args, "rollback", "device.release.rollback.manual")?
+        }
         Commands::SecretStorePack(args) => command_secret_store_pack(args)?,
     };
     println!("{}", String::from_utf8(canon_json_bytes(&report))?);
@@ -7575,6 +7677,1256 @@ fn build_control_action_result(
     result
 }
 
+fn device_release_root_dir(state_dir: &Path) -> PathBuf {
+    state_dir.join("device_release")
+}
+
+fn device_release_provider_path(state_dir: &Path, provider_id: &str) -> PathBuf {
+    device_release_root_dir(state_dir)
+        .join("providers")
+        .join(format!("{provider_id}.json"))
+}
+
+fn device_release_package_path(state_dir: &Path, sha256: &str) -> PathBuf {
+    device_release_root_dir(state_dir)
+        .join("packages")
+        .join(format!("{sha256}.json"))
+}
+
+fn device_release_plan_path(state_dir: &Path, plan_id: &str) -> PathBuf {
+    device_release_root_dir(state_dir)
+        .join("plans")
+        .join(format!("{plan_id}.json"))
+}
+
+fn device_release_exec_path(state_dir: &Path, exec_id: &str) -> PathBuf {
+    device_release_root_dir(state_dir)
+        .join("executions")
+        .join(format!("{exec_id}.json"))
+}
+
+fn load_device_release_exec(state_dir: &Path, exec_id: &str) -> Result<Value> {
+    load_json(&device_release_exec_path(state_dir, exec_id))
+}
+
+fn save_device_release_exec(state_dir: &Path, exec_doc: &Value) -> Result<Vec<u8>> {
+    let exec_id =
+        get_str(exec_doc, &["exec_id"]).ok_or_else(|| anyhow!("missing device release exec_id"))?;
+    write_json(&device_release_exec_path(state_dir, &exec_id), exec_doc)
+}
+
+fn provider_module_id(provider_kind: &str) -> &'static str {
+    match provider_kind {
+        "mock_v1" => "lp.impl.dist.mock_v1",
+        "appstoreconnect_v1" => "lp.impl.dist.appstoreconnect_v1",
+        "googleplay_v1" => "lp.impl.dist.googleplay_v1",
+        _ => "lp.impl.dist.mock_v1",
+    }
+}
+
+fn string_or_number(value: &Value, path: &[&str]) -> Option<String> {
+    let node = get_path(value, path)?;
+    if let Some(text) = node.as_str() {
+        Some(text.to_string())
+    } else if let Some(number) = node.as_u64() {
+        Some(number.to_string())
+    } else {
+        node.as_i64().map(|number| number.to_string())
+    }
+}
+
+fn build_device_provider_capabilities(provider_doc: &Value) -> Result<Value> {
+    let provider_kind = get_str(provider_doc, &["provider_kind"])
+        .ok_or_else(|| anyhow!("provider profile missing provider_kind"))?;
+    let target =
+        get_str(provider_doc, &["target"]).ok_or_else(|| anyhow!("provider profile missing target"))?;
+    let distribution_lane = get_str(provider_doc, &["distribution_lane"])
+        .ok_or_else(|| anyhow!("provider profile missing distribution_lane"))?;
+    let (supported_ops, supports_percent_rollout, supports_pause, supports_resume, supports_complete, supports_rollback) =
+        match (provider_kind.as_str(), distribution_lane.as_str()) {
+            ("mock_v1", "beta") => (
+                vec!["release.start"],
+                false,
+                false,
+                false,
+                false,
+                false,
+            ),
+            ("mock_v1", "production") => (
+                vec![
+                    "release.start",
+                    "rollout.set_percent",
+                    "release.pause",
+                    "release.resume",
+                    "release.complete",
+                    "rollback.previous",
+                ],
+                true,
+                true,
+                true,
+                true,
+                true,
+            ),
+            ("appstoreconnect_v1", "beta") => (vec!["release.start"], false, false, false, false, false),
+            ("appstoreconnect_v1", "production") => (
+                vec!["release.start", "release.pause", "release.resume", "release.complete"],
+                false,
+                true,
+                true,
+                true,
+                false,
+            ),
+            ("googleplay_v1", "beta") => (vec!["release.start"], false, false, false, false, false),
+            ("googleplay_v1", "production") => (
+                vec![
+                    "release.start",
+                    "rollout.set_percent",
+                    "release.pause",
+                    "release.resume",
+                    "release.complete",
+                    "rollback.previous",
+                ],
+                true,
+                true,
+                true,
+                true,
+                true,
+            ),
+            _ => bail!("unsupported provider_kind/distribution_lane combination"),
+        };
+    Ok(json!({
+        "schema_version": "lp.adapter.capabilities@0.1.0",
+        "provider": provider_module_id(&provider_kind),
+        "runtime_kind": "device_store",
+        "routing_kind": "store_control",
+        "artifact_distribution": "store_upload",
+        "supports_incidents": false,
+        "supports_regressions": false,
+        "supports_pause": false,
+        "supports_rerun": false,
+        "supports_weighted_canary": false,
+        "supports_otlp": false,
+        "supports_server_side_secrets": false,
+        "device_release": {
+            "supported_targets": [target],
+            "supported_distribution_lanes": [distribution_lane],
+            "supported_ops": supported_ops,
+            "supports_percent_rollout": supports_percent_rollout,
+            "supports_release_pause": supports_pause,
+            "supports_release_resume": supports_resume,
+            "supports_release_complete": supports_complete,
+            "supports_release_rollback": supports_rollback,
+        }
+    }))
+}
+
+fn validate_device_provider_profile_doc(provider_doc: &Value) -> Result<Value> {
+    if get_str(provider_doc, &["schema_version"]).as_deref() != Some(DEVICE_STORE_PROVIDER_PROFILE_KIND)
+    {
+        bail!("provider profile must have schema_version={DEVICE_STORE_PROVIDER_PROFILE_KIND}");
+    }
+    let provider_kind = get_str(provider_doc, &["provider_kind"])
+        .ok_or_else(|| anyhow!("provider profile missing provider_kind"))?;
+    if !matches!(
+        provider_kind.as_str(),
+        "mock_v1" | "appstoreconnect_v1" | "googleplay_v1"
+    ) {
+        bail!("unsupported provider_kind={provider_kind}");
+    }
+    let target =
+        get_str(provider_doc, &["target"]).ok_or_else(|| anyhow!("provider profile missing target"))?;
+    if !matches!(target.as_str(), "ios" | "android") {
+        bail!("unsupported device release target={target}");
+    }
+    let distribution_lane = get_str(provider_doc, &["distribution_lane"])
+        .ok_or_else(|| anyhow!("provider profile missing distribution_lane"))?;
+    if !matches!(distribution_lane.as_str(), "beta" | "production") {
+        bail!("unsupported device release lane={distribution_lane}");
+    }
+    if get_str(provider_doc, &["provider_id"]).is_none() {
+        bail!("provider profile missing provider_id");
+    }
+    if get_path(provider_doc, &["app_ref"]).is_none() {
+        bail!("provider profile missing app_ref");
+    }
+    if get_path(provider_doc, &["policy"]).is_none() {
+        bail!("provider profile missing policy");
+    }
+    build_device_provider_capabilities(provider_doc)
+}
+
+fn validate_device_package_manifest_doc(package_doc: &Value) -> Result<()> {
+    if get_str(package_doc, &["schema_version"]).as_deref() != Some(DEVICE_PACKAGE_MANIFEST_KIND) {
+        bail!("package manifest must have schema_version={DEVICE_PACKAGE_MANIFEST_KIND}");
+    }
+    let target = get_str(package_doc, &["target"]).ok_or_else(|| anyhow!("package manifest missing target"))?;
+    if !matches!(target.as_str(), "ios" | "android") {
+        bail!("device release target must be ios or android");
+    }
+    if get_path(package_doc, &["profile"]).is_none() {
+        bail!("package manifest missing profile");
+    }
+    if get_path(package_doc, &["capabilities"]).is_none() {
+        bail!("package manifest missing capabilities");
+    }
+    if get_path(package_doc, &["telemetry_profile"]).is_none() {
+        bail!("package manifest missing telemetry_profile");
+    }
+    if get_path(package_doc, &["package"]).is_none() {
+        bail!("package manifest missing package payload");
+    }
+    Ok(())
+}
+
+fn find_embedded_device_profile(payload_dir: &Path) -> Result<PathBuf> {
+    let mut matches = Vec::new();
+    for entry in WalkDir::new(payload_dir) {
+        let entry = entry?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if entry.file_name() != OsStr::new("device.profile.json") {
+            continue;
+        }
+        matches.push(entry.path().to_path_buf());
+    }
+    matches.sort();
+    matches
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("unable to find embedded device.profile.json under {}", payload_dir.display()))
+}
+
+fn package_payload_path(package_manifest_path: &Path, package_doc: &Value) -> Result<PathBuf> {
+    let package_rel = get_str(package_doc, &["package", "path"])
+        .ok_or_else(|| anyhow!("package manifest missing package.path"))?;
+    let kind = get_str(package_doc, &["package", "kind"])
+        .ok_or_else(|| anyhow!("package manifest missing package.kind"))?;
+    if kind != "dir" {
+        bail!("device release create currently requires package.kind=dir");
+    }
+    let candidate = PathBuf::from(&package_rel);
+    let base = package_manifest_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(root_dir);
+    Ok(if candidate.is_absolute() {
+        candidate
+    } else {
+        base.join(candidate)
+    })
+}
+
+fn load_device_profile_from_package_manifest(
+    package_manifest_path: &Path,
+    package_doc: &Value,
+) -> Result<(PathBuf, Value)> {
+    let payload_dir = package_payload_path(package_manifest_path, package_doc)?;
+    let profile_path = find_embedded_device_profile(&payload_dir)?;
+    Ok((profile_path.clone(), load_json(&profile_path)?))
+}
+
+fn default_device_release_steps(provider_doc: &Value) -> Vec<Value> {
+    let provider_kind = get_str(provider_doc, &["provider_kind"]).unwrap_or_else(|| "mock_v1".to_string());
+    let distribution_lane =
+        get_str(provider_doc, &["distribution_lane"]).unwrap_or_else(|| "beta".to_string());
+    let initial_percent = get_u64(provider_doc, &["rollout_defaults", "initial_percent"])
+        .or_else(|| get_u64(provider_doc, &["policy", "initial_percent"]))
+        .unwrap_or(10)
+        .min(100);
+    let mut steps = vec![json!({
+        "id": "start",
+        "op": "release.start",
+        "on_fail": "pause",
+    })];
+    if distribution_lane == "production" && provider_kind != "appstoreconnect_v1" {
+        steps.push(json!({
+            "id": format!("rollout_{}", initial_percent),
+            "op": "rollout.set_percent",
+            "percent": initial_percent,
+            "on_fail": "pause",
+        }));
+    }
+    steps
+}
+
+fn validate_device_release_plan_doc(plan_doc: &Value, provider_doc: &Value) -> Result<Value> {
+    if get_str(plan_doc, &["schema_version"]).as_deref() != Some(DEVICE_RELEASE_PLAN_KIND) {
+        bail!("device release plan must have schema_version={DEVICE_RELEASE_PLAN_KIND}");
+    }
+    let capabilities = validate_device_provider_profile_doc(provider_doc)?;
+    let plan_target =
+        get_str(plan_doc, &["target"]).ok_or_else(|| anyhow!("plan missing target"))?;
+    let provider_target =
+        get_str(provider_doc, &["target"]).ok_or_else(|| anyhow!("provider profile missing target"))?;
+    if plan_target != provider_target {
+        bail!("plan target does not match provider profile target");
+    }
+    let package_kind = get_str(plan_doc, &["package", "kind"])
+        .ok_or_else(|| anyhow!("plan missing package.kind"))?;
+    if package_kind != DEVICE_PACKAGE_MANIFEST_KIND {
+        bail!("plan package.kind must be {DEVICE_PACKAGE_MANIFEST_KIND}");
+    }
+    let supported_ops = get_path(&capabilities, &["device_release", "supported_ops"])
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+        .collect::<BTreeSet<_>>();
+    let supports_percent_rollout = get_bool(&capabilities, &["device_release", "supports_percent_rollout"])
+        .unwrap_or(false);
+    let steps = get_path(plan_doc, &["steps"])
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("plan missing steps"))?;
+    if steps.is_empty() {
+        bail!("plan requires at least one step");
+    }
+    for step in steps {
+        let op = get_str(step, &["op"]).ok_or_else(|| anyhow!("plan step missing op"))?;
+        if !supported_ops.contains(&op) {
+            bail!("provider does not support device release op={op}");
+        }
+        if op == "rollout.set_percent" {
+            if !supports_percent_rollout {
+                bail!("provider does not support rollout.set_percent");
+            }
+            let percent = get_u64(step, &["percent"]).ok_or_else(|| anyhow!("rollout.set_percent requires percent"))?;
+            if percent > 100 {
+                bail!("rollout percent must be <= 100");
+            }
+        }
+    }
+    Ok(capabilities)
+}
+
+fn write_device_release_evidence(
+    state_dir: &Path,
+    exec_id: &str,
+    suffix: &str,
+    doc: &Value,
+) -> Result<Value> {
+    let cleaned = suffix
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect::<String>();
+    let rel_path = format!("device_release/evidence/{}.{}.json", exec_id, cleaned);
+    let path = state_dir.join(&rel_path);
+    let bytes = write_json(&path, doc)?;
+    Ok(named_file_artifact(
+        &rel_path,
+        "x07.artifact.json@0.1.0",
+        "application/json",
+        &bytes,
+    ))
+}
+
+fn device_release_step_name(step_doc: &Value, idx: usize) -> String {
+    get_str(step_doc, &["id"]).unwrap_or_else(|| format!("step_{idx}"))
+}
+
+fn device_release_now(common: &CommonStateArgs) -> u64 {
+    common.now_unix_ms.unwrap_or_else(now_ms)
+}
+
+fn device_release_current_percent(exec_doc: &Value) -> Option<u64> {
+    get_path(exec_doc, &["meta", "current_rollout_percent"]).and_then(Value::as_u64)
+}
+
+fn device_release_state(exec_doc: &Value) -> String {
+    get_str(exec_doc, &["meta", "current_state"]).unwrap_or_else(|| "draft".to_string())
+}
+
+fn device_release_store_release_id(exec_doc: &Value) -> Option<String> {
+    get_str(exec_doc, &["meta", "latest_store_release_id"])
+}
+
+fn device_release_control_state_snapshot(exec_doc: &Value) -> Value {
+    json!({
+        "status": get_str(exec_doc, &["status"]).unwrap_or_else(|| "planned".to_string()),
+        "current_state": device_release_state(exec_doc),
+        "current_rollout_percent": get_path(exec_doc, &["meta", "current_rollout_percent"]).cloned().unwrap_or(Value::Null),
+        "latest_store_release_id": get_path(exec_doc, &["meta", "latest_store_release_id"]).cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn device_provider_live_enabled() -> bool {
+    std::env::var(DEVICE_PROVIDER_LIVE_ENV).ok().as_deref() == Some("1")
+}
+
+fn device_release_provider_mode(provider_doc: &Value) -> &'static str {
+    if get_str(provider_doc, &["provider_kind"]).as_deref() == Some("mock_v1") {
+        "mock"
+    } else if device_provider_live_enabled() {
+        "live_requested"
+    } else {
+        "fixture"
+    }
+}
+
+fn device_release_initial_percent(provider_doc: &Value) -> u64 {
+    get_u64(provider_doc, &["rollout_defaults", "initial_percent"])
+        .or_else(|| get_u64(provider_doc, &["policy", "initial_percent"]))
+        .unwrap_or(10)
+        .min(100)
+}
+
+fn apply_device_release_provider_op(
+    provider_doc: &Value,
+    exec_doc: &Value,
+    step_doc: &Value,
+    exec_id: &str,
+) -> Result<(String, Option<u64>, Option<String>, String)> {
+    let provider_kind = get_str(provider_doc, &["provider_kind"])
+        .ok_or_else(|| anyhow!("provider profile missing provider_kind"))?;
+    let distribution_lane = get_str(provider_doc, &["distribution_lane"])
+        .ok_or_else(|| anyhow!("provider profile missing distribution_lane"))?;
+    let op = get_str(step_doc, &["op"]).ok_or_else(|| anyhow!("step missing op"))?;
+    let current_percent = device_release_current_percent(exec_doc);
+    let current_state = device_release_state(exec_doc);
+    let store_release_id =
+        device_release_store_release_id(exec_doc).or_else(|| Some(format!("store-{exec_id}")));
+    let outcome = match op.as_str() {
+        "release.start" => {
+            if distribution_lane == "beta" {
+                ("available".to_string(), Some(100), "store release started on beta lane".to_string())
+            } else if provider_kind == "appstoreconnect_v1" {
+                ("in_progress".to_string(), None, "started phased production release".to_string())
+            } else {
+                let initial = device_release_initial_percent(provider_doc);
+                (
+                    "in_progress".to_string(),
+                    Some(initial),
+                    format!("started staged production release at {initial}%"),
+                )
+            }
+        }
+        "rollout.set_percent" => {
+            let percent = get_u64(step_doc, &["percent"])
+                .ok_or_else(|| anyhow!("rollout.set_percent requires percent"))?
+                .min(100);
+            (
+                "in_progress".to_string(),
+                Some(percent),
+                format!("updated staged rollout to {percent}%"),
+            )
+        }
+        "release.pause" => (
+            "paused".to_string(),
+            current_percent,
+            "paused device release".to_string(),
+        ),
+        "release.resume" => (
+            if current_state == "available" { "available".to_string() } else { "in_progress".to_string() },
+            current_percent,
+            "resumed device release".to_string(),
+        ),
+        "release.complete" => (
+            "completed".to_string(),
+            Some(100),
+            "completed device release rollout".to_string(),
+        ),
+        "rollback.previous" => (
+            "rolled_back".to_string(),
+            Some(0),
+            "rolled back to previous store release".to_string(),
+        ),
+        other => bail!("unsupported device release op={other}"),
+    };
+    Ok((outcome.0, outcome.1, store_release_id, outcome.2))
+}
+
+fn load_device_release_exec_docs(state_dir: &Path) -> Result<Vec<(PathBuf, Value)>> {
+    let dir = device_release_root_dir(state_dir).join("executions");
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut docs = Vec::new();
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(OsStr::to_str) != Some("json") {
+            continue;
+        }
+        docs.push((path.clone(), load_json(&path)?));
+    }
+    Ok(docs)
+}
+
+fn resolve_device_release_provider_doc(
+    state_dir: &Path,
+    plan_doc: &Value,
+    override_path: Option<&str>,
+) -> Result<Value> {
+    if let Some(path) = override_path {
+        return load_json(&repo_path(path));
+    }
+    let provider_id = get_str(plan_doc, &["provider_profile", "provider_id"])
+        .ok_or_else(|| anyhow!("plan missing provider_profile.provider_id"))?;
+    load_json(&device_release_provider_path(state_dir, &provider_id))
+}
+
+fn write_device_release_provider_copy(state_dir: &Path, provider_doc: &Value) -> Result<(PathBuf, Vec<u8>)> {
+    let provider_id =
+        get_str(provider_doc, &["provider_id"]).ok_or_else(|| anyhow!("provider profile missing provider_id"))?;
+    let path = device_release_provider_path(state_dir, &provider_id);
+    let bytes = write_json(&path, provider_doc)?;
+    Ok((path, bytes))
+}
+
+fn write_device_release_package_copy(state_dir: &Path, package_doc: &Value) -> Result<(PathBuf, Vec<u8>)> {
+    let bytes = canon_json_bytes(package_doc);
+    let sha = sha256_hex(&bytes);
+    let path = device_release_package_path(state_dir, &sha);
+    let bytes = write_json(&path, package_doc)?;
+    Ok((path, bytes))
+}
+
+fn device_release_decision_ids(exec_doc: &Value) -> Vec<Value> {
+    let mut ids = Vec::new();
+    let mut seen = BTreeSet::new();
+    for step in get_path(exec_doc, &["steps"])
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        for decision_id in get_path(step, &["decisions"])
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(decision_id) = decision_id.as_str() {
+                if seen.insert(decision_id.to_string()) {
+                    ids.push(json!(decision_id));
+                }
+            }
+        }
+    }
+    ids
+}
+
+fn build_device_release_query_result(exec_doc: &Value, exec_bytes: &[u8], view: &str) -> Value {
+    let meta = get_path(exec_doc, &["meta"]).cloned().unwrap_or_else(|| json!({}));
+    let mut result = json!({
+        "schema_version": DEVICE_RELEASE_QUERY_RESULT_KIND,
+        "view": view,
+        "exec_id": get_str(exec_doc, &["exec_id"]).unwrap_or_default(),
+        "plan_id": get_str(exec_doc, &["plan_id"]).unwrap_or_default(),
+        "provider_kind": get_str(&meta, &["provider_kind"]).unwrap_or_else(|| "mock_v1".to_string()),
+        "distribution_lane": get_str(&meta, &["distribution_lane"]).unwrap_or_else(|| "beta".to_string()),
+        "target": get_str(&meta, &["target"]).unwrap_or_else(|| "ios".to_string()),
+        "status": get_str(exec_doc, &["status"]).unwrap_or_else(|| "planned".to_string()),
+        "created_unix_ms": get_u64(exec_doc, &["created_unix_ms"]).unwrap_or(0),
+        "updated_unix_ms": get_u64(&meta, &["updated_unix_ms"]).unwrap_or_else(|| get_u64(exec_doc, &["created_unix_ms"]).unwrap_or(0)),
+        "app": get_path(&meta, &["app"]).cloned().unwrap_or_else(|| json!({
+            "app_id": "unknown",
+            "track_or_lane": "unknown",
+            "version": "0.0.0",
+            "build": "0"
+        })),
+        "current_state": get_str(&meta, &["current_state"]).unwrap_or_else(|| "draft".to_string()),
+        "current_rollout_percent": get_path(&meta, &["current_rollout_percent"]).cloned().unwrap_or(Value::Null),
+        "latest_decision_id": get_path(&meta, &["latest_decision_id"]).cloned().unwrap_or(Value::Null),
+        "latest_signed_control_decision_id": get_path(&meta, &["latest_signed_control_decision_id"]).cloned().unwrap_or(Value::Null),
+        "signature_status": get_str(&meta, &["signature_status"]).unwrap_or_else(|| "not_applicable".to_string()),
+        "decision_count": get_u64(&meta, &["decision_count"]).unwrap_or(0),
+        "provider_release_id": get_path(&meta, &["latest_store_release_id"]).cloned().unwrap_or(Value::Null),
+        "execution": {
+            "kind": DEVICE_RELEASE_EXECUTION_KIND,
+            "digest": digest_value(exec_bytes),
+        },
+        "index": {
+            "used": false,
+            "rebuilt": false,
+            "db_path": "scan:none",
+        }
+    });
+    match view {
+        "timeline" => {
+            ensure_object(&mut result).insert(
+                "steps".to_string(),
+                get_path(exec_doc, &["steps"])
+                    .cloned()
+                    .unwrap_or_else(|| json!([])),
+            );
+        }
+        "decisions" => {
+            ensure_object(&mut result).insert(
+                "decision_ids".to_string(),
+                Value::Array(device_release_decision_ids(exec_doc)),
+            );
+            ensure_object(&mut result).insert(
+                "steps".to_string(),
+                get_path(exec_doc, &["steps"])
+                    .cloned()
+                    .unwrap_or_else(|| json!([])),
+            );
+        }
+        "full" => {
+            ensure_object(&mut result).insert(
+                "decision_ids".to_string(),
+                Value::Array(device_release_decision_ids(exec_doc)),
+            );
+            ensure_object(&mut result).insert(
+                "steps".to_string(),
+                get_path(exec_doc, &["steps"])
+                    .cloned()
+                    .unwrap_or_else(|| json!([])),
+            );
+            ensure_object(&mut result).insert("meta".to_string(), meta);
+        }
+        _ => {}
+    }
+    result
+}
+
+fn device_release_list_item(exec_doc: &Value) -> Value {
+    let meta = get_path(exec_doc, &["meta"]).cloned().unwrap_or_else(|| json!({}));
+    json!({
+        "exec_id": get_str(exec_doc, &["exec_id"]).unwrap_or_default(),
+        "plan_id": get_str(exec_doc, &["plan_id"]).unwrap_or_default(),
+        "provider_id": get_str(&meta, &["provider_id"]).unwrap_or_default(),
+        "provider_kind": get_str(&meta, &["provider_kind"]).unwrap_or_else(|| "mock_v1".to_string()),
+        "distribution_lane": get_str(&meta, &["distribution_lane"]).unwrap_or_else(|| "beta".to_string()),
+        "target": get_str(&meta, &["target"]).unwrap_or_else(|| "ios".to_string()),
+        "status": get_str(exec_doc, &["status"]).unwrap_or_else(|| "planned".to_string()),
+        "current_state": get_str(&meta, &["current_state"]).unwrap_or_else(|| "draft".to_string()),
+        "current_rollout_percent": get_path(&meta, &["current_rollout_percent"]).cloned().unwrap_or(Value::Null),
+        "app": get_path(&meta, &["app"]).cloned().unwrap_or_else(|| json!({})),
+        "updated_unix_ms": get_u64(&meta, &["updated_unix_ms"]).unwrap_or(0),
+    })
+}
+
+fn command_device_release_list(common: &CommonStateArgs) -> Result<Value> {
+    let state_dir = resolve_state_dir(common.state_dir.as_deref());
+    let mut items = load_device_release_exec_docs(&state_dir)?
+        .into_iter()
+        .map(|(_, exec_doc)| device_release_list_item(&exec_doc))
+        .collect::<Vec<_>>();
+    items.sort_by(|left, right| {
+        let left_updated = left
+            .get("updated_unix_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let right_updated = right
+            .get("updated_unix_ms")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        right_updated
+            .cmp(&left_updated)
+            .then_with(|| {
+                right
+                    .get("exec_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .cmp(left.get("exec_id").and_then(Value::as_str).unwrap_or_default())
+            })
+    });
+    Ok(cli_report(
+        "device release list",
+        true,
+        0,
+        json!({
+            "generated_unix_ms": now_ms(),
+            "items": items,
+        }),
+        None,
+        Vec::new(),
+    ))
+}
+
+fn command_device_release_create(args: DeviceReleaseCreateArgs) -> Result<Value> {
+    let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
+    let now_unix_ms = device_release_now(&args.common);
+    let provider_profile_path = repo_path(&args.provider_profile);
+    let package_manifest_path = repo_path(&args.package_manifest);
+    let out_path = repo_path(&args.out);
+    let provider_doc = load_json(&provider_profile_path)?;
+    let capabilities = validate_device_provider_profile_doc(&provider_doc)?;
+    let package_doc = load_json(&package_manifest_path)?;
+    validate_device_package_manifest_doc(&package_doc)?;
+    let provider_target = get_str(&provider_doc, &["target"]).unwrap_or_default();
+    if get_str(&package_doc, &["target"]).unwrap_or_default() != provider_target {
+        bail!("provider target does not match package manifest target");
+    }
+    let (_, package_bytes) = write_device_release_package_copy(&state_dir, &package_doc)?;
+    let (_, provider_bytes) = write_device_release_provider_copy(&state_dir, &provider_doc)?;
+    let (_, device_profile_doc) =
+        load_device_profile_from_package_manifest(&package_manifest_path, &package_doc)?;
+    let provider_id = get_str(&provider_doc, &["provider_id"]).unwrap_or_default();
+    let package_digest = digest_value(&package_bytes);
+    let plan_id = gen_id(
+        "lpdrplan",
+        &format!(
+            "{provider_id}:{}:{now_unix_ms}",
+            package_digest
+                .get("sha256")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+        ),
+    );
+    let app = json!({
+        "app_id": get_str(&device_profile_doc, &["identity", "app_id"]).unwrap_or_else(|| "unknown".to_string()),
+        "track_or_lane": get_str(&provider_doc, &["track"]).unwrap_or_else(|| {
+            get_str(&provider_doc, &["distribution_lane"]).unwrap_or_else(|| "beta".to_string())
+        }),
+        "version": string_or_number(&device_profile_doc, &["version", "version"]).unwrap_or_else(|| "0.0.0".to_string()),
+        "build": string_or_number(&device_profile_doc, &["version", "build"]).unwrap_or_else(|| "0".to_string()),
+    });
+    let plan_doc = json!({
+        "schema_version": DEVICE_RELEASE_PLAN_KIND,
+        "plan_id": plan_id,
+        "created_unix_ms": now_unix_ms,
+        "provider_profile": {
+            "kind": DEVICE_STORE_PROVIDER_PROFILE_KIND,
+            "digest": digest_value(&provider_bytes),
+            "provider_id": provider_id,
+        },
+        "target": provider_target,
+        "app": app,
+        "package": {
+            "kind": DEVICE_PACKAGE_MANIFEST_KIND,
+            "digest": digest_value(&package_bytes),
+            "label": logical_name_from_path(&package_manifest_path),
+        },
+        "strategy": {
+            "max_auto_steps": 16,
+            "max_total_wait_seconds": 3600,
+            "on_provider_error": "pause",
+        },
+        "steps": default_device_release_steps(&provider_doc),
+    });
+    let _ = validate_device_release_plan_doc(&plan_doc, &provider_doc)?;
+    let _ = write_json(&out_path, &plan_doc)?;
+    let _ = write_json(
+        &device_release_plan_path(&state_dir, &get_str(&plan_doc, &["plan_id"]).unwrap_or_default()),
+        &plan_doc,
+    )?;
+    Ok(cli_report(
+        "device release create",
+        true,
+        0,
+        json!({
+            "plan_id": get_str(&plan_doc, &["plan_id"]).unwrap_or_default(),
+            "out": out_path.to_string_lossy(),
+            "provider_kind": get_str(&provider_doc, &["provider_kind"]).unwrap_or_default(),
+            "distribution_lane": get_str(&provider_doc, &["distribution_lane"]).unwrap_or_default(),
+            "target": get_str(&provider_doc, &["target"]).unwrap_or_default(),
+            "app": get_path(&plan_doc, &["app"]).cloned().unwrap_or_else(|| json!({})),
+            "capabilities": capabilities,
+        }),
+        None,
+        Vec::new(),
+    ))
+}
+
+fn command_device_release_validate(args: DeviceReleaseValidateArgs) -> Result<Value> {
+    let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
+    let plan_doc = load_json(&repo_path(&args.plan))?;
+    let provider_doc =
+        resolve_device_release_provider_doc(&state_dir, &plan_doc, args.provider_profile.as_deref())?;
+    let capabilities = match validate_device_release_plan_doc(&plan_doc, &provider_doc) {
+        Ok(value) => value,
+        Err(err) => {
+            return Ok(cli_report(
+                "device release validate",
+                false,
+                10,
+                json!({}),
+                None,
+                vec![result_diag(
+                    "LP_DEVICE_RELEASE_PLAN_INVALID",
+                    "parse",
+                    &err.to_string(),
+                    "error",
+                )],
+            ));
+        }
+    };
+    Ok(cli_report(
+        "device release validate",
+        true,
+        0,
+        json!({
+            "plan_id": get_str(&plan_doc, &["plan_id"]).unwrap_or_default(),
+            "provider_kind": get_str(&provider_doc, &["provider_kind"]).unwrap_or_default(),
+            "distribution_lane": get_str(&provider_doc, &["distribution_lane"]).unwrap_or_default(),
+            "target": get_str(&provider_doc, &["target"]).unwrap_or_default(),
+            "capabilities": capabilities,
+        }),
+        None,
+        Vec::new(),
+    ))
+}
+
+fn command_device_release_run(args: DeviceReleaseRunArgs) -> Result<Value> {
+    let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
+    let now_unix_ms = device_release_now(&args.common);
+    let plan_path = repo_path(&args.plan);
+    let plan_doc = load_json(&plan_path)?;
+    let provider_doc =
+        resolve_device_release_provider_doc(&state_dir, &plan_doc, args.provider_profile.as_deref())?;
+    let capabilities = match validate_device_release_plan_doc(&plan_doc, &provider_doc) {
+        Ok(value) => value,
+        Err(err) => {
+            return Ok(cli_report(
+                "device release run",
+                false,
+                10,
+                json!({}),
+                None,
+                vec![result_diag(
+                    "LP_DEVICE_RELEASE_PLAN_INVALID",
+                    "parse",
+                    &err.to_string(),
+                    "error",
+                )],
+            ));
+        }
+    };
+    if let Some(package_manifest) = args.package_manifest.as_deref() {
+        let package_doc = load_json(&repo_path(package_manifest))?;
+        validate_device_package_manifest_doc(&package_doc)?;
+        let _ = write_device_release_package_copy(&state_dir, &package_doc)?;
+    }
+    let _ = write_device_release_provider_copy(&state_dir, &provider_doc)?;
+    let plan_store_bytes =
+        write_json(&device_release_plan_path(&state_dir, &get_str(&plan_doc, &["plan_id"]).unwrap_or_default()), &plan_doc)?;
+    let run_id = gen_id(
+        "lpdrrun",
+        &format!(
+            "{}:{now_unix_ms}",
+            get_str(&plan_doc, &["plan_id"]).unwrap_or_default()
+        ),
+    );
+    let exec_id = gen_id("lpdrexec", &format!("{run_id}:{now_unix_ms}"));
+    let mut exec_doc = json!({
+        "schema_version": DEVICE_RELEASE_EXECUTION_KIND,
+        "exec_id": exec_id,
+        "plan_id": get_str(&plan_doc, &["plan_id"]).unwrap_or_default(),
+        "run_id": run_id,
+        "created_unix_ms": now_unix_ms,
+        "status": "started",
+        "plan": {
+            "kind": DEVICE_RELEASE_PLAN_KIND,
+            "digest": digest_value(&plan_store_bytes),
+        },
+        "steps": [],
+        "meta": {
+            "provider_id": get_str(&provider_doc, &["provider_id"]).unwrap_or_default(),
+            "provider_kind": get_str(&provider_doc, &["provider_kind"]).unwrap_or_default(),
+            "distribution_lane": get_str(&provider_doc, &["distribution_lane"]).unwrap_or_default(),
+            "target": get_str(&provider_doc, &["target"]).unwrap_or_default(),
+            "package_digest": get_path(&plan_doc, &["package", "digest"]).cloned().unwrap_or_else(|| json!({"sha256":"", "bytes_len":0})),
+            "current_state": "draft",
+            "current_rollout_percent": Value::Null,
+            "latest_store_release_id": Value::Null,
+            "updated_unix_ms": now_unix_ms,
+            "latest_decision_id": Value::Null,
+            "latest_signed_control_decision_id": Value::Null,
+            "decision_count": 0,
+            "signature_status": "not_applicable",
+            "app": get_path(&plan_doc, &["app"]).cloned().unwrap_or_else(|| json!({})),
+            "capabilities": capabilities,
+        }
+    });
+    let steps = get_path(&plan_doc, &["steps"])
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut failed = false;
+    for (idx, step_doc) in steps.iter().enumerate() {
+        let step_name = device_release_step_name(step_doc, idx);
+        let op = get_str(step_doc, &["op"]).unwrap_or_else(|| "unknown".to_string());
+        let started_unix_ms = now_unix_ms + idx as u64;
+        match apply_device_release_provider_op(
+            &provider_doc,
+            &exec_doc,
+            step_doc,
+            &get_str(&exec_doc, &["exec_id"]).unwrap_or_default(),
+        ) {
+            Ok((current_state, rollout_percent, store_release_id, message)) => {
+                let evidence_doc = json!({
+                    "provider_kind": get_str(&provider_doc, &["provider_kind"]).unwrap_or_default(),
+                    "provider_mode": device_release_provider_mode(&provider_doc),
+                    "op": op,
+                    "state": current_state,
+                    "rollout_percent": rollout_percent,
+                    "store_release_id": store_release_id,
+                });
+                let evidence = write_device_release_evidence(
+                    &state_dir,
+                    &get_str(&exec_doc, &["exec_id"]).unwrap_or_default(),
+                    &format!("step_{idx}_{step_name}"),
+                    &evidence_doc,
+                )?;
+                let (decision, _) = write_decision_record(
+                    &state_dir,
+                    &format!(
+                        "{}:{idx}:{step_name}",
+                        get_str(&exec_doc, &["exec_id"]).unwrap_or_default()
+                    ),
+                    &get_str(&exec_doc, &["run_id"]).unwrap_or_default(),
+                    "device.release.step",
+                    "allow",
+                    vec![json!({
+                        "code": "LP_DEVICE_RELEASE_STEP_OK",
+                        "message": message,
+                    })],
+                    vec![evidence.clone()],
+                    started_unix_ms,
+                    Some(idx),
+                    false,
+                )?;
+                let meta = ensure_object_field(&mut exec_doc, "meta");
+                meta.insert("current_state".to_string(), json!(current_state));
+                meta.insert(
+                    "current_rollout_percent".to_string(),
+                    rollout_percent.map(Value::from).unwrap_or(Value::Null),
+                );
+                meta.insert(
+                    "latest_store_release_id".to_string(),
+                    store_release_id.map(Value::from).unwrap_or(Value::Null),
+                );
+                meta.insert("updated_unix_ms".to_string(), json!(started_unix_ms));
+                meta.insert(
+                    "latest_decision_id".to_string(),
+                    json!(get_str(&decision, &["decision_id"]).unwrap_or_default()),
+                );
+                meta.insert(
+                    "decision_count".to_string(),
+                    json!(get_u64(&meta.clone().into(), &["decision_count"]).unwrap_or(0) + 1),
+                );
+                ensure_array_field(&mut exec_doc, "steps").push(build_exec_step(
+                    idx,
+                    &step_name,
+                    &op,
+                    "ok",
+                    started_unix_ms,
+                    Some(started_unix_ms),
+                    vec![get_str(&decision, &["decision_id"]).unwrap_or_default()],
+                    rollout_percent,
+                    None,
+                ));
+            }
+            Err(err) => {
+                let (decision, _) = write_decision_record(
+                    &state_dir,
+                    &format!(
+                        "{}:{idx}:{step_name}:error",
+                        get_str(&exec_doc, &["exec_id"]).unwrap_or_default()
+                    ),
+                    &get_str(&exec_doc, &["run_id"]).unwrap_or_default(),
+                    "device.release.step",
+                    "error",
+                    vec![json!({
+                        "code": "LP_DEVICE_RELEASE_STEP_FAILED",
+                        "message": err.to_string(),
+                    })],
+                    Vec::new(),
+                    started_unix_ms,
+                    Some(idx),
+                    false,
+                )?;
+                let current_rollout_percent = device_release_current_percent(&exec_doc);
+                let meta = ensure_object_field(&mut exec_doc, "meta");
+                meta.insert("updated_unix_ms".to_string(), json!(started_unix_ms));
+                meta.insert("current_state".to_string(), json!("paused"));
+                meta.insert(
+                    "latest_decision_id".to_string(),
+                    json!(get_str(&decision, &["decision_id"]).unwrap_or_default()),
+                );
+                meta.insert(
+                    "decision_count".to_string(),
+                    json!(get_u64(&meta.clone().into(), &["decision_count"]).unwrap_or(0) + 1),
+                );
+                ensure_array_field(&mut exec_doc, "steps").push(build_exec_step(
+                    idx,
+                    &step_name,
+                    &op,
+                    "error",
+                    started_unix_ms,
+                    Some(started_unix_ms),
+                    vec![get_str(&decision, &["decision_id"]).unwrap_or_default()],
+                    current_rollout_percent,
+                    None,
+                ));
+                ensure_object(&mut exec_doc).insert("status".to_string(), json!("failed"));
+                failed = true;
+                break;
+            }
+        }
+    }
+    if !failed {
+        ensure_object(&mut exec_doc).insert("status".to_string(), json!("completed"));
+        let meta = ensure_object_field(&mut exec_doc, "meta");
+        meta.insert("updated_unix_ms".to_string(), json!(now_unix_ms + steps.len() as u64));
+    }
+    let exec_bytes = save_device_release_exec(&state_dir, &exec_doc)?;
+    Ok(cli_report(
+        "device release run",
+        !failed,
+        if failed { 18 } else { 0 },
+        json!({
+            "schema_version": DEVICE_RELEASE_RUN_RESULT_KIND,
+            "exec_id": get_str(&exec_doc, &["exec_id"]).unwrap_or_default(),
+            "plan_id": get_str(&exec_doc, &["plan_id"]).unwrap_or_default(),
+            "provider_kind": get_str(&provider_doc, &["provider_kind"]).unwrap_or_default(),
+            "target": get_str(&provider_doc, &["target"]).unwrap_or_default(),
+            "status": get_str(&exec_doc, &["status"]).unwrap_or_else(|| "planned".to_string()),
+            "decision_count": get_u64(&exec_doc, &["meta", "decision_count"]).unwrap_or(0),
+            "execution": {
+                "kind": DEVICE_RELEASE_EXECUTION_KIND,
+                "digest": digest_value(&exec_bytes),
+            },
+            "run_id": get_str(&exec_doc, &["run_id"]).unwrap_or_default(),
+        }),
+        get_str(&exec_doc, &["run_id"]).as_deref(),
+        if failed {
+            vec![result_diag(
+                "LP_DEVICE_RELEASE_RUN_FAILED",
+                "run",
+                "device release execution failed",
+                "error",
+            )]
+        } else {
+            Vec::new()
+        },
+    ))
+}
+
+fn resolve_device_release_exec_id(
+    state_dir: &Path,
+    args: &DeviceReleaseQueryArgs,
+) -> Result<Option<String>> {
+    if let Some(exec_id) = args.release_exec_id.as_deref() {
+        return Ok(Some(exec_id.to_string()));
+    }
+    if !args.latest {
+        return Ok(None);
+    }
+    let mut best: Option<(u64, String)> = None;
+    for (_, exec_doc) in load_device_release_exec_docs(state_dir)? {
+        let meta = get_path(&exec_doc, &["meta"]).cloned().unwrap_or_else(|| json!({}));
+        if let Some(app_id) = args.app_id.as_deref() {
+            if get_str(&meta, &["app", "app_id"]).as_deref() != Some(app_id) {
+                continue;
+            }
+        }
+        if let Some(provider_id) = args.provider_id.as_deref() {
+            if get_str(&meta, &["provider_id"]).as_deref() != Some(provider_id) {
+                continue;
+            }
+        }
+        if let Some(lane) = args.distribution_lane.as_deref() {
+            if get_str(&meta, &["distribution_lane"]).as_deref() != Some(lane) {
+                continue;
+            }
+        }
+        if let Some(target) = args.target.as_deref() {
+            if get_str(&meta, &["target"]).as_deref() != Some(target) {
+                continue;
+            }
+        }
+        let updated = get_u64(&meta, &["updated_unix_ms"]).unwrap_or(0);
+        let exec_id = get_str(&exec_doc, &["exec_id"]).unwrap_or_default();
+        match &best {
+            Some((best_updated, best_id)) if *best_updated > updated || (*best_updated == updated && best_id >= &exec_id) => {}
+            _ => best = Some((updated, exec_id)),
+        }
+    }
+    Ok(best.map(|(_, exec_id)| exec_id))
+}
+
+fn command_device_release_query(args: DeviceReleaseQueryArgs) -> Result<Value> {
+    if !VALID_DEVICE_RELEASE_QUERY_VIEWS.contains(&args.view.as_str()) {
+        return Ok(cli_report(
+            "device release query",
+            false,
+            2,
+            json!({}),
+            None,
+            vec![result_diag(
+                "LP_INVALID_ARGS",
+                "parse",
+                "device release query view must be one of summary|timeline|decisions|full",
+                "error",
+            )],
+        ));
+    }
+    let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
+    let Some(exec_id) = resolve_device_release_exec_id(&state_dir, &args)? else {
+        return Ok(cli_report(
+            "device release query",
+            false,
+            2,
+            json!({}),
+            None,
+            vec![result_diag(
+                "LP_INVALID_ARGS",
+                "parse",
+                "query requires --release-id or --latest with filters",
+                "error",
+            )],
+        ));
+    };
+    let exec_doc = load_device_release_exec(&state_dir, &exec_id)?;
+    let exec_bytes = canon_json_bytes(&exec_doc);
+    Ok(cli_report(
+        "device release query",
+        true,
+        0,
+        build_device_release_query_result(&exec_doc, &exec_bytes, &args.view),
+        get_str(&exec_doc, &["run_id"]).as_deref(),
+        Vec::new(),
+    ))
+}
+
+fn load_device_release_provider_for_exec(state_dir: &Path, exec_doc: &Value) -> Result<Value> {
+    let provider_id = get_str(exec_doc, &["meta", "provider_id"])
+        .ok_or_else(|| anyhow!("device release execution missing provider_id"))?;
+    load_json(&device_release_provider_path(state_dir, &provider_id))
+}
+
+fn command_device_release_control(
+    args: DeviceReleaseControlArgs,
+    action: &str,
+    action_kind: &str,
+) -> Result<Value> {
+    let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
+    let now_unix_ms = device_release_now(&args.common);
+    let mut exec_doc = load_device_release_exec(&state_dir, &args.release_exec_id)?;
+    let provider_doc = load_device_release_provider_for_exec(&state_dir, &exec_doc)?;
+    let state_before = device_release_control_state_snapshot(&exec_doc);
+    let step_doc = match action {
+        "pause" => json!({"id":"manual_pause","op":"release.pause"}),
+        "resume" => json!({"id":"manual_resume","op":"release.resume"}),
+        "complete" => json!({"id":"manual_complete","op":"release.complete"}),
+        "rollback" => json!({"id":"manual_rollback","op":"rollback.previous"}),
+        "halt" => json!({"id":"manual_halt","op":"release.pause"}),
+        other => bail!("unsupported device release control action={other}"),
+    };
+    let (current_state, rollout_percent, store_release_id, message) =
+        if action == "halt" {
+            (
+                "halted".to_string(),
+                device_release_current_percent(&exec_doc),
+                device_release_store_release_id(&exec_doc),
+                "halted device release".to_string(),
+            )
+        } else {
+            apply_device_release_provider_op(
+                &provider_doc,
+                &exec_doc,
+                &step_doc,
+                &args.release_exec_id,
+            )?
+        };
+    let action_id = gen_id("lpact", &format!("{}:{action}:{now_unix_ms}", args.release_exec_id));
+    let evidence = write_device_release_evidence(
+        &state_dir,
+        &args.release_exec_id,
+        &format!("control_{action}"),
+        &json!({
+            "action": action,
+            "provider_mode": device_release_provider_mode(&provider_doc),
+            "state": current_state,
+            "rollout_percent": rollout_percent,
+            "store_release_id": store_release_id,
+        }),
+    )?;
+    let (decision, signature_status) = write_decision_record(
+        &state_dir,
+        &format!("{}:{action}:{now_unix_ms}", args.release_exec_id),
+        &get_str(&exec_doc, &["run_id"]).unwrap_or_default(),
+        "device.release.control",
+        "allow",
+        vec![json!({
+            "code": "LP_DEVICE_RELEASE_CONTROL_OK",
+            "message": message,
+        })],
+        vec![evidence],
+        now_unix_ms,
+        Some(
+            get_path(&exec_doc, &["steps"])
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0),
+        ),
+        true,
+    )?;
+    let meta = ensure_object_field(&mut exec_doc, "meta");
+    meta.insert("current_state".to_string(), json!(current_state));
+    meta.insert(
+        "current_rollout_percent".to_string(),
+        rollout_percent.map(Value::from).unwrap_or(Value::Null),
+    );
+    meta.insert(
+        "latest_store_release_id".to_string(),
+        store_release_id.map(Value::from).unwrap_or(Value::Null),
+    );
+    meta.insert("updated_unix_ms".to_string(), json!(now_unix_ms));
+    meta.insert(
+        "latest_decision_id".to_string(),
+        json!(get_str(&decision, &["decision_id"]).unwrap_or_default()),
+    );
+    meta.insert(
+        "latest_signed_control_decision_id".to_string(),
+        json!(get_str(&decision, &["decision_id"]).unwrap_or_default()),
+    );
+    meta.insert("signature_status".to_string(), json!(signature_status.clone()));
+    meta.insert(
+        "decision_count".to_string(),
+        json!(get_u64(&meta.clone().into(), &["decision_count"]).unwrap_or(0) + 1),
+    );
+    let next_step_idx = get_path(&exec_doc, &["steps"])
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    ensure_array_field(&mut exec_doc, "steps").push(build_exec_step(
+        next_step_idx,
+        &format!("manual_{action}"),
+        action_kind,
+        "ok",
+        now_unix_ms,
+        Some(now_unix_ms),
+        vec![get_str(&decision, &["decision_id"]).unwrap_or_default()],
+        rollout_percent,
+        None,
+    ));
+    let status = match action {
+        "complete" | "rollback" => "completed",
+        "halt" => "aborted",
+        _ => "started",
+    };
+    ensure_object(&mut exec_doc).insert("status".to_string(), json!(status));
+    let exec_bytes = save_device_release_exec(&state_dir, &exec_doc)?;
+    let result = build_control_action_result(
+        &action_id,
+        action_kind,
+        "device_release",
+        now_unix_ms,
+        json!({ "release_exec_id": args.release_exec_id }),
+        &args.reason,
+        vec![get_str(&exec_doc, &["exec_id"]).unwrap_or_default()],
+        None,
+        Some(state_before),
+        Some(device_release_control_state_snapshot(&exec_doc)),
+        &decision,
+        &signature_status,
+    );
+    record_control_action(&state_dir, &result)?;
+    let _ = exec_bytes;
+    Ok(cli_report(
+        &format!("device release {action}"),
+        true,
+        0,
+        result,
+        get_str(&exec_doc, &["run_id"]).as_deref(),
+        Vec::new(),
+    ))
+}
+
 fn command_status(args: DeploymentStatusArgs) -> Result<Value> {
     if remote_mode_selected(args.target.as_deref())? {
         return remote_command_status(&args);
@@ -11145,6 +12497,9 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                 common: common.clone(),
             })?,
         ),
+        ("GET", "/api/device-releases") => {
+            UiHttpResponse::Json(200, command_device_release_list(&common)?)
+        },
         ("GET", "/api/incidents") => UiHttpResponse::Json(
             200,
             command_incident_list(IncidentListArgs {
@@ -11204,6 +12559,34 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         common: common.clone(),
                     })?,
                 ),
+                ("GET", ["api", "device-releases", exec_id]) => UiHttpResponse::Json(
+                    200,
+                    command_device_release_query(DeviceReleaseQueryArgs {
+                        release_exec_id: Some((*exec_id).to_string()),
+                        app_id: None,
+                        provider_id: None,
+                        distribution_lane: None,
+                        target: None,
+                        view: "full".to_string(),
+                        limit: None,
+                        latest: false,
+                        common: common.clone(),
+                    })?,
+                ),
+                ("GET", ["api", "device-releases", exec_id, "decisions"]) => UiHttpResponse::Json(
+                    200,
+                    command_device_release_query(DeviceReleaseQueryArgs {
+                        release_exec_id: Some((*exec_id).to_string()),
+                        app_id: None,
+                        provider_id: None,
+                        distribution_lane: None,
+                        target: None,
+                        view: "decisions".to_string(),
+                        limit: None,
+                        latest: false,
+                        common: common.clone(),
+                    })?,
+                ),
                 ("GET", ["api", "incidents", incident_id]) => UiHttpResponse::Json(
                     200,
                     command_incident_get(IncidentGetArgs {
@@ -11249,6 +12632,78 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         target: None,
                         common: common.clone(),
                     })?,
+                ),
+                ("POST", ["api", "device-releases", exec_id, "pause"]) => UiHttpResponse::Json(
+                    200,
+                    command_device_release_control(
+                        DeviceReleaseControlArgs {
+                            release_exec_id: (*exec_id).to_string(),
+                            reason: get_http_string(&body_doc, "reason", "http_device_release_pause"),
+                            common: common.clone(),
+                        },
+                        "pause",
+                        "device.release.pause.manual",
+                    )?,
+                ),
+                ("POST", ["api", "device-releases", exec_id, "resume"]) => UiHttpResponse::Json(
+                    200,
+                    command_device_release_control(
+                        DeviceReleaseControlArgs {
+                            release_exec_id: (*exec_id).to_string(),
+                            reason: get_http_string(
+                                &body_doc,
+                                "reason",
+                                "http_device_release_resume",
+                            ),
+                            common: common.clone(),
+                        },
+                        "resume",
+                        "device.release.resume.manual",
+                    )?,
+                ),
+                ("POST", ["api", "device-releases", exec_id, "halt"]) => UiHttpResponse::Json(
+                    200,
+                    command_device_release_control(
+                        DeviceReleaseControlArgs {
+                            release_exec_id: (*exec_id).to_string(),
+                            reason: get_http_string(&body_doc, "reason", "http_device_release_halt"),
+                            common: common.clone(),
+                        },
+                        "halt",
+                        "device.release.halt.manual",
+                    )?,
+                ),
+                ("POST", ["api", "device-releases", exec_id, "complete"]) => UiHttpResponse::Json(
+                    200,
+                    command_device_release_control(
+                        DeviceReleaseControlArgs {
+                            release_exec_id: (*exec_id).to_string(),
+                            reason: get_http_string(
+                                &body_doc,
+                                "reason",
+                                "http_device_release_complete",
+                            ),
+                            common: common.clone(),
+                        },
+                        "complete",
+                        "device.release.complete.manual",
+                    )?,
+                ),
+                ("POST", ["api", "device-releases", exec_id, "rollback"]) => UiHttpResponse::Json(
+                    200,
+                    command_device_release_control(
+                        DeviceReleaseControlArgs {
+                            release_exec_id: (*exec_id).to_string(),
+                            reason: get_http_string(
+                                &body_doc,
+                                "reason",
+                                "http_device_release_rollback",
+                            ),
+                            common: common.clone(),
+                        },
+                        "rollback",
+                        "device.release.rollback.manual",
+                    )?,
                 ),
                 ("POST", ["api", "apps", app_id, environment, "kill"]) => UiHttpResponse::Json(
                     200,

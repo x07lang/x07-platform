@@ -1,0 +1,14 @@
+{
+  "schema_version": "x07.device.capabilities@0.1.0",
+  "network": {
+    "mode": "deny_by_default",
+    "allow_hosts": [
+      "api.x07.io"
+    ]
+  },
+  "device": {
+    "clipboard": false,
+    "local_kv": true,
+    "notifications": true
+  }
+}

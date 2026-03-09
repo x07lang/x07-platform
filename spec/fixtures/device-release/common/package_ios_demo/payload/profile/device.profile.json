@@ -1,0 +1,38 @@
+{
+  "schema_version": "x07.device.profile@0.1.0",
+  "id": "demo_ios_release",
+  "v": 1,
+  "target": "ios",
+  "identity": {
+    "display_name": "Demo iOS Release",
+    "app_id": "io.x07.demo.ios"
+  },
+  "version": {
+    "version": "1.2.3",
+    "build": 42
+  },
+  "security": {
+    "allow_dynamic_code_loading": false
+  },
+  "ui": {
+    "project": "ui",
+    "web_ui_profile_id": "device_ui_release"
+  },
+  "backend": {
+    "mode": "remote_http",
+    "base_url": "https://api.x07.io",
+    "allowed_hosts": [
+      "api.x07.io"
+    ]
+  },
+  "capabilities": {
+    "path": "profile/device.capabilities.json"
+  },
+  "telemetry_profile": {
+    "path": "profile/device.telemetry.profile.json"
+  },
+  "ios": {
+    "bundle_id": "io.x07.demo.ios",
+    "signing_mode": "store"
+  }
+}

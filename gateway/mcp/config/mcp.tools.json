@@ -539,6 +539,633 @@
       }
     },
     {
+      "name": "lp.device.release.create",
+      "description": "Create a deterministic device release plan from a provider profile and sealed device package manifest.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "provider_profile",
+          "package_manifest",
+          "out"
+        ],
+        "properties": {
+          "provider_profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "package_manifest": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "out": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_expensive_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR",
+              "PATH",
+              "HOME"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.device.release.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.device.release.validate",
+      "description": "Validate a device release plan against the selected provider capability matrix.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "plan"
+        ],
+        "properties": {
+          "plan": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "provider_profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": []
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": []
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.device.release.read"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.device.release.run",
+      "description": "Execute a device release plan and persist release execution plus decision state.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "plan"
+        ],
+        "properties": {
+          "plan": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "provider_profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "package_manifest": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_expensive_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR",
+              "PATH",
+              "HOME",
+              "X07LP_DEVICE_PROVIDER_LIVE"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.device.release.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.device.release.query",
+      "description": "Query a device release execution by id or latest filtered release.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "release_exec_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "app_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "provider_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "distribution_lane": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "target": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "view": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "limit": {
+            "type": [
+              "string",
+              "number"
+            ]
+          },
+          "latest": {
+            "type": "boolean"
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": []
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": []
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.device.release.read"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.device.release.pause",
+      "description": "Pause a running device release manually.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "release_exec_id",
+          "reason"
+        ],
+        "properties": {
+          "release_exec_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_expensive_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR",
+              "PATH",
+              "HOME",
+              "X07LP_DEVICE_PROVIDER_LIVE"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.device.release.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.device.release.resume",
+      "description": "Resume a paused device release manually.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "release_exec_id",
+          "reason"
+        ],
+        "properties": {
+          "release_exec_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_expensive_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR",
+              "PATH",
+              "HOME",
+              "X07LP_DEVICE_PROVIDER_LIVE"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.device.release.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.device.release.halt",
+      "description": "Halt a device release manually.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "release_exec_id",
+          "reason"
+        ],
+        "properties": {
+          "release_exec_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_expensive_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR",
+              "PATH",
+              "HOME",
+              "X07LP_DEVICE_PROVIDER_LIVE"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.device.release.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.device.release.complete",
+      "description": "Complete a device release manually.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "release_exec_id",
+          "reason"
+        ],
+        "properties": {
+          "release_exec_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_expensive_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR",
+              "PATH",
+              "HOME",
+              "X07LP_DEVICE_PROVIDER_LIVE"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.device.release.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.device.release.rollback",
+      "description": "Roll back a device release to the previous store release.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "release_exec_id",
+          "reason"
+        ],
+        "properties": {
+          "release_exec_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_expensive_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR",
+              "PATH",
+              "HOME",
+              "X07LP_DEVICE_PROVIDER_LIVE"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.device.release.write"
+          ]
+        }
+      }
+    },
+    {
       "name": "lp.incident.list",
       "description": "List incidents from the local platform state, optionally filtered by deployment or app/environment.",
       "inputSchema": {
@@ -1033,6 +1660,622 @@
         "auth": {
           "required_scopes": [
             "lp.deploy.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.device.release.create",
+      "description": "Create a deterministic device release plan from a store provider profile and a sealed device package manifest.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "provider_profile",
+          "package_manifest",
+          "out"
+        ],
+        "properties": {
+          "provider_profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "package_manifest": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "out": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.device.release.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.device.release.validate",
+      "description": "Validate a device release plan against the selected provider capability matrix before execution.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "plan"
+        ],
+        "properties": {
+          "plan": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "provider_profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": []
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.device.release.read"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.device.release.run",
+      "description": "Execute a device release plan through the selected store adapter and persist release execution state.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "plan"
+        ],
+        "properties": {
+          "plan": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "provider_profile": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "package_manifest": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR",
+              "X07LP_DEVICE_PROVIDER_LIVE"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.device.release.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.device.release.query",
+      "description": "Query device release execution state by release id or latest filtered selection.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "release_exec_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "app_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "provider_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "distribution_lane": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "target": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "view": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "limit": {
+            "type": [
+              "string",
+              "number"
+            ]
+          },
+          "latest": {
+            "type": "boolean"
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": []
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.device.release.read"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.device.release.pause",
+      "description": "Pause an in-progress device release and emit a signed manual control action record.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "release_exec_id",
+          "reason"
+        ],
+        "properties": {
+          "release_exec_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR",
+              "X07LP_DEVICE_PROVIDER_LIVE"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.device.release.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.device.release.resume",
+      "description": "Resume a paused device release and emit a signed manual control action record.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "release_exec_id",
+          "reason"
+        ],
+        "properties": {
+          "release_exec_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR",
+              "X07LP_DEVICE_PROVIDER_LIVE"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.device.release.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.device.release.halt",
+      "description": "Halt a device release without promoting it further and persist the manual control trail.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "release_exec_id",
+          "reason"
+        ],
+        "properties": {
+          "release_exec_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.device.release.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.device.release.complete",
+      "description": "Complete a device release rollout and emit a signed manual control action record.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "release_exec_id",
+          "reason"
+        ],
+        "properties": {
+          "release_exec_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR",
+              "X07LP_DEVICE_PROVIDER_LIVE"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.device.release.write"
+          ]
+        }
+      }
+    },
+    {
+      "name": "lp.device.release.rollback",
+      "description": "Roll back a device release to the previous store version and emit a signed manual control action record.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "release_exec_id",
+          "reason"
+        ],
+        "properties": {
+          "release_exec_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "state_dir": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "now_unix_ms": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32,
+            "pattern": "^[0-9]+$"
+          }
+        }
+      },
+      "x07": {
+        "impl": "mcp.user.call_tool_v1",
+        "limits_profile": "mcp_tool_standard_v1",
+        "sandbox": {
+          "fs": {
+            "read_roots": [
+              "."
+            ],
+            "write_roots": [
+              ".x07lp",
+              "_tmp",
+              "out"
+            ]
+          },
+          "net": {
+            "allow_dns": false,
+            "allow_hosts": []
+          },
+          "env": {
+            "allow_keys": [
+              "X07LP_STATE_DIR",
+              "X07LP_DEVICE_PROVIDER_LIVE"
+            ]
+          }
+        },
+        "auth": {
+          "required_scopes": [
+            "lp.device.release.write"
           ]
         }
       }

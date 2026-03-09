@@ -25,13 +25,20 @@ window.addEventListener("popstate", () => {
 
 function normalizePath(pathname) {
   if (!pathname || pathname === "/") {
-    return "/apps";
+    return "/device-releases";
   }
   return pathname.endsWith("/") && pathname.length > 1 ? pathname.slice(0, -1) : pathname;
 }
 
 function parseRoute(pathname) {
   const path = normalizePath(pathname);
+  if (path === "/device-releases") {
+    return { kind: "deviceReleaseList", path };
+  }
+  const deviceReleaseMatch = path.match(/^\/device-releases\/([^/]+)$/);
+  if (deviceReleaseMatch) {
+    return { kind: "deviceRelease", execId: decodeURIComponent(deviceReleaseMatch[1]), path };
+  }
   const deploymentMatch = path.match(/^\/deployments\/([^/]+)$/);
   if (deploymentMatch) {
     return { kind: "deployment", execId: decodeURIComponent(deploymentMatch[1]), path };
@@ -53,6 +60,10 @@ function deploymentHref(execId) {
 
 function incidentHref(incidentId) {
   return `/incidents/${encodePathSegment(incidentId)}`;
+}
+
+function deviceReleaseHref(execId) {
+  return `/device-releases/${encodePathSegment(execId)}`;
 }
 
 function navigate(path, { replace = false } = {}) {
@@ -171,7 +182,20 @@ async function refresh() {
   clearError();
   render();
   try {
-    if (state.route.kind === "apps") {
+    if (state.route.kind === "deviceReleaseList") {
+      const deviceReleases = await fetchJson("/api/device-releases");
+      if (token !== state.requestToken) {
+        return;
+      }
+      state.data = { deviceReleases };
+    } else if (state.route.kind === "deviceRelease") {
+      const execId = encodePathSegment(state.route.execId);
+      const deviceRelease = await fetchJson(`/api/device-releases/${execId}`);
+      if (token !== state.requestToken) {
+        return;
+      }
+      state.data = { deviceRelease };
+    } else if (state.route.kind === "apps") {
       const [apps, incidents] = await Promise.all([
         fetchJson("/api/apps"),
         fetchJson("/api/incidents"),
@@ -382,6 +406,93 @@ function renderAppsView() {
   return wrapper;
 }
 
+function renderDeviceReleaseListView() {
+  const wrapper = el("div", "stack");
+  const deviceReleases = getItems(state.data.deviceReleases);
+  const snapshot = unwrapResult(state.data.deviceReleases);
+
+  append(
+    wrapper,
+    sectionTitle(
+      "Device Releases",
+      snapshot?.generated_unix_ms ? `Snapshot ${new Date(snapshot.generated_unix_ms).toLocaleString()}` : "Polling every 3 seconds.",
+    ),
+  );
+
+  if (!deviceReleases.length) {
+    append(wrapper, el("div", "card empty", "No device releases recorded."));
+    return wrapper;
+  }
+
+  for (const item of deviceReleases) {
+    const app = item.app ?? {};
+    const card = el("section", "card");
+    append(
+      card,
+      el("h3", null, `${app.app_id ?? "unknown"} / ${item.target ?? "n/a"}`),
+      keyValueList([
+        ["Release", item.exec_id],
+        ["Provider", item.provider_kind],
+        ["Lane", item.distribution_lane],
+        ["Status", item.status],
+        ["State", item.current_state],
+        ["Rollout", item.current_rollout_percent == null ? "n/a" : `${item.current_rollout_percent}%`],
+        ["Version", app.version ?? "n/a"],
+        ["Build", app.build ?? "n/a"],
+      ]),
+    );
+    const row = el("div", "button-row");
+    append(row, navButton("Open release", deviceReleaseHref(item.exec_id)));
+    append(card, row);
+    append(wrapper, card);
+  }
+
+  return wrapper;
+}
+
+function renderDeviceReleaseView() {
+  const wrapper = el("div", "stack");
+  const deviceRelease = unwrapResult(state.data.deviceRelease);
+  const execId = state.route.execId;
+  const controls = el("div", "button-row");
+  append(
+    controls,
+    navButton("Back to releases", "/device-releases"),
+    actionButton("Pause", `/api/device-releases/${encodePathSegment(execId)}/pause`, { reason: "ui_device_release_pause" }),
+    actionButton("Resume", `/api/device-releases/${encodePathSegment(execId)}/resume`, { reason: "ui_device_release_resume" }),
+    actionButton("Complete", `/api/device-releases/${encodePathSegment(execId)}/complete`, { reason: "ui_device_release_complete" }),
+    actionButton("Halt", `/api/device-releases/${encodePathSegment(execId)}/halt`, { reason: "ui_device_release_halt" }, { variant: "btn-danger" }),
+    actionButton("Rollback", `/api/device-releases/${encodePathSegment(execId)}/rollback`, { reason: "ui_device_release_rollback" }, { variant: "btn-danger" }),
+  );
+  const app = deviceRelease?.app ?? {};
+  const rolloutPercent =
+    deviceRelease?.current_rollout_percent == null ? "n/a" : `${deviceRelease.current_rollout_percent}%`;
+
+  const card = el("section", "card");
+  append(
+    card,
+    keyValueList([
+      ["Release", deviceRelease?.exec_id ?? execId],
+      ["Plan", deviceRelease?.plan_id ?? "n/a"],
+      ["Provider", deviceRelease?.provider_kind ?? "n/a"],
+      ["Lane", deviceRelease?.distribution_lane ?? "n/a"],
+      ["Target", deviceRelease?.target ?? "n/a"],
+      ["Status", deviceRelease?.status ?? "n/a"],
+      ["State", deviceRelease?.current_state ?? "n/a"],
+      ["Rollout", rolloutPercent],
+      ["App", app.app_id ?? "n/a"],
+      ["Version", app.version ?? "n/a"],
+      ["Build", app.build ?? "n/a"],
+      ["Decision count", String(deviceRelease?.decision_count ?? 0)],
+      ["Provider release id", deviceRelease?.provider_release_id ?? "n/a"],
+    ]),
+    jsonBlock(state.data.deviceRelease),
+  );
+
+  append(wrapper, sectionTitle("Device Release", execId), controls, card);
+  return wrapper;
+}
+
 function renderDeploymentView() {
   const wrapper = el("div", "stack");
   const deployment = unwrapResult(state.data.deployment);
@@ -533,7 +644,11 @@ function render() {
       "muted",
       state.loading
         ? "Refreshing backend state..."
-        : state.route.kind === "apps"
+        : state.route.kind === "deviceReleaseList"
+          ? "Store release orchestration, rollout state, and manual controls."
+          : state.route.kind === "deviceRelease"
+            ? `Device release ${state.route.execId}`
+            : state.route.kind === "apps"
           ? "Applications, incidents, and control actions."
           : state.route.kind === "deployment"
             ? `Deployment ${state.route.execId}`
@@ -542,7 +657,14 @@ function render() {
   );
 
   const routeTabs = el("div", "button-row");
-  append(routeTabs, navButton("Apps", "/apps", state.route.kind === "apps"));
+  append(
+    routeTabs,
+    navButton("Device Releases", "/device-releases", state.route.kind === "deviceReleaseList"),
+    navButton("Apps", "/apps", state.route.kind === "apps"),
+  );
+  if (state.route.kind === "deviceRelease") {
+    append(routeTabs, navButton("Current release", state.route.path, true));
+  }
   if (state.route.kind === "deployment") {
     append(routeTabs, navButton("Current deployment", state.route.path, true));
   }
@@ -552,7 +674,11 @@ function render() {
 
   append(page, header, routeTabs, renderBanner());
 
-  if (state.route.kind === "apps") {
+  if (state.route.kind === "deviceReleaseList") {
+    append(page, renderDeviceReleaseListView());
+  } else if (state.route.kind === "deviceRelease") {
+    append(page, renderDeviceReleaseView());
+  } else if (state.route.kind === "apps") {
     append(page, renderAppsView());
   } else if (state.route.kind === "deployment") {
     append(page, renderDeploymentView());

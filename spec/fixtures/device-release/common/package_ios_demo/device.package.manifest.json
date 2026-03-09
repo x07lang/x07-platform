@@ -1,0 +1,29 @@
+{
+  "schema_version": "x07.device.package.manifest@0.1.0",
+  "kind": "device_package",
+  "target": "ios",
+  "bundle_manifest_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+  "profile": {
+    "id": "demo_ios_release",
+    "v": 1,
+    "file": {
+      "path": "payload/profile/device.profile.json",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "bytes_len": 512
+    }
+  },
+  "capabilities": {
+    "path": "payload/profile/device.capabilities.json",
+    "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+    "bytes_len": 256
+  },
+  "telemetry_profile": {
+    "path": "payload/profile/device.telemetry.profile.json",
+    "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+    "bytes_len": 256
+  },
+  "package": {
+    "kind": "dir",
+    "path": "payload"
+  }
+}
