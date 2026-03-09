@@ -189,10 +189,13 @@ enum Commands {
     DeviceReleaseValidate(DeviceReleaseValidateArgs),
     DeviceReleaseRun(DeviceReleaseRunArgs),
     DeviceReleaseQuery(DeviceReleaseQueryArgs),
+    DeviceReleaseObserve(DeviceReleaseControlArgs),
     DeviceReleasePause(DeviceReleaseControlArgs),
     DeviceReleaseResume(DeviceReleaseControlArgs),
     DeviceReleaseHalt(DeviceReleaseControlArgs),
+    DeviceReleaseStop(DeviceReleaseControlArgs),
     DeviceReleaseComplete(DeviceReleaseControlArgs),
+    DeviceReleaseRerun(DeviceReleaseRerunArgs),
     DeviceReleaseRollback(DeviceReleaseControlArgs),
     #[command(hide = true)]
     SecretStorePack(SecretStorePackArgs),
@@ -308,7 +311,9 @@ struct DeploymentRerunArgs {
 #[derive(Args, Debug)]
 struct IncidentCaptureArgs {
     #[arg(long = "deployment", alias = "deployment-id")]
-    deployment_id: String,
+    deployment_id: Option<String>,
+    #[arg(long = "release", alias = "release-id", alias = "release-exec-id")]
+    release_exec_id: Option<String>,
     #[arg(long)]
     reason: String,
     #[arg(long)]
@@ -331,6 +336,12 @@ struct IncidentCaptureArgs {
 struct IncidentListArgs {
     #[arg(long = "deployment", alias = "deployment-id")]
     deployment_id: Option<String>,
+    #[arg(long = "release", alias = "release-id", alias = "release-exec-id")]
+    release_exec_id: Option<String>,
+    #[arg(long)]
+    classification: Option<String>,
+    #[arg(long)]
+    status: Option<String>,
     #[arg(long)]
     app_id: Option<String>,
     #[arg(long)]
@@ -469,6 +480,12 @@ struct DeviceReleaseCreateArgs {
     package_manifest: String,
     #[arg(long)]
     out: String,
+    #[arg(long)]
+    slo_profile: Option<String>,
+    #[arg(long)]
+    metrics_window_seconds: Option<u64>,
+    #[arg(long)]
+    metrics_on_fail: Option<String>,
     #[command(flatten)]
     common: CommonStateArgs,
 }
@@ -528,6 +545,18 @@ struct DeviceReleaseControlArgs {
 }
 
 #[derive(Args, Debug)]
+struct DeviceReleaseRerunArgs {
+    #[arg(long = "release", alias = "release-id", alias = "release-exec-id")]
+    release_exec_id: String,
+    #[arg(long)]
+    from_step: Option<usize>,
+    #[arg(long)]
+    reason: String,
+    #[command(flatten)]
+    common: CommonStateArgs,
+}
+
+#[derive(Args, Debug)]
 struct SecretStorePackArgs {
     #[arg(long)]
     input: String,
@@ -576,6 +605,7 @@ fn real_main() -> Result<i32> {
         Commands::DeviceReleaseValidate(args) => command_device_release_validate(args)?,
         Commands::DeviceReleaseRun(args) => command_device_release_run(args)?,
         Commands::DeviceReleaseQuery(args) => command_device_release_query(args)?,
+        Commands::DeviceReleaseObserve(args) => command_device_release_observe(args)?,
         Commands::DeviceReleasePause(args) => {
             command_device_release_control(args, "pause", "device.release.pause.manual")?
         }
@@ -585,9 +615,11 @@ fn real_main() -> Result<i32> {
         Commands::DeviceReleaseHalt(args) => {
             command_device_release_control(args, "halt", "device.release.halt.manual")?
         }
+        Commands::DeviceReleaseStop(args) => command_device_release_stop(args)?,
         Commands::DeviceReleaseComplete(args) => {
             command_device_release_control(args, "complete", "device.release.complete.manual")?
         }
+        Commands::DeviceReleaseRerun(args) => command_device_release_rerun(args)?,
         Commands::DeviceReleaseRollback(args) => {
             command_device_release_control(args, "rollback", "device.release.rollback.manual")?
         }
@@ -1362,6 +1394,32 @@ struct WasmToolCommand {
 }
 
 fn resolve_wasm_tool() -> Option<WasmToolCommand> {
+    let workspace_candidates = [
+        root_dir()
+            .join("../x07-wasm-backend/target/debug/x07-wasm")
+            .to_string_lossy()
+            .into_owned(),
+        root_dir()
+            .join("../x07-wasm-backend/target/release/x07-wasm")
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    for candidate in workspace_candidates {
+        if Path::new(&candidate).is_file() {
+            return Some(WasmToolCommand {
+                argv0: candidate,
+                prefix: Vec::new(),
+                display_name: "x07 wasm".to_string(),
+            });
+        }
+    }
+    if let Some(x07_wasm) = which("x07-wasm") {
+        return Some(WasmToolCommand {
+            argv0: x07_wasm,
+            prefix: Vec::new(),
+            display_name: "x07 wasm".to_string(),
+        });
+    }
     if let Some(x07) = which("x07") {
         return Some(WasmToolCommand {
             argv0: x07,
@@ -1369,11 +1427,7 @@ fn resolve_wasm_tool() -> Option<WasmToolCommand> {
             display_name: "x07 wasm".to_string(),
         });
     }
-    which("x07-wasm").map(|x07_wasm| WasmToolCommand {
-        argv0: x07_wasm,
-        prefix: Vec::new(),
-        display_name: "x07 wasm".to_string(),
-    })
+    None
 }
 
 fn run_wasm_tool_capture(
@@ -2777,8 +2831,11 @@ fn otlp_int_attr(key: &str, value: usize) -> Value {
 fn remote_telemetry_context(exec_doc: &Value, run_doc: &Value) -> Result<RemoteTelemetryContext> {
     let exec_id = get_str(exec_doc, &["exec_id"]).ok_or_else(|| anyhow!("missing exec_id"))?;
     let run_id = get_str(run_doc, &["run_id"]).ok_or_else(|| anyhow!("missing run_id"))?;
-    let pack_sha256 = get_str(run_doc, &["inputs", "artifact", "manifest", "digest", "sha256"])
-        .ok_or_else(|| anyhow!("missing pack manifest sha256"))?;
+    let pack_sha256 = get_str(
+        run_doc,
+        &["inputs", "artifact", "manifest", "digest", "sha256"],
+    )
+    .ok_or_else(|| anyhow!("missing pack manifest sha256"))?;
     let app_id =
         get_str(exec_doc, &["meta", "target", "app_id"]).unwrap_or_else(|| "app_min".to_string());
     let environment = get_str(exec_doc, &["meta", "target", "environment"])
@@ -2795,8 +2852,7 @@ fn remote_telemetry_context(exec_doc: &Value, run_doc: &Value) -> Result<RemoteT
 }
 
 fn remote_probe_path(remote: &Value) -> String {
-    let prefix =
-        get_str(remote, &["routing", "api_prefix"]).unwrap_or_else(|| "/api".to_string());
+    let prefix = get_str(remote, &["routing", "api_prefix"]).unwrap_or_else(|| "/api".to_string());
     let normalized = if prefix.starts_with('/') {
         prefix
     } else {
@@ -2812,7 +2868,8 @@ fn remote_probe_path(remote: &Value) -> String {
 fn remote_candidate_probe_url(remote: &Value) -> Result<String> {
     let base = get_str(remote, &["routing", "candidate_upstream"])
         .or_else(|| {
-            get_str(remote, &["runtime", "candidate_bind_addr"]).map(|value| format!("http://{value}"))
+            get_str(remote, &["runtime", "candidate_bind_addr"])
+                .map(|value| format!("http://{value}"))
         })
         .ok_or_else(|| anyhow!("missing remote candidate upstream"))?;
     Ok(format!(
@@ -3036,11 +3093,7 @@ fn remote_metrics_snapshot_from_otlp_export(
                         || !otlp_attr_matches(&attrs, "x07.slot", &context.slot)
                         || !otlp_attr_matches(&attrs, "x07.app_id", &context.app_id)
                         || !otlp_attr_matches(&attrs, "x07.environment", &context.environment)
-                        || !otlp_attr_matches(
-                            &attrs,
-                            "x07.telemetry_source",
-                            telemetry_source,
-                        )
+                        || !otlp_attr_matches(&attrs, "x07.telemetry_source", telemetry_source)
                         || !otlp_attr_matches(&attrs, "x07.analysis_seq", &analysis_seq)
                     {
                         continue;
@@ -3099,12 +3152,8 @@ fn read_remote_otlp_snapshot(
             continue;
         }
         let doc: Value = serde_json::from_str(&line).context("parse otlp export line")?;
-        if let Some(snapshot) = remote_metrics_snapshot_from_otlp_export(
-            &doc,
-            context,
-            analysis_seq,
-            telemetry_source,
-        )
+        if let Some(snapshot) =
+            remote_metrics_snapshot_from_otlp_export(&doc, context, analysis_seq, telemetry_source)
         {
             last = Some(snapshot);
         }
@@ -3544,6 +3593,38 @@ fn build_exec_step(
     }
     if let Some(decision) = analysis_decision {
         ensure_object(&mut step).insert("analysis_decision".to_string(), json!(decision));
+    }
+    step
+}
+
+fn build_device_release_step(
+    idx: usize,
+    name: &str,
+    kind: &str,
+    status: &str,
+    started_unix_ms: u64,
+    ended_unix_ms: Option<u64>,
+    decisions: Vec<String>,
+    latest_rollout_percent: Option<u64>,
+    store_release_id: Option<&str>,
+    analysis_decision: Option<&str>,
+) -> Value {
+    let mut step = build_exec_step(
+        idx,
+        name,
+        kind,
+        status,
+        started_unix_ms,
+        ended_unix_ms,
+        decisions,
+        None,
+        analysis_decision,
+    );
+    if let Some(percent) = latest_rollout_percent {
+        ensure_object(&mut step).insert("latest_rollout_percent".to_string(), json!(percent));
+    }
+    if let Some(store_release_id) = store_release_id {
+        ensure_object(&mut step).insert("store_release_id".to_string(), json!(store_release_id));
     }
     step
 }
@@ -5081,12 +5162,13 @@ fn insert_phasec_rows(
         });
         let captured_unix_ms = get_u64(&meta, &["captured_unix_ms"]).unwrap_or(0);
         conn.execute(
-            "INSERT OR REPLACE INTO incidents (incident_id, app_id, environment, deployment_id, run_id, classification, source, incident_status, captured_unix_ms, request_id, trace_id, status_code, decision_id, regression_status, regression_id, bundle_sha256, bundle_bytes_len, bundle_store_uri, meta_store_uri) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            "INSERT OR REPLACE INTO incidents (incident_id, app_id, environment, deployment_id, release_exec_id, run_id, classification, source, incident_status, captured_unix_ms, request_id, trace_id, status_code, decision_id, regression_status, regression_id, bundle_sha256, bundle_bytes_len, bundle_store_uri, meta_store_uri) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 incident_id,
                 app_id,
                 environment,
-                get_str(&meta, &["deployment_id"]).unwrap_or_default(),
+                get_str(&meta, &["deployment_id"]),
+                get_str(&meta, &["release_exec_id"]),
                 get_str(&meta, &["run_id"]).unwrap_or_default(),
                 get_str(&meta, &["classification"]).unwrap_or_default(),
                 get_str(&meta, &["source"]).unwrap_or_default(),
@@ -7092,6 +7174,7 @@ fn remote_command_incident_capture(args: &IncidentCaptureArgs) -> Result<Value> 
         "/v1/incidents/capture",
         Some(&json!({
             "deployment_id": args.deployment_id,
+            "release_exec_id": args.release_exec_id,
             "reason": args.reason,
             "classification": args.classification,
             "source": args.source,
@@ -7115,11 +7198,20 @@ fn remote_command_incident_list(args: &IncidentListArgs) -> Result<Value> {
     if let Some(deployment_id) = args.deployment_id.as_ref() {
         parts.push(format!("deployment_id={deployment_id}"));
     }
+    if let Some(release_exec_id) = args.release_exec_id.as_ref() {
+        parts.push(format!("release_exec_id={release_exec_id}"));
+    }
     if let Some(app_id) = args.app_id.as_ref() {
         parts.push(format!("app_id={app_id}"));
     }
     if let Some(env) = args.env.as_ref() {
         parts.push(format!("env={env}"));
+    }
+    if let Some(classification) = args.classification.as_ref() {
+        parts.push(format!("classification={classification}"));
+    }
+    if let Some(status) = args.status.as_ref() {
+        parts.push(format!("status={status}"));
     }
     if let Some(limit) = args.limit {
         parts.push(format!("limit={limit}"));
@@ -7270,6 +7362,59 @@ fn build_incident_summary_from_disk(
     Ok(None)
 }
 
+fn incident_store_prefix(meta: &Value, incident_id: &str) -> String {
+    format!(
+        "incidents/{}/{}/{incident_id}",
+        get_str(meta, &["target", "app_id"]).unwrap_or_default(),
+        get_str(meta, &["target", "environment"]).unwrap_or_default(),
+    )
+}
+
+fn incident_release_ref(meta: &Value) -> Value {
+    get_path(meta, &["device_release"])
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+fn incident_target_artifact(meta: &Value) -> Value {
+    if let Some(package_digest) = get_path(meta, &["device_release", "package_digest"])
+        .cloned()
+        .or_else(|| get_path(meta, &["package_digest"]).cloned())
+    {
+        if package_digest.is_object() {
+            let package_store_uri = get_str(&package_digest, &["sha256"])
+                .map(|sha| format!("file:device_release/packages/{sha}.json"))
+                .unwrap_or_else(|| "sha256:unknown".to_string());
+            return json!({
+                "kind": DEVICE_PACKAGE_MANIFEST_KIND,
+                "digest": package_digest,
+                "logical_name": "device.package.manifest.json",
+                "media_type": "application/json",
+                "store_uri": package_store_uri,
+            });
+        }
+    }
+    json!({
+        "kind": get_str(meta, &["artifact_kind"]).unwrap_or_else(|| "x07.app.pack@0.1.0".to_string()),
+        "digest": get_path(meta, &["pack_digest"]).cloned().unwrap_or_else(|| json!({"sha256":"","bytes_len":0})),
+        "logical_name": "app.pack.json",
+        "media_type": "application/json",
+        "store_uri": get_str(meta, &["deployment_id"])
+            .map(|deployment_id| format!("file:executions/{deployment_id}.json"))
+            .unwrap_or_else(|| "sha256:unknown".to_string()),
+    })
+}
+
+fn append_linked_incident(exec_doc: &mut Value, incident_id: &str, now_unix_ms: u64) {
+    let meta = ensure_object_field(exec_doc, "meta");
+    let total = get_u64(&Value::Object(meta.clone()), &["incident_count_total"]).unwrap_or(0) + 1;
+    let open = get_u64(&Value::Object(meta.clone()), &["incident_count_open"]).unwrap_or(0) + 1;
+    meta.insert("incident_count_total".to_string(), json!(total));
+    meta.insert("incident_count_open".to_string(), json!(open));
+    meta.insert("last_incident_id".to_string(), json!(incident_id));
+    meta.insert("updated_unix_ms".to_string(), json!(now_unix_ms));
+}
+
 fn trace_request_id(trace_doc: &Value) -> Option<String> {
     get_str(trace_doc, &["request_id"]).or_else(|| {
         trace_doc
@@ -7302,9 +7447,175 @@ fn trace_trace_id(trace_doc: &Value) -> Option<String> {
     })
 }
 
+#[derive(Clone)]
+struct IncidentContext {
+    deployment_id: Option<String>,
+    release_exec_id: Option<String>,
+    run_id: String,
+    target_app_id: String,
+    target_environment: String,
+    bundle_environment: Value,
+    pack_digest: Value,
+    package_digest: Value,
+    slot: Option<String>,
+    candidate_weight_pct: Option<u64>,
+    device_release: Value,
+}
+
+fn incident_scope_matches(
+    meta: &Value,
+    deployment_id: Option<&str>,
+    release_exec_id: Option<&str>,
+) -> bool {
+    let meta_deployment = get_str(meta, &["deployment_id"]);
+    let meta_release = get_str(meta, &["release_exec_id"]);
+    if deployment_id.is_none() && release_exec_id.is_none() {
+        return false;
+    }
+    if deployment_id != meta_deployment.as_deref() {
+        return false;
+    }
+    if release_exec_id != meta_release.as_deref() {
+        return false;
+    }
+    true
+}
+
+fn incident_target_store_base(meta: &Value, bundle: &Value) -> (String, String, String) {
+    let app_id = get_str(meta, &["target", "app_id"]).unwrap_or_default();
+    let environment = get_str(meta, &["target", "environment"]).unwrap_or_default();
+    let incident_id = get_str(bundle, &["incident_id"]).unwrap_or_default();
+    (app_id, environment, incident_id)
+}
+
+fn incident_query_item(meta: &Value, bundle: &Value) -> Value {
+    json!({
+        "incident_id": get_str(bundle, &["incident_id"]).unwrap_or_default(),
+        "classification": get_str(meta, &["classification"]).unwrap_or_default(),
+        "source": get_str(meta, &["source"]).unwrap_or_default(),
+        "incident_status": get_str(meta, &["incident_status"]).unwrap_or_default(),
+        "target": get_path(meta, &["target"]).cloned().unwrap_or_else(|| json!({"app_id":"unknown","environment":"unknown"})),
+        "deployment_id": get_path(meta, &["deployment_id"]).cloned().unwrap_or(Value::Null),
+        "release_exec_id": get_path(meta, &["release_exec_id"]).cloned().unwrap_or(Value::Null),
+        "run_id": get_str(meta, &["run_id"]).unwrap_or_default(),
+        "captured_unix_ms": get_u64(meta, &["captured_unix_ms"]).unwrap_or(0),
+        "request_id": get_path(meta, &["request_id"]).cloned().unwrap_or(Value::Null),
+        "trace_id": get_path(meta, &["trace_id"]).cloned().unwrap_or(Value::Null),
+        "status_code": get_path(meta, &["status_code"]).cloned().unwrap_or(Value::Null),
+        "decision_id": get_path(meta, &["decision_id"]).cloned().unwrap_or(Value::Null),
+        "regression_status": get_str(meta, &["regression_status"]).unwrap_or_else(|| "not_requested".to_string()),
+        "regression_id": get_path(meta, &["regression_id"]).cloned().unwrap_or(Value::Null),
+        "signature_status": get_str(meta, &["signature_status"]).unwrap_or_else(|| "not_applicable".to_string()),
+        "device_release": incident_release_ref(meta),
+    })
+}
+
+fn device_release_linked_incident_item(meta: &Value, bundle: &Value) -> Value {
+    json!({
+        "incident_id": get_str(bundle, &["incident_id"]).unwrap_or_default(),
+        "classification": get_str(meta, &["classification"]).unwrap_or_default(),
+        "source": get_str(meta, &["source"]).unwrap_or_default(),
+        "incident_status": get_str(meta, &["incident_status"]).unwrap_or_default(),
+        "captured_unix_ms": get_u64(meta, &["captured_unix_ms"]).unwrap_or(0),
+        "regression_status": get_str(meta, &["regression_status"]).unwrap_or_else(|| "not_requested".to_string()),
+        "regression_id": get_path(meta, &["regression_id"]).cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn upsert_device_release_linked_incident(exec_doc: &mut Value, meta: &Value, bundle: &Value) {
+    let item = device_release_linked_incident_item(meta, bundle);
+    let incident_id = get_str(&item, &["incident_id"]).unwrap_or_default();
+    let meta_map = ensure_object_field(exec_doc, "meta");
+    let linked_value = meta_map
+        .entry("linked_incidents".to_string())
+        .or_insert_with(|| json!([]));
+    if !linked_value.is_array() {
+        *linked_value = json!([]);
+    }
+    let linked = linked_value
+        .as_array_mut()
+        .expect("linked_incidents must be an array");
+    if let Some(existing) = linked
+        .iter_mut()
+        .find(|entry| get_str(entry, &["incident_id"]).as_deref() == Some(incident_id.as_str()))
+    {
+        *existing = item;
+    } else {
+        linked.push(item);
+    }
+}
+
+fn build_deployment_incident_context(
+    exec_doc: &mut Value,
+    run_doc: &Value,
+    state_dir: &Path,
+) -> Result<IncidentContext> {
+    ensure_deploy_meta(exec_doc, run_doc, state_dir)?;
+    let meta = get_path(exec_doc, &["meta"])
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    Ok(IncidentContext {
+        deployment_id: get_str(exec_doc, &["exec_id"]),
+        release_exec_id: None,
+        run_id: get_str(exec_doc, &["run_id"]).unwrap_or_default(),
+        target_app_id: get_str(&meta, &["target", "app_id"]).unwrap_or_default(),
+        target_environment: get_str(&meta, &["target", "environment"]).unwrap_or_default(),
+        bundle_environment: env_name_to_doc(
+            &get_str(&meta, &["target", "environment"]).unwrap_or_default(),
+        ),
+        pack_digest: get_path(run_doc, &["inputs", "artifact", "manifest", "digest"])
+            .cloned()
+            .unwrap_or(Value::Null),
+        package_digest: Value::Null,
+        slot: Some("candidate".to_string()),
+        candidate_weight_pct: get_u64(&meta, &["routing", "candidate_weight_pct"]),
+        device_release: Value::Null,
+    })
+}
+
+fn device_release_rollout_slot(exec_doc: &Value) -> (&'static str, Option<u64>) {
+    match device_release_current_percent(exec_doc) {
+        Some(100) => ("stable", Some(100)),
+        Some(percent) if percent > 0 => ("candidate", Some(percent)),
+        _ => ("none", None),
+    }
+}
+
+fn build_device_release_incident_context(exec_doc: &Value) -> Result<IncidentContext> {
+    let meta = get_path(exec_doc, &["meta"])
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let release_exec_id =
+        get_str(exec_doc, &["exec_id"]).ok_or_else(|| anyhow!("missing device release exec_id"))?;
+    let (slot, rollout_percent) = device_release_rollout_slot(exec_doc);
+    Ok(IncidentContext {
+        deployment_id: None,
+        release_exec_id: Some(release_exec_id.clone()),
+        run_id: get_str(exec_doc, &["run_id"]).unwrap_or_default(),
+        target_app_id: get_str(&meta, &["app", "app_id"]).unwrap_or_default(),
+        target_environment: "device_release".to_string(),
+        bundle_environment: json!({"kind":"custom","name":"device_release"}),
+        pack_digest: Value::Null,
+        package_digest: get_path(&meta, &["package_digest"])
+            .cloned()
+            .unwrap_or(Value::Null),
+        slot: Some(slot.to_string()),
+        candidate_weight_pct: rollout_percent,
+        device_release: json!({
+            "release_exec_id": release_exec_id,
+            "plan_id": get_path(exec_doc, &["plan_id"]).cloned().unwrap_or(Value::Null),
+            "provider_kind": get_str(&meta, &["provider_kind"]).unwrap_or_else(|| "mock_v1".to_string()),
+            "distribution_lane": get_str(&meta, &["distribution_lane"]).unwrap_or_else(|| "beta".to_string()),
+            "target": get_str(&meta, &["target"]).unwrap_or_else(|| "ios".to_string()),
+            "package_digest": get_path(&meta, &["package_digest"]).cloned().unwrap_or(Value::Null),
+        }),
+    })
+}
+
 fn find_existing_incident_for_key(
     state_dir: &Path,
-    deployment_id: &str,
+    deployment_id: Option<&str>,
+    release_exec_id: Option<&str>,
     classification: &str,
     request_id: Option<&str>,
     decision_id: Option<&str>,
@@ -7316,7 +7627,7 @@ fn find_existing_incident_for_key(
     }
     for meta_path in read_incident_meta_paths(state_dir) {
         let meta = load_json(&meta_path)?;
-        if get_str(&meta, &["deployment_id"]).as_deref() != Some(deployment_id)
+        if !incident_scope_matches(&meta, deployment_id, release_exec_id)
             || get_str(&meta, &["classification"]).as_deref() != Some(classification)
         {
             continue;
@@ -7352,41 +7663,27 @@ fn build_incident_result(
     rebuilt: bool,
 ) -> Result<Value> {
     let bundle_bytes = fs::read(incident_dir.join("incident.bundle.json"))?;
+    let (_, _, incident_id) = incident_target_store_base(meta, bundle);
+    let store_prefix = incident_store_prefix(meta, &incident_id);
     let bundle_artifact = json!({
         "kind": "lp.incident.bundle@0.1.0",
         "digest": digest_value(&bundle_bytes),
-        "store_uri": format!(
-            "file:incidents/{}/{}/{}/incident.bundle.json",
-            get_str(meta, &["target", "app_id"]).unwrap_or_default(),
-            get_str(meta, &["target", "environment"]).unwrap_or_default(),
-            get_str(bundle, &["incident_id"]).unwrap_or_default(),
+        "store_uri": format!("file:{store_prefix}/incident.bundle.json"),
+    });
+    let mut result = incident_query_item(meta, bundle);
+    ensure_object(&mut result).extend(Map::from_iter([
+        (
+            "schema_version".to_string(),
+            json!("lp.incident.query.result@0.1.0"),
         ),
-    });
-    let mut result = json!({
-        "schema_version": "lp.incident.query.result@0.1.0",
-        "view": view,
-        "resolution": resolution,
-        "index": {"used": true, "rebuilt": rebuilt, "db_path": db_path.to_string_lossy()},
-        "incident_id": get_str(bundle, &["incident_id"]).unwrap_or_default(),
-        "classification": get_str(meta, &["classification"]).unwrap_or_default(),
-        "source": get_str(meta, &["source"]).unwrap_or_default(),
-        "incident_status": get_str(meta, &["incident_status"]).unwrap_or_default(),
-        "target": get_path(meta, &["target"]).cloned().unwrap_or_else(|| json!({"app_id":"unknown","environment":"unknown"})),
-        "deployment_id": get_str(meta, &["deployment_id"]).unwrap_or_default(),
-        "run_id": get_str(meta, &["run_id"]).unwrap_or_default(),
-        "captured_unix_ms": get_u64(meta, &["captured_unix_ms"]).unwrap_or(0),
-        "request_id": get_path(meta, &["request_id"]).cloned().unwrap_or(Value::Null),
-        "trace_id": get_path(meta, &["trace_id"]).cloned().unwrap_or(Value::Null),
-        "status_code": get_path(meta, &["status_code"]).cloned().unwrap_or(Value::Null),
-        "decision_id": get_path(meta, &["decision_id"]).cloned().unwrap_or(Value::Null),
-        "regression_status": get_str(meta, &["regression_status"]).unwrap_or_else(|| "not_requested".to_string()),
-        "regression_id": get_path(meta, &["regression_id"]).cloned().unwrap_or(Value::Null),
-        "signature_status": get_str(meta, &["signature_status"]).unwrap_or_else(|| "not_applicable".to_string()),
-    });
+        ("view".to_string(), json!(view)),
+        ("resolution".to_string(), resolution),
+        (
+            "index".to_string(),
+            json!({"used": true, "rebuilt": rebuilt, "db_path": db_path.to_string_lossy()}),
+        ),
+    ]));
     if view == "full" {
-        let app_id = get_str(meta, &["target", "app_id"]).unwrap_or_default();
-        let environment = get_str(meta, &["target", "environment"]).unwrap_or_default();
-        let incident_id = get_str(bundle, &["incident_id"]).unwrap_or_default();
         let refs = get_path(bundle, &["refs"])
             .and_then(Value::as_array)
             .cloned()
@@ -7422,9 +7719,7 @@ fn build_incident_result(
                 item_map.remove("label");
                 item_map.insert(
                     "store_uri".to_string(),
-                    json!(format!(
-                        "file:incidents/{app_id}/{environment}/{incident_id}/{label}"
-                    )),
+                    json!(format!("file:{store_prefix}/{label}")),
                 );
                 item
             })
@@ -7443,10 +7738,9 @@ fn build_incident_result(
     Ok(result)
 }
 
-fn capture_incident_impl(
+fn capture_incident_with_context(
     state_dir: &Path,
-    exec_doc: &mut Value,
-    run_doc: &Value,
+    context: &IncidentContext,
     reason: &str,
     classification: &str,
     source: &str,
@@ -7457,14 +7751,6 @@ fn capture_incident_impl(
     signature_status: &str,
     now_unix_ms: u64,
 ) -> Result<(Value, Value, PathBuf)> {
-    ensure_deploy_meta(exec_doc, run_doc, state_dir)?;
-    let meta = get_path(exec_doc, &["meta"])
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    let app_id = get_str(&meta, &["target", "app_id"]).unwrap_or_default();
-    let environment = get_str(&meta, &["target", "environment"]).unwrap_or_default();
-    let deployment_id = get_str(exec_doc, &["exec_id"]).unwrap_or_default();
-    let run_id = get_str(exec_doc, &["run_id"]).unwrap_or_default();
     let request_env = request_path.map(load_sanitized_http_envelope).transpose()?;
     let response_env = response_path
         .map(load_sanitized_http_envelope)
@@ -7486,19 +7772,25 @@ fn capture_incident_impl(
     let trace_id = trace_doc.as_ref().and_then(trace_trace_id);
     if let Some(existing) = find_existing_incident_for_key(
         state_dir,
-        &deployment_id,
+        context.deployment_id.as_deref(),
+        context.release_exec_id.as_deref(),
         classification,
         request_id.as_deref(),
         decision_id,
     )? {
         return Ok(existing);
     }
-    let seed = format!("{deployment_id}:{classification}:{source}:{now_unix_ms}:{reason}");
+    let scope_id = context
+        .deployment_id
+        .as_deref()
+        .or(context.release_exec_id.as_deref())
+        .unwrap_or("incident");
+    let seed = format!("{scope_id}:{classification}:{source}:{now_unix_ms}:{reason}");
     let incident_id = gen_id("lpinc", &seed);
     let incident_dir = state_dir
         .join("incidents")
-        .join(&app_id)
-        .join(&environment)
+        .join(&context.target_app_id)
+        .join(&context.target_environment)
         .join(&incident_id);
     fs::create_dir_all(&incident_dir)?;
 
@@ -7509,7 +7801,10 @@ fn capture_incident_impl(
     if let Some((_, bytes)) = request_env.as_ref() {
         write_bytes(&incident_dir.join("request.envelope.json"), &bytes)?;
         request_ref = named_file_artifact(
-            &format!("incidents/{app_id}/{environment}/{incident_id}/request.envelope.json"),
+            &format!(
+                "incidents/{}/{}/{}/request.envelope.json",
+                context.target_app_id, context.target_environment, incident_id
+            ),
             "x07.http.request.envelope@0.1.0",
             "application/json",
             &bytes,
@@ -7523,7 +7818,10 @@ fn capture_incident_impl(
     if let Some((_, bytes)) = response_env.as_ref() {
         write_bytes(&incident_dir.join("response.envelope.json"), &bytes)?;
         response_ref = named_file_artifact(
-            &format!("incidents/{app_id}/{environment}/{incident_id}/response.envelope.json"),
+            &format!(
+                "incidents/{}/{}/{}/response.envelope.json",
+                context.target_app_id, context.target_environment, incident_id
+            ),
             "x07.http.response.envelope@0.1.0",
             "application/json",
             &bytes,
@@ -7538,7 +7836,10 @@ fn capture_incident_impl(
         let bytes = fs::read(path)?;
         write_bytes(&incident_dir.join("trace.json"), &bytes)?;
         trace_ref = named_file_artifact(
-            &format!("incidents/{app_id}/{environment}/{incident_id}/trace.json"),
+            &format!(
+                "incidents/{}/{}/{}/trace.json",
+                context.target_app_id, context.target_environment, incident_id
+            ),
             "x07.app.trace@0.1.0",
             "application/json",
             &bytes,
@@ -7557,19 +7858,30 @@ fn capture_incident_impl(
         "manual_capture" => vec![json!("LP_MANUAL_CAPTURE")],
         "app_kill" => vec![json!("LP_APP_KILL")],
         "platform_kill" => vec![json!("LP_PLATFORM_KILL")],
+        "device_js_unhandled" => vec![json!("LP_DEVICE_JS_UNHANDLED")],
+        "device_bridge_parse" => vec![json!("LP_DEVICE_BRIDGE_PARSE")],
+        "device_policy_violation" => vec![json!("LP_DEVICE_POLICY_VIOLATION")],
+        "device_webview_crash" => vec![json!("LP_DEVICE_WEBVIEW_CRASH")],
+        "device_crash_spike" => vec![json!("LP_DEVICE_CRASH_SPIKE")],
+        "device_release_gate_failed" => vec![json!("LP_DEVICE_RELEASE_GATE_FAILED")],
+        "device_release_provider_failed" => vec![json!("LP_DEVICE_RELEASE_PROVIDER_FAILED")],
         _ => Vec::new(),
     };
     let bundle = json!({
         "schema_version": "lp.incident.bundle@0.1.0",
         "incident_id": incident_id,
         "created_unix_ms": now_unix_ms,
-        "app_id": app_id,
-        "environment": env_name_to_doc(&environment),
+        "app_id": context.target_app_id.clone(),
+        "environment": context.bundle_environment.clone(),
         "window": {
             "start_unix_ms": now_unix_ms,
             "end_unix_ms": now_unix_ms,
         },
-        "deploy_execution": { "exec_id": deployment_id },
+        "deploy_execution": context
+            .deployment_id
+            .as_ref()
+            .map(|deployment_id| json!({ "exec_id": deployment_id }))
+            .unwrap_or(Value::Null),
         "request": if request_ref.is_null() { Value::Null } else { json!({"kind":"x07.http.request.envelope@0.1.0","digest": request_ref.get("digest").cloned().unwrap_or(Value::Null)}) },
         "response": if response_ref.is_null() { Value::Null } else { json!({"kind":"x07.http.response.envelope@0.1.0","digest": response_ref.get("digest").cloned().unwrap_or(Value::Null)}) },
         "trace": if trace_ref.is_null() { Value::Null } else { json!({"kind":"x07.app.trace@0.1.0","digest": trace_ref.get("digest").cloned().unwrap_or(Value::Null)}) },
@@ -7582,40 +7894,71 @@ fn capture_incident_impl(
         }
     });
     let _ = write_json(&incident_dir.join("incident.bundle.json"), &bundle)?;
-    let pack_digest = get_path(run_doc, &["inputs", "artifact", "manifest", "digest"])
-        .cloned()
-        .unwrap_or(Value::Null);
     let meta_doc = json!({
         "schema_version": "lp.incident.bundle.meta.local@0.1.0",
         "classification": classification,
         "source": source,
         "incident_status": "open",
-        "deployment_id": deployment_id,
-        "run_id": run_id,
+        "deployment_id": context.deployment_id.clone(),
+        "release_exec_id": context.release_exec_id.clone(),
+        "run_id": context.run_id.clone(),
         "target": {
-            "app_id": get_str(&meta, &["target", "app_id"]).unwrap_or_default(),
-            "environment": get_str(&meta, &["target", "environment"]).unwrap_or_default(),
+            "app_id": context.target_app_id.clone(),
+            "environment": context.target_environment.clone(),
         },
         "captured_unix_ms": now_unix_ms,
         "request_id": request_id.map(Value::from).unwrap_or(Value::Null),
         "trace_id": trace_id.map(Value::from).unwrap_or(Value::Null),
-        "pack_digest": pack_digest,
-        "slot": "candidate",
-        "candidate_weight_pct": get_u64(&meta, &["routing", "candidate_weight_pct"]),
+        "pack_digest": context.pack_digest.clone(),
+        "package_digest": context.package_digest.clone(),
+        "slot": context.slot.clone().unwrap_or_else(|| "none".to_string()),
+        "candidate_weight_pct": context.candidate_weight_pct,
         "status_code": status_code,
         "route_key": Value::Null,
         "decision_id": decision_id.map(Value::from).unwrap_or(Value::Null),
         "regression_id": Value::Null,
         "regression_status": "not_requested",
         "signature_status": signature_status,
+        "device_release": context.device_release.clone(),
     });
     let _ = write_json(&incident_dir.join("incident.meta.local.json"), &meta_doc)?;
+    Ok((meta_doc, bundle, incident_dir))
+}
 
+fn capture_incident_impl(
+    state_dir: &Path,
+    exec_doc: &mut Value,
+    run_doc: &Value,
+    reason: &str,
+    classification: &str,
+    source: &str,
+    request_path: Option<&Path>,
+    response_path: Option<&Path>,
+    trace_path: Option<&Path>,
+    decision_id: Option<&str>,
+    signature_status: &str,
+    now_unix_ms: u64,
+) -> Result<(Value, Value, PathBuf)> {
+    let context = build_deployment_incident_context(exec_doc, run_doc, state_dir)?;
+    let (meta_doc, bundle, incident_dir) = capture_incident_with_context(
+        state_dir,
+        &context,
+        reason,
+        classification,
+        source,
+        request_path,
+        response_path,
+        trace_path,
+        decision_id,
+        signature_status,
+        now_unix_ms,
+    )?;
     let exec_meta = ensure_object_field(exec_doc, "meta");
     let total =
         get_u64(&Value::Object(exec_meta.clone()), &["incident_count_total"]).unwrap_or(0) + 1;
     let open =
         get_u64(&Value::Object(exec_meta.clone()), &["incident_count_open"]).unwrap_or(0) + 1;
+    let incident_id = get_str(&bundle, &["incident_id"]).unwrap_or_default();
     exec_meta.insert("incident_count_total".to_string(), json!(total));
     exec_meta.insert("incident_count_open".to_string(), json!(open));
     exec_meta.insert("last_incident_id".to_string(), json!(incident_id));
@@ -7630,6 +7973,42 @@ fn capture_incident_impl(
             None,
         ),
     );
+    rebuild_indexes(state_dir)?;
+    Ok((meta_doc, bundle, incident_dir))
+}
+
+fn capture_device_release_incident_impl(
+    state_dir: &Path,
+    exec_doc: &mut Value,
+    reason: &str,
+    classification: &str,
+    source: &str,
+    request_path: Option<&Path>,
+    response_path: Option<&Path>,
+    trace_path: Option<&Path>,
+    decision_id: Option<&str>,
+    signature_status: &str,
+    now_unix_ms: u64,
+) -> Result<(Value, Value, PathBuf)> {
+    ensure_device_release_meta_defaults(exec_doc);
+    let context = build_device_release_incident_context(exec_doc)?;
+    let (meta_doc, bundle, incident_dir) = capture_incident_with_context(
+        state_dir,
+        &context,
+        reason,
+        classification,
+        source,
+        request_path,
+        response_path,
+        trace_path,
+        decision_id,
+        signature_status,
+        now_unix_ms,
+    )?;
+    let incident_id = get_str(&bundle, &["incident_id"]).unwrap_or_default();
+    append_linked_incident(exec_doc, &incident_id, now_unix_ms);
+    upsert_device_release_linked_incident(exec_doc, &meta_doc, &bundle);
+    let _ = save_device_release_exec(state_dir, exec_doc)?;
     rebuild_indexes(state_dir)?;
     Ok((meta_doc, bundle, incident_dir))
 }
@@ -7705,6 +8084,39 @@ fn device_release_exec_path(state_dir: &Path, exec_id: &str) -> PathBuf {
         .join(format!("{exec_id}.json"))
 }
 
+fn allocate_device_release_run_and_exec_ids(
+    state_dir: &Path,
+    run_seed: &str,
+    now_unix_ms: u64,
+) -> (String, String) {
+    let mut attempt = 0u64;
+    loop {
+        let material = if attempt == 0 {
+            run_seed.to_string()
+        } else {
+            format!("{run_seed}:{attempt}")
+        };
+        let run_id = gen_id("lpdrrun", &material);
+        let exec_id = gen_id("lpdrexec", &format!("{run_id}:{now_unix_ms}"));
+        if !device_release_exec_path(state_dir, &exec_id).exists() {
+            return (run_id, exec_id);
+        }
+        attempt += 1;
+    }
+}
+
+fn device_release_slo_profile_path(state_dir: &Path, sha256: &str) -> PathBuf {
+    device_release_root_dir(state_dir)
+        .join("slo_profiles")
+        .join(format!("{sha256}.json"))
+}
+
+fn device_release_metrics_dir(state_dir: &Path, exec_id: &str) -> PathBuf {
+    device_release_root_dir(state_dir)
+        .join("telemetry")
+        .join(exec_id)
+}
+
 fn load_device_release_exec(state_dir: &Path, exec_id: &str) -> Result<Value> {
     load_json(&device_release_exec_path(state_dir, exec_id))
 }
@@ -7713,6 +8125,87 @@ fn save_device_release_exec(state_dir: &Path, exec_doc: &Value) -> Result<Vec<u8
     let exec_id =
         get_str(exec_doc, &["exec_id"]).ok_or_else(|| anyhow!("missing device release exec_id"))?;
     write_json(&device_release_exec_path(state_dir, &exec_id), exec_doc)
+}
+
+fn write_device_release_slo_profile_copy(
+    state_dir: &Path,
+    slo_doc: &Value,
+) -> Result<(PathBuf, Vec<u8>)> {
+    let bytes = canon_json_bytes(slo_doc);
+    let sha = sha256_hex(&bytes);
+    let path = device_release_slo_profile_path(state_dir, &sha);
+    let bytes = write_json(&path, slo_doc)?;
+    Ok((path, bytes))
+}
+
+fn ensure_device_release_meta_defaults(exec_doc: &mut Value) {
+    let created_unix_ms = get_u64(exec_doc, &["created_unix_ms"]).unwrap_or(0);
+    let meta = ensure_object_field(exec_doc, "meta");
+    upsert_default(meta, "updated_unix_ms", json!(created_unix_ms));
+    upsert_default(meta, "automation_state", json!("active"));
+    upsert_default(meta, "next_step_idx", json!(0));
+    upsert_default(meta, "parent_exec_id", Value::Null);
+    upsert_default(meta, "rerun_from_step_idx", Value::Null);
+    upsert_default(meta, "latest_metrics_snapshot", Value::Null);
+    upsert_default(meta, "latest_slo_eval_report", Value::Null);
+    upsert_default(meta, "latest_eval_outcome", json!("none"));
+    upsert_default(meta, "linked_incidents", json!([]));
+    upsert_default(meta, "last_incident_id", Value::Null);
+    upsert_default(meta, "incident_count_total", json!(0));
+    upsert_default(meta, "incident_count_open", json!(0));
+    upsert_default(meta, "artifacts", json!([]));
+    upsert_default(meta, "decisions", json!([]));
+    upsert_default(meta, "decision_count", json!(0));
+    upsert_default(meta, "latest_decision_id", Value::Null);
+    upsert_default(meta, "latest_signed_control_decision_id", Value::Null);
+    upsert_default(meta, "signature_status", json!("not_applicable"));
+}
+
+fn device_release_eval_outcome(decision_value: &str) -> &'static str {
+    match decision_value {
+        "promote" => "ok",
+        "rollback" => "fail",
+        "inconclusive" => "inconclusive",
+        _ => "none",
+    }
+}
+
+fn device_release_next_step_idx(exec_doc: &Value) -> usize {
+    get_u64(exec_doc, &["meta", "next_step_idx"])
+        .map(|value| value as usize)
+        .unwrap_or(0)
+}
+
+fn device_release_collect_artifacts(exec_doc: &Value) -> Vec<Value> {
+    get_path(exec_doc, &["meta", "artifacts"])
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn find_device_release_metrics_snapshot(
+    state_dir: &Path,
+    exec_id: &str,
+) -> Result<Option<PathBuf>> {
+    let dir = device_release_metrics_dir(state_dir, exec_id);
+    if !dir.exists() {
+        return Ok(None);
+    }
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(OsStr::to_str) != Some("json") {
+            continue;
+        }
+        paths.push(path);
+    }
+    paths.sort();
+    Ok(paths.into_iter().next())
+}
+
+fn device_release_step_outcome(step_doc: &Value) -> String {
+    get_str(step_doc, &["on_fail"]).unwrap_or_else(|| "release.pause".to_string())
 }
 
 fn provider_module_id(provider_kind: &str) -> &'static str {
@@ -7738,74 +8231,80 @@ fn string_or_number(value: &Value, path: &[&str]) -> Option<String> {
 fn build_device_provider_capabilities(provider_doc: &Value) -> Result<Value> {
     let provider_kind = get_str(provider_doc, &["provider_kind"])
         .ok_or_else(|| anyhow!("provider profile missing provider_kind"))?;
-    let target =
-        get_str(provider_doc, &["target"]).ok_or_else(|| anyhow!("provider profile missing target"))?;
+    let target = get_str(provider_doc, &["target"])
+        .ok_or_else(|| anyhow!("provider profile missing target"))?;
     let distribution_lane = get_str(provider_doc, &["distribution_lane"])
         .ok_or_else(|| anyhow!("provider profile missing distribution_lane"))?;
-    let (supported_ops, supports_percent_rollout, supports_pause, supports_resume, supports_complete, supports_rollback) =
-        match (provider_kind.as_str(), distribution_lane.as_str()) {
-            ("mock_v1", "beta") => (
-                vec!["release.start"],
-                false,
-                false,
-                false,
-                false,
-                false,
-            ),
-            ("mock_v1", "production") => (
-                vec![
-                    "release.start",
-                    "rollout.set_percent",
-                    "release.pause",
-                    "release.resume",
-                    "release.complete",
-                    "rollback.previous",
-                ],
-                true,
-                true,
-                true,
-                true,
-                true,
-            ),
-            ("appstoreconnect_v1", "beta") => (vec!["release.start"], false, false, false, false, false),
-            ("appstoreconnect_v1", "production") => (
-                vec!["release.start", "release.pause", "release.resume", "release.complete"],
-                false,
-                true,
-                true,
-                true,
-                false,
-            ),
-            ("googleplay_v1", "beta") => (vec!["release.start"], false, false, false, false, false),
-            ("googleplay_v1", "production") => (
-                vec![
-                    "release.start",
-                    "rollout.set_percent",
-                    "release.pause",
-                    "release.resume",
-                    "release.complete",
-                    "rollback.previous",
-                ],
-                true,
-                true,
-                true,
-                true,
-                true,
-            ),
-            _ => bail!("unsupported provider_kind/distribution_lane combination"),
-        };
+    let (
+        supported_ops,
+        supports_percent_rollout,
+        supports_pause,
+        supports_resume,
+        supports_complete,
+        supports_rollback,
+    ) = match (provider_kind.as_str(), distribution_lane.as_str()) {
+        ("mock_v1", "beta") => (vec!["release.start"], false, false, false, false, false),
+        ("mock_v1", "production") => (
+            vec![
+                "release.start",
+                "rollout.set_percent",
+                "release.pause",
+                "release.resume",
+                "release.complete",
+                "rollback.previous",
+            ],
+            true,
+            true,
+            true,
+            true,
+            true,
+        ),
+        ("appstoreconnect_v1", "beta") => {
+            (vec!["release.start"], false, false, false, false, false)
+        }
+        ("appstoreconnect_v1", "production") => (
+            vec![
+                "release.start",
+                "release.pause",
+                "release.resume",
+                "release.complete",
+            ],
+            false,
+            true,
+            true,
+            true,
+            false,
+        ),
+        ("googleplay_v1", "beta") => (vec!["release.start"], false, false, false, false, false),
+        ("googleplay_v1", "production") => (
+            vec![
+                "release.start",
+                "rollout.set_percent",
+                "release.pause",
+                "release.resume",
+                "release.complete",
+                "rollback.previous",
+            ],
+            true,
+            true,
+            true,
+            true,
+            true,
+        ),
+        _ => bail!("unsupported provider_kind/distribution_lane combination"),
+    };
     Ok(json!({
         "schema_version": "lp.adapter.capabilities@0.1.0",
         "provider": provider_module_id(&provider_kind),
         "runtime_kind": "device_store",
         "routing_kind": "store_control",
         "artifact_distribution": "store_upload",
-        "supports_incidents": false,
-        "supports_regressions": false,
-        "supports_pause": false,
-        "supports_rerun": false,
-        "supports_weighted_canary": false,
-        "supports_otlp": false,
+        "supports_incidents": true,
+        "supports_regressions": true,
+        "supports_pause": true,
+        "supports_rerun": true,
+        "supports_weighted_canary": supports_percent_rollout,
+        "supports_otlp": true,
         "supports_server_side_secrets": false,
         "device_release": {
             "supported_targets": [target],
@@ -7821,7 +8320,8 @@ fn build_device_provider_capabilities(provider_doc: &Value) -> Result<Value> {
 }
 
 fn validate_device_provider_profile_doc(provider_doc: &Value) -> Result<Value> {
-    if get_str(provider_doc, &["schema_version"]).as_deref() != Some(DEVICE_STORE_PROVIDER_PROFILE_KIND)
+    if get_str(provider_doc, &["schema_version"]).as_deref()
+        != Some(DEVICE_STORE_PROVIDER_PROFILE_KIND)
     {
         bail!("provider profile must have schema_version={DEVICE_STORE_PROVIDER_PROFILE_KIND}");
     }
@@ -7833,8 +8333,8 @@ fn validate_device_provider_profile_doc(provider_doc: &Value) -> Result<Value> {
     ) {
         bail!("unsupported provider_kind={provider_kind}");
     }
-    let target =
-        get_str(provider_doc, &["target"]).ok_or_else(|| anyhow!("provider profile missing target"))?;
+    let target = get_str(provider_doc, &["target"])
+        .ok_or_else(|| anyhow!("provider profile missing target"))?;
     if !matches!(target.as_str(), "ios" | "android") {
         bail!("unsupported device release target={target}");
     }
@@ -7859,7 +8359,8 @@ fn validate_device_package_manifest_doc(package_doc: &Value) -> Result<()> {
     if get_str(package_doc, &["schema_version"]).as_deref() != Some(DEVICE_PACKAGE_MANIFEST_KIND) {
         bail!("package manifest must have schema_version={DEVICE_PACKAGE_MANIFEST_KIND}");
     }
-    let target = get_str(package_doc, &["target"]).ok_or_else(|| anyhow!("package manifest missing target"))?;
+    let target = get_str(package_doc, &["target"])
+        .ok_or_else(|| anyhow!("package manifest missing target"))?;
     if !matches!(target.as_str(), "ios" | "android") {
         bail!("device release target must be ios or android");
     }
@@ -7891,10 +8392,12 @@ fn find_embedded_device_profile(payload_dir: &Path) -> Result<PathBuf> {
         matches.push(entry.path().to_path_buf());
     }
     matches.sort();
-    matches
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("unable to find embedded device.profile.json under {}", payload_dir.display()))
+    matches.into_iter().next().ok_or_else(|| {
+        anyhow!(
+            "unable to find embedded device.profile.json under {}",
+            payload_dir.display()
+        )
+    })
 }
 
 fn package_payload_path(package_manifest_path: &Path, package_doc: &Value) -> Result<PathBuf> {
@@ -7927,7 +8430,8 @@ fn load_device_profile_from_package_manifest(
 }
 
 fn default_device_release_steps(provider_doc: &Value) -> Vec<Value> {
-    let provider_kind = get_str(provider_doc, &["provider_kind"]).unwrap_or_else(|| "mock_v1".to_string());
+    let provider_kind =
+        get_str(provider_doc, &["provider_kind"]).unwrap_or_else(|| "mock_v1".to_string());
     let distribution_lane =
         get_str(provider_doc, &["distribution_lane"]).unwrap_or_else(|| "beta".to_string());
     let initial_percent = get_u64(provider_doc, &["rollout_defaults", "initial_percent"])
@@ -7957,8 +8461,8 @@ fn validate_device_release_plan_doc(plan_doc: &Value, provider_doc: &Value) -> R
     let capabilities = validate_device_provider_profile_doc(provider_doc)?;
     let plan_target =
         get_str(plan_doc, &["target"]).ok_or_else(|| anyhow!("plan missing target"))?;
-    let provider_target =
-        get_str(provider_doc, &["target"]).ok_or_else(|| anyhow!("provider profile missing target"))?;
+    let provider_target = get_str(provider_doc, &["target"])
+        .ok_or_else(|| anyhow!("provider profile missing target"))?;
     if plan_target != provider_target {
         bail!("plan target does not match provider profile target");
     }
@@ -7974,8 +8478,11 @@ fn validate_device_release_plan_doc(plan_doc: &Value, provider_doc: &Value) -> R
         .into_iter()
         .filter_map(|value| value.as_str().map(ToOwned::to_owned))
         .collect::<BTreeSet<_>>();
-    let supports_percent_rollout = get_bool(&capabilities, &["device_release", "supports_percent_rollout"])
-        .unwrap_or(false);
+    let supports_percent_rollout = get_bool(
+        &capabilities,
+        &["device_release", "supports_percent_rollout"],
+    )
+    .unwrap_or(false);
     let steps = get_path(plan_doc, &["steps"])
         .and_then(Value::as_array)
         .ok_or_else(|| anyhow!("plan missing steps"))?;
@@ -7984,6 +8491,24 @@ fn validate_device_release_plan_doc(plan_doc: &Value, provider_doc: &Value) -> R
     }
     for step in steps {
         let op = get_str(step, &["op"]).ok_or_else(|| anyhow!("plan step missing op"))?;
+        if op == "metrics.eval" {
+            let window_seconds = get_u64(step, &["window_seconds"])
+                .ok_or_else(|| anyhow!("metrics.eval requires window_seconds"))?;
+            if window_seconds == 0 {
+                bail!("metrics.eval window_seconds must be > 0");
+            }
+            if get_str(step, &["thresholds", "kind"]).as_deref() != Some("x07.slo.profile@0.1.0") {
+                bail!("metrics.eval thresholds.kind must be x07.slo.profile@0.1.0");
+            }
+            if get_path(step, &["thresholds", "digest"]).is_none() {
+                bail!("metrics.eval thresholds.digest is required");
+            }
+            match device_release_step_outcome(step).as_str() {
+                "release.pause" | "release.halt" | "require_human" => {}
+                other => bail!("unsupported metrics.eval on_fail={other}"),
+            }
+            continue;
+        }
         if !supported_ops.contains(&op) {
             bail!("provider does not support device release op={op}");
         }
@@ -7991,7 +8516,8 @@ fn validate_device_release_plan_doc(plan_doc: &Value, provider_doc: &Value) -> R
             if !supports_percent_rollout {
                 bail!("provider does not support rollout.set_percent");
             }
-            let percent = get_u64(step, &["percent"]).ok_or_else(|| anyhow!("rollout.set_percent requires percent"))?;
+            let percent = get_u64(step, &["percent"])
+                .ok_or_else(|| anyhow!("rollout.set_percent requires percent"))?;
             if percent > 100 {
                 bail!("rollout percent must be <= 100");
             }
@@ -8045,8 +8571,10 @@ fn device_release_control_state_snapshot(exec_doc: &Value) -> Value {
     json!({
         "status": get_str(exec_doc, &["status"]).unwrap_or_else(|| "planned".to_string()),
         "current_state": device_release_state(exec_doc),
+        "automation_state": get_str(exec_doc, &["meta", "automation_state"]).unwrap_or_else(|| "active".to_string()),
         "current_rollout_percent": get_path(exec_doc, &["meta", "current_rollout_percent"]).cloned().unwrap_or(Value::Null),
         "latest_store_release_id": get_path(exec_doc, &["meta", "latest_store_release_id"]).cloned().unwrap_or(Value::Null),
+        "latest_eval_outcome": get_path(exec_doc, &["meta", "latest_eval_outcome"]).cloned().unwrap_or_else(|| json!("none")),
     })
 }
 
@@ -8089,9 +8617,17 @@ fn apply_device_release_provider_op(
     let outcome = match op.as_str() {
         "release.start" => {
             if distribution_lane == "beta" {
-                ("available".to_string(), Some(100), "store release started on beta lane".to_string())
+                (
+                    "available".to_string(),
+                    Some(100),
+                    "store release started on beta lane".to_string(),
+                )
             } else if provider_kind == "appstoreconnect_v1" {
-                ("in_progress".to_string(), None, "started phased production release".to_string())
+                (
+                    "in_progress".to_string(),
+                    None,
+                    "started phased production release".to_string(),
+                )
             } else {
                 let initial = device_release_initial_percent(provider_doc);
                 (
@@ -8117,7 +8653,11 @@ fn apply_device_release_provider_op(
             "paused device release".to_string(),
         ),
         "release.resume" => (
-            if current_state == "available" { "available".to_string() } else { "in_progress".to_string() },
+            if current_state == "available" {
+                "available".to_string()
+            } else {
+                "in_progress".to_string()
+            },
             current_percent,
             "resumed device release".to_string(),
         ),
@@ -8134,6 +8674,393 @@ fn apply_device_release_provider_op(
         other => bail!("unsupported device release op={other}"),
     };
     Ok((outcome.0, outcome.1, store_release_id, outcome.2))
+}
+
+fn resolve_device_release_slo_profile_path(state_dir: &Path, step_doc: &Value) -> Result<PathBuf> {
+    let sha = get_str(step_doc, &["thresholds", "digest", "sha256"])
+        .ok_or_else(|| anyhow!("metrics.eval thresholds.digest.sha256 is required"))?;
+    Ok(device_release_slo_profile_path(state_dir, &sha))
+}
+
+fn upsert_device_release_step(exec_doc: &mut Value, step_doc: Value) {
+    let idx = get_u64(&step_doc, &["idx"]).unwrap_or(0);
+    let kind = get_str(&step_doc, &["kind"]).unwrap_or_default();
+    let steps = ensure_array_field(exec_doc, "steps");
+    if let Some(existing) = steps.iter_mut().find(|item| {
+        get_u64(item, &["idx"]).unwrap_or(u64::MAX) == idx
+            && get_str(item, &["kind"]).unwrap_or_default() == kind
+    }) {
+        *existing = step_doc;
+    } else {
+        steps.push(step_doc);
+    }
+}
+
+fn device_release_metrics_snapshot_for_next_analysis(
+    state_dir: &Path,
+    exec_doc: &Value,
+) -> Result<Option<PathBuf>> {
+    let exec_id =
+        get_str(exec_doc, &["exec_id"]).ok_or_else(|| anyhow!("missing device release exec_id"))?;
+    let dir = device_release_metrics_dir(state_dir, &exec_id);
+    if !dir.exists() {
+        return Ok(None);
+    }
+    let next_seq = get_u64(exec_doc, &["meta", "analysis_seq"]).unwrap_or(0) + 1;
+    let preferred = dir.join(format!("analysis.{next_seq}.json"));
+    if preferred.is_file() {
+        return Ok(Some(preferred));
+    }
+    find_device_release_metrics_snapshot(state_dir, &exec_id)
+}
+
+fn advance_device_release_execution(
+    state_dir: &Path,
+    exec_doc: &mut Value,
+    plan_doc: &Value,
+    provider_doc: &Value,
+    allow_metrics_eval: bool,
+    now_unix_ms: u64,
+) -> Result<()> {
+    ensure_device_release_meta_defaults(exec_doc);
+    let steps = get_path(plan_doc, &["steps"])
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let exec_id =
+        get_str(exec_doc, &["exec_id"]).ok_or_else(|| anyhow!("missing device release exec_id"))?;
+    let run_id = get_str(exec_doc, &["run_id"]).unwrap_or_default();
+    let mut idx = device_release_next_step_idx(exec_doc);
+    while idx < steps.len() {
+        let step_doc = &steps[idx];
+        let step_name = device_release_step_name(step_doc, idx);
+        let op = get_str(step_doc, &["op"]).unwrap_or_else(|| "unknown".to_string());
+        let started_unix_ms = now_unix_ms + idx as u64;
+        if op == "metrics.eval" {
+            if !allow_metrics_eval {
+                ensure_object_field(exec_doc, "meta").insert(
+                    "automation_state".to_string(),
+                    json!("waiting_for_observation"),
+                );
+                ensure_object_field(exec_doc, "meta")
+                    .insert("next_step_idx".to_string(), json!(idx));
+                ensure_object_field(exec_doc, "meta")
+                    .insert("updated_unix_ms".to_string(), json!(started_unix_ms));
+                ensure_object(exec_doc).insert("status".to_string(), json!("started"));
+                upsert_device_release_step(
+                    exec_doc,
+                    build_device_release_step(
+                        idx,
+                        &step_name,
+                        &op,
+                        "running",
+                        started_unix_ms,
+                        None,
+                        Vec::new(),
+                        device_release_current_percent(exec_doc),
+                        device_release_store_release_id(exec_doc).as_deref(),
+                        None,
+                    ),
+                );
+                return Ok(());
+            }
+            let Some(metrics_path) =
+                device_release_metrics_snapshot_for_next_analysis(state_dir, exec_doc)?
+            else {
+                bail!("missing metrics snapshot for device release observe");
+            };
+            let slo_profile_path = resolve_device_release_slo_profile_path(state_dir, step_doc)?;
+            let (decision_value, slo_report) =
+                run_slo_eval(Some(&slo_profile_path), &metrics_path)?;
+            let metrics_bytes = fs::read(&metrics_path)?;
+            let mut metrics_raw = cas_put(
+                state_dir,
+                &logical_name_from_path(&metrics_path),
+                "application/json",
+                &metrics_bytes,
+            )?;
+            ensure_object(&mut metrics_raw)
+                .insert("kind".to_string(), json!("x07.metrics.snapshot@0.1.0"));
+            let metrics_artifact = artifact_summary(
+                "metrics_snapshot",
+                &metrics_raw,
+                0,
+                Some("x07.metrics.snapshot@0.1.0"),
+            );
+            let slo_bytes = canon_json_bytes(&slo_report);
+            let slo_kind = get_str(&slo_report, &["schema_version"])
+                .unwrap_or_else(|| "x07.wasm.slo.eval.report@0.1.0".to_string());
+            let mut slo_raw = cas_put(
+                state_dir,
+                "device_release.slo.eval",
+                "application/json",
+                &slo_bytes,
+            )?;
+            ensure_object(&mut slo_raw).insert("kind".to_string(), json!(slo_kind.clone()));
+            let slo_artifact = artifact_summary("slo_eval_report", &slo_raw, 0, Some(&slo_kind));
+            push_artifact(exec_doc, metrics_artifact.clone());
+            push_artifact(exec_doc, slo_artifact.clone());
+            let (decision_outcome, reason_code) = match decision_value.as_str() {
+                "promote" => ("allow", "LP_DEVICE_RELEASE_SLO_PROMOTE"),
+                "rollback" => ("deny", "LP_DEVICE_RELEASE_SLO_FAIL"),
+                _ => ("error", "LP_DEVICE_RELEASE_SLO_INCONCLUSIVE"),
+            };
+            let (decision, _) = write_decision_record(
+                state_dir,
+                &format!("{exec_id}:metrics:{idx}"),
+                &run_id,
+                "device.release.metrics.eval",
+                decision_outcome,
+                vec![json!({
+                    "code": reason_code,
+                    "message": format!("device release metrics decision is {decision_value}"),
+                })],
+                vec![metrics_artifact.clone(), slo_artifact.clone()],
+                started_unix_ms,
+                Some(idx),
+                false,
+            )?;
+            push_decision(exec_doc, decision.clone(), None);
+            {
+                let meta = ensure_object_field(exec_doc, "meta");
+                meta.insert(
+                    "latest_metrics_snapshot".to_string(),
+                    artifact_ref_min(Some(&metrics_artifact), None),
+                );
+                meta.insert(
+                    "latest_slo_eval_report".to_string(),
+                    artifact_ref_min(Some(&slo_artifact), None),
+                );
+                meta.insert(
+                    "latest_eval_outcome".to_string(),
+                    json!(device_release_eval_outcome(&decision_value)),
+                );
+                meta.insert(
+                    "analysis_seq".to_string(),
+                    json!(get_u64(&meta.clone().into(), &["analysis_seq"]).unwrap_or(0) + 1),
+                );
+                meta.insert(
+                    "decision_count".to_string(),
+                    json!(get_u64(&meta.clone().into(), &["decision_count"]).unwrap_or(0) + 1),
+                );
+                meta.insert("updated_unix_ms".to_string(), json!(started_unix_ms));
+            }
+            let mut status = "ok";
+            if decision_value != "promote" {
+                status = "error";
+                let on_fail = device_release_step_outcome(step_doc);
+                let next_status = match on_fail.as_str() {
+                    "release.halt" => "aborted",
+                    _ => "started",
+                };
+                let automation_state = match on_fail.as_str() {
+                    "release.pause" => "paused",
+                    "release.halt" => "stopped",
+                    _ => "waiting_for_human",
+                };
+                let current_state = match on_fail.as_str() {
+                    "release.pause" => "paused",
+                    "release.halt" => "halted",
+                    _ => "paused",
+                };
+                {
+                    let meta = ensure_object_field(exec_doc, "meta");
+                    meta.insert("automation_state".to_string(), json!(automation_state));
+                    meta.insert("current_state".to_string(), json!(current_state));
+                    meta.insert("next_step_idx".to_string(), json!(idx + 1));
+                }
+                ensure_object(exec_doc).insert("status".to_string(), json!(next_status));
+                upsert_device_release_step(
+                    exec_doc,
+                    build_device_release_step(
+                        idx,
+                        &step_name,
+                        &op,
+                        status,
+                        started_unix_ms,
+                        Some(started_unix_ms),
+                        vec![get_str(&decision, &["decision_id"]).unwrap_or_default()],
+                        device_release_current_percent(exec_doc),
+                        device_release_store_release_id(exec_doc).as_deref(),
+                        Some(&decision_value),
+                    ),
+                );
+                let _ = capture_device_release_incident_impl(
+                    state_dir,
+                    exec_doc,
+                    &format!("device release metrics decision is {decision_value}"),
+                    "device_release_gate_failed",
+                    "device_release",
+                    None,
+                    None,
+                    None,
+                    get_str(&decision, &["decision_id"]).as_deref(),
+                    "not_applicable",
+                    started_unix_ms,
+                )?;
+                return Ok(());
+            }
+            ensure_object_field(exec_doc, "meta")
+                .insert("automation_state".to_string(), json!("active"));
+            ensure_object_field(exec_doc, "meta")
+                .insert("next_step_idx".to_string(), json!(idx + 1));
+            upsert_device_release_step(
+                exec_doc,
+                build_device_release_step(
+                    idx,
+                    &step_name,
+                    &op,
+                    status,
+                    started_unix_ms,
+                    Some(started_unix_ms),
+                    vec![get_str(&decision, &["decision_id"]).unwrap_or_default()],
+                    device_release_current_percent(exec_doc),
+                    device_release_store_release_id(exec_doc).as_deref(),
+                    Some(&decision_value),
+                ),
+            );
+            idx += 1;
+            continue;
+        }
+        match apply_device_release_provider_op(provider_doc, exec_doc, step_doc, &exec_id) {
+            Ok((current_state, rollout_percent, store_release_id, message)) => {
+                let evidence_doc = json!({
+                    "provider_kind": get_str(provider_doc, &["provider_kind"]).unwrap_or_default(),
+                    "provider_mode": device_release_provider_mode(provider_doc),
+                    "op": op,
+                    "state": current_state,
+                    "rollout_percent": rollout_percent,
+                    "store_release_id": store_release_id,
+                });
+                let evidence = write_device_release_evidence(
+                    state_dir,
+                    &exec_id,
+                    &format!("step_{idx}_{step_name}"),
+                    &evidence_doc,
+                )?;
+                let (decision, _) = write_decision_record(
+                    state_dir,
+                    &format!("{exec_id}:{idx}:{step_name}"),
+                    &run_id,
+                    "device.release.step",
+                    "allow",
+                    vec![json!({
+                        "code": "LP_DEVICE_RELEASE_STEP_OK",
+                        "message": message,
+                    })],
+                    vec![evidence],
+                    started_unix_ms,
+                    Some(idx),
+                    false,
+                )?;
+                push_decision(exec_doc, decision.clone(), None);
+                let meta = ensure_object_field(exec_doc, "meta");
+                meta.insert("current_state".to_string(), json!(current_state));
+                meta.insert(
+                    "current_rollout_percent".to_string(),
+                    rollout_percent.map(Value::from).unwrap_or(Value::Null),
+                );
+                meta.insert(
+                    "latest_store_release_id".to_string(),
+                    store_release_id
+                        .as_ref()
+                        .map(|value| Value::from(value.clone()))
+                        .unwrap_or(Value::Null),
+                );
+                meta.insert("updated_unix_ms".to_string(), json!(started_unix_ms));
+                meta.insert("automation_state".to_string(), json!("active"));
+                meta.insert("next_step_idx".to_string(), json!(idx + 1));
+                meta.insert(
+                    "decision_count".to_string(),
+                    json!(get_u64(&meta.clone().into(), &["decision_count"]).unwrap_or(0) + 1),
+                );
+                ensure_object(exec_doc).insert("status".to_string(), json!("started"));
+                upsert_device_release_step(
+                    exec_doc,
+                    build_device_release_step(
+                        idx,
+                        &step_name,
+                        &op,
+                        "ok",
+                        started_unix_ms,
+                        Some(started_unix_ms),
+                        vec![get_str(&decision, &["decision_id"]).unwrap_or_default()],
+                        rollout_percent,
+                        store_release_id.as_deref(),
+                        None,
+                    ),
+                );
+            }
+            Err(err) => {
+                let (decision, _) = write_decision_record(
+                    state_dir,
+                    &format!("{exec_id}:{idx}:{step_name}:error"),
+                    &run_id,
+                    "device.release.step",
+                    "error",
+                    vec![json!({
+                        "code": "LP_DEVICE_RELEASE_STEP_FAILED",
+                        "message": err.to_string(),
+                    })],
+                    Vec::new(),
+                    started_unix_ms,
+                    Some(idx),
+                    false,
+                )?;
+                push_decision(exec_doc, decision.clone(), None);
+                let current_rollout_percent = device_release_current_percent(exec_doc);
+                let meta = ensure_object_field(exec_doc, "meta");
+                meta.insert("updated_unix_ms".to_string(), json!(started_unix_ms));
+                meta.insert("current_state".to_string(), json!("paused"));
+                meta.insert("automation_state".to_string(), json!("paused"));
+                meta.insert("next_step_idx".to_string(), json!(idx + 1));
+                meta.insert(
+                    "decision_count".to_string(),
+                    json!(get_u64(&meta.clone().into(), &["decision_count"]).unwrap_or(0) + 1),
+                );
+                upsert_device_release_step(
+                    exec_doc,
+                    build_device_release_step(
+                        idx,
+                        &step_name,
+                        &op,
+                        "error",
+                        started_unix_ms,
+                        Some(started_unix_ms),
+                        vec![get_str(&decision, &["decision_id"]).unwrap_or_default()],
+                        current_rollout_percent,
+                        device_release_store_release_id(exec_doc).as_deref(),
+                        None,
+                    ),
+                );
+                ensure_object(exec_doc).insert("status".to_string(), json!("failed"));
+                let _ = capture_device_release_incident_impl(
+                    state_dir,
+                    exec_doc,
+                    &err.to_string(),
+                    "device_release_provider_failed",
+                    "device_release",
+                    None,
+                    None,
+                    None,
+                    get_str(&decision, &["decision_id"]).as_deref(),
+                    "not_applicable",
+                    started_unix_ms,
+                )?;
+                return Ok(());
+            }
+        }
+        idx += 1;
+    }
+    ensure_object(exec_doc).insert("status".to_string(), json!("completed"));
+    let meta = ensure_object_field(exec_doc, "meta");
+    meta.insert("automation_state".to_string(), json!("terminal"));
+    meta.insert("next_step_idx".to_string(), json!(steps.len()));
+    meta.insert(
+        "updated_unix_ms".to_string(),
+        json!(now_unix_ms + steps.len() as u64),
+    );
+    Ok(())
 }
 
 fn load_device_release_exec_docs(state_dir: &Path) -> Result<Vec<(PathBuf, Value)>> {
@@ -8166,15 +9093,21 @@ fn resolve_device_release_provider_doc(
     load_json(&device_release_provider_path(state_dir, &provider_id))
 }
 
-fn write_device_release_provider_copy(state_dir: &Path, provider_doc: &Value) -> Result<(PathBuf, Vec<u8>)> {
-    let provider_id =
-        get_str(provider_doc, &["provider_id"]).ok_or_else(|| anyhow!("provider profile missing provider_id"))?;
+fn write_device_release_provider_copy(
+    state_dir: &Path,
+    provider_doc: &Value,
+) -> Result<(PathBuf, Vec<u8>)> {
+    let provider_id = get_str(provider_doc, &["provider_id"])
+        .ok_or_else(|| anyhow!("provider profile missing provider_id"))?;
     let path = device_release_provider_path(state_dir, &provider_id);
     let bytes = write_json(&path, provider_doc)?;
     Ok((path, bytes))
 }
 
-fn write_device_release_package_copy(state_dir: &Path, package_doc: &Value) -> Result<(PathBuf, Vec<u8>)> {
+fn write_device_release_package_copy(
+    state_dir: &Path,
+    package_doc: &Value,
+) -> Result<(PathBuf, Vec<u8>)> {
     let bytes = canon_json_bytes(package_doc);
     let sha = sha256_hex(&bytes);
     let path = device_release_package_path(state_dir, &sha);
@@ -8206,7 +9139,10 @@ fn device_release_decision_ids(exec_doc: &Value) -> Vec<Value> {
 }
 
 fn build_device_release_query_result(exec_doc: &Value, exec_bytes: &[u8], view: &str) -> Value {
-    let meta = get_path(exec_doc, &["meta"]).cloned().unwrap_or_else(|| json!({}));
+    let meta = get_path(exec_doc, &["meta"])
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let artifacts = device_release_collect_artifacts(exec_doc);
     let mut result = json!({
         "schema_version": DEVICE_RELEASE_QUERY_RESULT_KIND,
         "view": view,
@@ -8225,12 +9161,17 @@ fn build_device_release_query_result(exec_doc: &Value, exec_bytes: &[u8], view: 
             "build": "0"
         })),
         "current_state": get_str(&meta, &["current_state"]).unwrap_or_else(|| "draft".to_string()),
+        "automation_state": get_str(&meta, &["automation_state"]).unwrap_or_else(|| "active".to_string()),
         "current_rollout_percent": get_path(&meta, &["current_rollout_percent"]).cloned().unwrap_or(Value::Null),
         "latest_decision_id": get_path(&meta, &["latest_decision_id"]).cloned().unwrap_or(Value::Null),
         "latest_signed_control_decision_id": get_path(&meta, &["latest_signed_control_decision_id"]).cloned().unwrap_or(Value::Null),
         "signature_status": get_str(&meta, &["signature_status"]).unwrap_or_else(|| "not_applicable".to_string()),
         "decision_count": get_u64(&meta, &["decision_count"]).unwrap_or(0),
         "provider_release_id": get_path(&meta, &["latest_store_release_id"]).cloned().unwrap_or(Value::Null),
+        "latest_metrics_snapshot": get_path(&meta, &["latest_metrics_snapshot"]).cloned().unwrap_or_else(|| artifact_ref_min(latest_artifact_by_role(&artifacts, "metrics_snapshot").as_ref(), None)),
+        "latest_slo_eval_report": get_path(&meta, &["latest_slo_eval_report"]).cloned().unwrap_or_else(|| artifact_ref_min(latest_artifact_by_role(&artifacts, "slo_eval_report").as_ref(), None)),
+        "latest_eval_outcome": get_path(&meta, &["latest_eval_outcome"]).cloned().unwrap_or_else(|| json!("none")),
+        "linked_incidents": get_path(&meta, &["linked_incidents"]).cloned().unwrap_or_else(|| json!([])),
         "execution": {
             "kind": DEVICE_RELEASE_EXECUTION_KIND,
             "digest": digest_value(exec_bytes),
@@ -8281,7 +9222,9 @@ fn build_device_release_query_result(exec_doc: &Value, exec_bytes: &[u8], view: 
 }
 
 fn device_release_list_item(exec_doc: &Value) -> Value {
-    let meta = get_path(exec_doc, &["meta"]).cloned().unwrap_or_else(|| json!({}));
+    let meta = get_path(exec_doc, &["meta"])
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     json!({
         "exec_id": get_str(exec_doc, &["exec_id"]).unwrap_or_default(),
         "plan_id": get_str(exec_doc, &["plan_id"]).unwrap_or_default(),
@@ -8291,7 +9234,9 @@ fn device_release_list_item(exec_doc: &Value) -> Value {
         "target": get_str(&meta, &["target"]).unwrap_or_else(|| "ios".to_string()),
         "status": get_str(exec_doc, &["status"]).unwrap_or_else(|| "planned".to_string()),
         "current_state": get_str(&meta, &["current_state"]).unwrap_or_else(|| "draft".to_string()),
+        "automation_state": get_str(&meta, &["automation_state"]).unwrap_or_else(|| "active".to_string()),
         "current_rollout_percent": get_path(&meta, &["current_rollout_percent"]).cloned().unwrap_or(Value::Null),
+        "latest_eval_outcome": get_path(&meta, &["latest_eval_outcome"]).cloned().unwrap_or_else(|| json!("none")),
         "app": get_path(&meta, &["app"]).cloned().unwrap_or_else(|| json!({})),
         "updated_unix_ms": get_u64(&meta, &["updated_unix_ms"]).unwrap_or(0),
     })
@@ -8312,15 +9257,17 @@ fn command_device_release_list(common: &CommonStateArgs) -> Result<Value> {
             .get("updated_unix_ms")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        right_updated
-            .cmp(&left_updated)
-            .then_with(|| {
-                right
-                    .get("exec_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .cmp(left.get("exec_id").and_then(Value::as_str).unwrap_or_default())
-            })
+        right_updated.cmp(&left_updated).then_with(|| {
+            right
+                .get("exec_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .cmp(
+                    left.get("exec_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                )
+        })
     });
     Ok(cli_report(
         "device release list",
@@ -8345,6 +9292,17 @@ fn command_device_release_create(args: DeviceReleaseCreateArgs) -> Result<Value>
     let capabilities = validate_device_provider_profile_doc(&provider_doc)?;
     let package_doc = load_json(&package_manifest_path)?;
     validate_device_package_manifest_doc(&package_doc)?;
+    let slo_profile_ref = if let Some(slo_profile) = args.slo_profile.as_deref() {
+        let slo_doc = load_json(&repo_path(slo_profile))?;
+        let (_, slo_bytes) = write_device_release_slo_profile_copy(&state_dir, &slo_doc)?;
+        Some(json!({
+            "kind": "x07.slo.profile@0.1.0",
+            "digest": digest_value(&slo_bytes),
+            "label": logical_name_from_path(Path::new(slo_profile)),
+        }))
+    } else {
+        None
+    };
     let provider_target = get_str(&provider_doc, &["target"]).unwrap_or_default();
     if get_str(&package_doc, &["target"]).unwrap_or_default() != provider_target {
         bail!("provider target does not match package manifest target");
@@ -8373,6 +9331,19 @@ fn command_device_release_create(args: DeviceReleaseCreateArgs) -> Result<Value>
         "version": string_or_number(&device_profile_doc, &["version", "version"]).unwrap_or_else(|| "0.0.0".to_string()),
         "build": string_or_number(&device_profile_doc, &["version", "build"]).unwrap_or_else(|| "0".to_string()),
     });
+    let mut steps = default_device_release_steps(&provider_doc);
+    if let Some(thresholds) = slo_profile_ref.clone() {
+        steps.push(json!({
+            "id": "metrics_eval",
+            "op": "metrics.eval",
+            "window_seconds": args.metrics_window_seconds.unwrap_or(900),
+            "thresholds": thresholds,
+            "on_fail": args
+                .metrics_on_fail
+                .clone()
+                .unwrap_or_else(|| "release.pause".to_string()),
+        }));
+    }
     let plan_doc = json!({
         "schema_version": DEVICE_RELEASE_PLAN_KIND,
         "plan_id": plan_id,
@@ -8394,12 +9365,15 @@ fn command_device_release_create(args: DeviceReleaseCreateArgs) -> Result<Value>
             "max_total_wait_seconds": 3600,
             "on_provider_error": "pause",
         },
-        "steps": default_device_release_steps(&provider_doc),
+        "steps": steps,
     });
     let _ = validate_device_release_plan_doc(&plan_doc, &provider_doc)?;
     let _ = write_json(&out_path, &plan_doc)?;
     let _ = write_json(
-        &device_release_plan_path(&state_dir, &get_str(&plan_doc, &["plan_id"]).unwrap_or_default()),
+        &device_release_plan_path(
+            &state_dir,
+            &get_str(&plan_doc, &["plan_id"]).unwrap_or_default(),
+        ),
         &plan_doc,
     )?;
     Ok(cli_report(
@@ -8423,8 +9397,11 @@ fn command_device_release_create(args: DeviceReleaseCreateArgs) -> Result<Value>
 fn command_device_release_validate(args: DeviceReleaseValidateArgs) -> Result<Value> {
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let plan_doc = load_json(&repo_path(&args.plan))?;
-    let provider_doc =
-        resolve_device_release_provider_doc(&state_dir, &plan_doc, args.provider_profile.as_deref())?;
+    let provider_doc = resolve_device_release_provider_doc(
+        &state_dir,
+        &plan_doc,
+        args.provider_profile.as_deref(),
+    )?;
     let capabilities = match validate_device_release_plan_doc(&plan_doc, &provider_doc) {
         Ok(value) => value,
         Err(err) => {
@@ -8464,8 +9441,11 @@ fn command_device_release_run(args: DeviceReleaseRunArgs) -> Result<Value> {
     let now_unix_ms = device_release_now(&args.common);
     let plan_path = repo_path(&args.plan);
     let plan_doc = load_json(&plan_path)?;
-    let provider_doc =
-        resolve_device_release_provider_doc(&state_dir, &plan_doc, args.provider_profile.as_deref())?;
+    let provider_doc = resolve_device_release_provider_doc(
+        &state_dir,
+        &plan_doc,
+        args.provider_profile.as_deref(),
+    )?;
     let capabilities = match validate_device_release_plan_doc(&plan_doc, &provider_doc) {
         Ok(value) => value,
         Err(err) => {
@@ -8490,20 +9470,23 @@ fn command_device_release_run(args: DeviceReleaseRunArgs) -> Result<Value> {
         let _ = write_device_release_package_copy(&state_dir, &package_doc)?;
     }
     let _ = write_device_release_provider_copy(&state_dir, &provider_doc)?;
-    let plan_store_bytes =
-        write_json(&device_release_plan_path(&state_dir, &get_str(&plan_doc, &["plan_id"]).unwrap_or_default()), &plan_doc)?;
-    let run_id = gen_id(
-        "lpdrrun",
-        &format!(
-            "{}:{now_unix_ms}",
-            get_str(&plan_doc, &["plan_id"]).unwrap_or_default()
+    let plan_store_bytes = write_json(
+        &device_release_plan_path(
+            &state_dir,
+            &get_str(&plan_doc, &["plan_id"]).unwrap_or_default(),
         ),
+        &plan_doc,
+    )?;
+    let plan_id = get_str(&plan_doc, &["plan_id"]).unwrap_or_default();
+    let (run_id, exec_id) = allocate_device_release_run_and_exec_ids(
+        &state_dir,
+        &format!("{plan_id}:{now_unix_ms}"),
+        now_unix_ms,
     );
-    let exec_id = gen_id("lpdrexec", &format!("{run_id}:{now_unix_ms}"));
     let mut exec_doc = json!({
         "schema_version": DEVICE_RELEASE_EXECUTION_KIND,
         "exec_id": exec_id,
-        "plan_id": get_str(&plan_doc, &["plan_id"]).unwrap_or_default(),
+        "plan_id": plan_id,
         "run_id": run_id,
         "created_unix_ms": now_unix_ms,
         "status": "started",
@@ -8526,143 +9509,30 @@ fn command_device_release_run(args: DeviceReleaseRunArgs) -> Result<Value> {
             "latest_signed_control_decision_id": Value::Null,
             "decision_count": 0,
             "signature_status": "not_applicable",
+            "automation_state": "active",
+            "next_step_idx": 0,
+            "parent_exec_id": Value::Null,
+            "rerun_from_step_idx": Value::Null,
+            "latest_metrics_snapshot": Value::Null,
+            "latest_slo_eval_report": Value::Null,
+            "latest_eval_outcome": "none",
+            "linked_incidents": [],
+            "artifacts": [],
+            "decisions": [],
             "app": get_path(&plan_doc, &["app"]).cloned().unwrap_or_else(|| json!({})),
             "capabilities": capabilities,
         }
     });
-    let steps = get_path(&plan_doc, &["steps"])
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let mut failed = false;
-    for (idx, step_doc) in steps.iter().enumerate() {
-        let step_name = device_release_step_name(step_doc, idx);
-        let op = get_str(step_doc, &["op"]).unwrap_or_else(|| "unknown".to_string());
-        let started_unix_ms = now_unix_ms + idx as u64;
-        match apply_device_release_provider_op(
-            &provider_doc,
-            &exec_doc,
-            step_doc,
-            &get_str(&exec_doc, &["exec_id"]).unwrap_or_default(),
-        ) {
-            Ok((current_state, rollout_percent, store_release_id, message)) => {
-                let evidence_doc = json!({
-                    "provider_kind": get_str(&provider_doc, &["provider_kind"]).unwrap_or_default(),
-                    "provider_mode": device_release_provider_mode(&provider_doc),
-                    "op": op,
-                    "state": current_state,
-                    "rollout_percent": rollout_percent,
-                    "store_release_id": store_release_id,
-                });
-                let evidence = write_device_release_evidence(
-                    &state_dir,
-                    &get_str(&exec_doc, &["exec_id"]).unwrap_or_default(),
-                    &format!("step_{idx}_{step_name}"),
-                    &evidence_doc,
-                )?;
-                let (decision, _) = write_decision_record(
-                    &state_dir,
-                    &format!(
-                        "{}:{idx}:{step_name}",
-                        get_str(&exec_doc, &["exec_id"]).unwrap_or_default()
-                    ),
-                    &get_str(&exec_doc, &["run_id"]).unwrap_or_default(),
-                    "device.release.step",
-                    "allow",
-                    vec![json!({
-                        "code": "LP_DEVICE_RELEASE_STEP_OK",
-                        "message": message,
-                    })],
-                    vec![evidence.clone()],
-                    started_unix_ms,
-                    Some(idx),
-                    false,
-                )?;
-                let meta = ensure_object_field(&mut exec_doc, "meta");
-                meta.insert("current_state".to_string(), json!(current_state));
-                meta.insert(
-                    "current_rollout_percent".to_string(),
-                    rollout_percent.map(Value::from).unwrap_or(Value::Null),
-                );
-                meta.insert(
-                    "latest_store_release_id".to_string(),
-                    store_release_id.map(Value::from).unwrap_or(Value::Null),
-                );
-                meta.insert("updated_unix_ms".to_string(), json!(started_unix_ms));
-                meta.insert(
-                    "latest_decision_id".to_string(),
-                    json!(get_str(&decision, &["decision_id"]).unwrap_or_default()),
-                );
-                meta.insert(
-                    "decision_count".to_string(),
-                    json!(get_u64(&meta.clone().into(), &["decision_count"]).unwrap_or(0) + 1),
-                );
-                ensure_array_field(&mut exec_doc, "steps").push(build_exec_step(
-                    idx,
-                    &step_name,
-                    &op,
-                    "ok",
-                    started_unix_ms,
-                    Some(started_unix_ms),
-                    vec![get_str(&decision, &["decision_id"]).unwrap_or_default()],
-                    rollout_percent,
-                    None,
-                ));
-            }
-            Err(err) => {
-                let (decision, _) = write_decision_record(
-                    &state_dir,
-                    &format!(
-                        "{}:{idx}:{step_name}:error",
-                        get_str(&exec_doc, &["exec_id"]).unwrap_or_default()
-                    ),
-                    &get_str(&exec_doc, &["run_id"]).unwrap_or_default(),
-                    "device.release.step",
-                    "error",
-                    vec![json!({
-                        "code": "LP_DEVICE_RELEASE_STEP_FAILED",
-                        "message": err.to_string(),
-                    })],
-                    Vec::new(),
-                    started_unix_ms,
-                    Some(idx),
-                    false,
-                )?;
-                let current_rollout_percent = device_release_current_percent(&exec_doc);
-                let meta = ensure_object_field(&mut exec_doc, "meta");
-                meta.insert("updated_unix_ms".to_string(), json!(started_unix_ms));
-                meta.insert("current_state".to_string(), json!("paused"));
-                meta.insert(
-                    "latest_decision_id".to_string(),
-                    json!(get_str(&decision, &["decision_id"]).unwrap_or_default()),
-                );
-                meta.insert(
-                    "decision_count".to_string(),
-                    json!(get_u64(&meta.clone().into(), &["decision_count"]).unwrap_or(0) + 1),
-                );
-                ensure_array_field(&mut exec_doc, "steps").push(build_exec_step(
-                    idx,
-                    &step_name,
-                    &op,
-                    "error",
-                    started_unix_ms,
-                    Some(started_unix_ms),
-                    vec![get_str(&decision, &["decision_id"]).unwrap_or_default()],
-                    current_rollout_percent,
-                    None,
-                ));
-                ensure_object(&mut exec_doc).insert("status".to_string(), json!("failed"));
-                failed = true;
-                break;
-            }
-        }
-    }
-    if !failed {
-        ensure_object(&mut exec_doc).insert("status".to_string(), json!("completed"));
-        let meta = ensure_object_field(&mut exec_doc, "meta");
-        meta.insert("updated_unix_ms".to_string(), json!(now_unix_ms + steps.len() as u64));
-    }
+    advance_device_release_execution(
+        &state_dir,
+        &mut exec_doc,
+        &plan_doc,
+        &provider_doc,
+        false,
+        now_unix_ms,
+    )?;
     let exec_bytes = save_device_release_exec(&state_dir, &exec_doc)?;
+    let failed = matches!(get_str(&exec_doc, &["status"]).as_deref(), Some("failed"));
     Ok(cli_report(
         "device release run",
         !failed,
@@ -8707,7 +9577,9 @@ fn resolve_device_release_exec_id(
     }
     let mut best: Option<(u64, String)> = None;
     for (_, exec_doc) in load_device_release_exec_docs(state_dir)? {
-        let meta = get_path(&exec_doc, &["meta"]).cloned().unwrap_or_else(|| json!({}));
+        let meta = get_path(&exec_doc, &["meta"])
+            .cloned()
+            .unwrap_or_else(|| json!({}));
         if let Some(app_id) = args.app_id.as_deref() {
             if get_str(&meta, &["app", "app_id"]).as_deref() != Some(app_id) {
                 continue;
@@ -8731,7 +9603,9 @@ fn resolve_device_release_exec_id(
         let updated = get_u64(&meta, &["updated_unix_ms"]).unwrap_or(0);
         let exec_id = get_str(&exec_doc, &["exec_id"]).unwrap_or_default();
         match &best {
-            Some((best_updated, best_id)) if *best_updated > updated || (*best_updated == updated && best_id >= &exec_id) => {}
+            Some((best_updated, best_id))
+                if *best_updated > updated || (*best_updated == updated && best_id >= &exec_id) => {
+            }
             _ => best = Some((updated, exec_id)),
         }
     }
@@ -8782,6 +9656,315 @@ fn command_device_release_query(args: DeviceReleaseQueryArgs) -> Result<Value> {
     ))
 }
 
+fn command_device_release_observe(args: DeviceReleaseControlArgs) -> Result<Value> {
+    let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
+    let now_unix_ms = device_release_now(&args.common);
+    let mut exec_doc = load_device_release_exec(&state_dir, &args.release_exec_id)?;
+    ensure_device_release_meta_defaults(&mut exec_doc);
+    let plan_id = get_str(&exec_doc, &["plan_id"]).ok_or_else(|| anyhow!("missing plan_id"))?;
+    let plan_doc = load_json(&device_release_plan_path(&state_dir, &plan_id))?;
+    let provider_doc = load_device_release_provider_for_exec(&state_dir, &exec_doc)?;
+    let state_before = device_release_control_state_snapshot(&exec_doc);
+    if get_str(&exec_doc, &["meta", "automation_state"]).as_deref() == Some("stopped") {
+        return Ok(cli_report(
+            "device release observe",
+            false,
+            18,
+            json!({}),
+            get_str(&exec_doc, &["run_id"]).as_deref(),
+            vec![result_diag(
+                "LP_DEVICE_RELEASE_STOPPED",
+                "run",
+                "device release automation was stopped",
+                "error",
+            )],
+        ));
+    }
+    advance_device_release_execution(
+        &state_dir,
+        &mut exec_doc,
+        &plan_doc,
+        &provider_doc,
+        true,
+        now_unix_ms,
+    )?;
+    let exec_bytes = save_device_release_exec(&state_dir, &exec_doc)?;
+    let exec_artifact = json!({
+        "kind": DEVICE_RELEASE_EXECUTION_KIND,
+        "digest": digest_value(&exec_bytes),
+        "logical_name": format!("{}.json", args.release_exec_id),
+        "media_type": "application/json",
+        "store_uri": format!("file:{}", device_release_exec_path(&state_dir, &args.release_exec_id).display()),
+    });
+    let action_id = gen_id(
+        "lpact",
+        &format!("{}:observe:{now_unix_ms}", args.release_exec_id),
+    );
+    let (decision, signature_status) = write_decision_record(
+        &state_dir,
+        &format!(
+            "{}:device.release.observe.manual:{now_unix_ms}",
+            args.release_exec_id
+        ),
+        &get_str(&exec_doc, &["run_id"]).unwrap_or_default(),
+        "device.release.observe.manual",
+        "allow",
+        vec![json!({
+            "code": "LP_DEVICE_RELEASE_OBSERVED",
+            "message": args.reason,
+        })],
+        vec![exec_artifact],
+        now_unix_ms,
+        Some(device_release_next_step_idx(&exec_doc)),
+        true,
+    )?;
+    push_decision(&mut exec_doc, decision.clone(), Some(&signature_status));
+    {
+        let meta = ensure_object_field(&mut exec_doc, "meta");
+        meta.insert(
+            "decision_count".to_string(),
+            json!(get_u64(&meta.clone().into(), &["decision_count"]).unwrap_or(0) + 1),
+        );
+        meta.insert("updated_unix_ms".to_string(), json!(now_unix_ms));
+        meta.insert(
+            "signature_status".to_string(),
+            json!(signature_status.clone()),
+        );
+    }
+    let _ = save_device_release_exec(&state_dir, &exec_doc)?;
+    let result = build_control_action_result(
+        &action_id,
+        "device.release.observe.manual",
+        "device_release",
+        now_unix_ms,
+        json!({ "release_exec_id": args.release_exec_id }),
+        &args.reason,
+        vec![get_str(&exec_doc, &["exec_id"]).unwrap_or_default()],
+        None,
+        Some(state_before),
+        Some(device_release_control_state_snapshot(&exec_doc)),
+        &decision,
+        &signature_status,
+    );
+    record_control_action(&state_dir, &result)?;
+    Ok(cli_report(
+        "device release observe",
+        true,
+        0,
+        result,
+        get_str(&exec_doc, &["run_id"]).as_deref(),
+        Vec::new(),
+    ))
+}
+
+fn command_device_release_stop(args: DeviceReleaseControlArgs) -> Result<Value> {
+    let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
+    let now_unix_ms = device_release_now(&args.common);
+    let mut exec_doc = load_device_release_exec(&state_dir, &args.release_exec_id)?;
+    ensure_device_release_meta_defaults(&mut exec_doc);
+    let state_before = device_release_control_state_snapshot(&exec_doc);
+    let action_id = gen_id(
+        "lpact",
+        &format!("{}:stop:{now_unix_ms}", args.release_exec_id),
+    );
+    let (decision, signature_status) = write_decision_record(
+        &state_dir,
+        &format!(
+            "{}:device.release.stop.manual:{now_unix_ms}",
+            args.release_exec_id
+        ),
+        &get_str(&exec_doc, &["run_id"]).unwrap_or_default(),
+        "device.release.stop.manual",
+        "allow",
+        vec![json!({
+            "code": "LP_DEVICE_RELEASE_STOPPED",
+            "message": args.reason,
+        })],
+        Vec::new(),
+        now_unix_ms,
+        Some(device_release_next_step_idx(&exec_doc)),
+        true,
+    )?;
+    {
+        let meta = ensure_object_field(&mut exec_doc, "meta");
+        meta.insert("automation_state".to_string(), json!("stopped"));
+        meta.insert("updated_unix_ms".to_string(), json!(now_unix_ms));
+    }
+    ensure_object(&mut exec_doc).insert("status".to_string(), json!("aborted"));
+    push_decision(&mut exec_doc, decision.clone(), Some(&signature_status));
+    {
+        let meta = ensure_object_field(&mut exec_doc, "meta");
+        meta.insert(
+            "decision_count".to_string(),
+            json!(get_u64(&meta.clone().into(), &["decision_count"]).unwrap_or(0) + 1),
+        );
+        meta.insert(
+            "signature_status".to_string(),
+            json!(signature_status.clone()),
+        );
+    }
+    let _ = save_device_release_exec(&state_dir, &exec_doc)?;
+    let result = build_control_action_result(
+        &action_id,
+        "device.release.stop.manual",
+        "device_release",
+        now_unix_ms,
+        json!({ "release_exec_id": args.release_exec_id }),
+        &args.reason,
+        vec![get_str(&exec_doc, &["exec_id"]).unwrap_or_default()],
+        None,
+        Some(state_before),
+        Some(device_release_control_state_snapshot(&exec_doc)),
+        &decision,
+        &signature_status,
+    );
+    record_control_action(&state_dir, &result)?;
+    Ok(cli_report(
+        "device release stop",
+        true,
+        0,
+        result,
+        get_str(&exec_doc, &["run_id"]).as_deref(),
+        vec![result_diag(
+            "LP_DEVICE_RELEASE_STOPPED",
+            "run",
+            "device release automation stopped",
+            "info",
+        )],
+    ))
+}
+
+fn command_device_release_rerun(args: DeviceReleaseRerunArgs) -> Result<Value> {
+    let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
+    let now_unix_ms = device_release_now(&args.common);
+    let mut exec_doc = load_device_release_exec(&state_dir, &args.release_exec_id)?;
+    ensure_device_release_meta_defaults(&mut exec_doc);
+    let state_before = device_release_control_state_snapshot(&exec_doc);
+    let plan_id = get_str(&exec_doc, &["plan_id"]).ok_or_else(|| anyhow!("missing plan_id"))?;
+    let plan_doc = load_json(&device_release_plan_path(&state_dir, &plan_id))?;
+    let provider_doc = load_device_release_provider_for_exec(&state_dir, &exec_doc)?;
+    let (decision, signature_status) = write_decision_record(
+        &state_dir,
+        &format!(
+            "{}:device.release.rerun.manual:{now_unix_ms}",
+            args.release_exec_id
+        ),
+        &get_str(&exec_doc, &["run_id"]).unwrap_or_default(),
+        "device.release.rerun.manual",
+        "allow",
+        vec![json!({
+            "code": "LP_DEVICE_RELEASE_RERUN",
+            "message": args.reason,
+        })],
+        Vec::new(),
+        now_unix_ms,
+        Some(args.from_step.unwrap_or(0)),
+        true,
+    )?;
+    push_decision(&mut exec_doc, decision.clone(), Some(&signature_status));
+    {
+        let meta = ensure_object_field(&mut exec_doc, "meta");
+        meta.insert(
+            "decision_count".to_string(),
+            json!(get_u64(&meta.clone().into(), &["decision_count"]).unwrap_or(0) + 1),
+        );
+        meta.insert("updated_unix_ms".to_string(), json!(now_unix_ms));
+        meta.insert(
+            "signature_status".to_string(),
+            json!(signature_status.clone()),
+        );
+    }
+    let _ = save_device_release_exec(&state_dir, &exec_doc)?;
+    let from_step = args.from_step.unwrap_or(0);
+    let (run_id, new_exec_id) = allocate_device_release_run_and_exec_ids(
+        &state_dir,
+        &format!(
+            "{plan_id}:{now_unix_ms}:rerun:{}:{from_step}",
+            args.release_exec_id
+        ),
+        now_unix_ms,
+    );
+    let plan_bytes = canon_json_bytes(&plan_doc);
+    let mut new_exec = json!({
+        "schema_version": DEVICE_RELEASE_EXECUTION_KIND,
+        "exec_id": new_exec_id,
+        "plan_id": plan_id,
+        "run_id": run_id,
+        "created_unix_ms": now_unix_ms,
+        "status": "started",
+        "plan": {
+            "kind": DEVICE_RELEASE_PLAN_KIND,
+            "digest": digest_value(&plan_bytes),
+        },
+        "steps": [],
+        "meta": {
+            "provider_id": get_str(&provider_doc, &["provider_id"]).unwrap_or_default(),
+            "provider_kind": get_str(&provider_doc, &["provider_kind"]).unwrap_or_default(),
+            "distribution_lane": get_str(&provider_doc, &["distribution_lane"]).unwrap_or_default(),
+            "target": get_str(&provider_doc, &["target"]).unwrap_or_default(),
+            "package_digest": get_path(&plan_doc, &["package", "digest"]).cloned().unwrap_or_else(|| json!({"sha256":"", "bytes_len":0})),
+            "current_state": get_path(&exec_doc, &["meta", "current_state"]).cloned().unwrap_or_else(|| json!("draft")),
+            "current_rollout_percent": get_path(&exec_doc, &["meta", "current_rollout_percent"]).cloned().unwrap_or(Value::Null),
+            "latest_store_release_id": get_path(&exec_doc, &["meta", "latest_store_release_id"]).cloned().unwrap_or(Value::Null),
+            "updated_unix_ms": now_unix_ms,
+            "latest_decision_id": Value::Null,
+            "latest_signed_control_decision_id": Value::Null,
+            "decision_count": 0,
+            "signature_status": "not_applicable",
+            "automation_state": "active",
+            "next_step_idx": from_step,
+            "parent_exec_id": args.release_exec_id,
+            "rerun_from_step_idx": from_step,
+            "latest_metrics_snapshot": Value::Null,
+            "latest_slo_eval_report": Value::Null,
+            "latest_eval_outcome": "none",
+            "linked_incidents": [],
+            "artifacts": [],
+            "decisions": [],
+            "app": get_path(&plan_doc, &["app"]).cloned().unwrap_or_else(|| json!({})),
+            "capabilities": get_path(&exec_doc, &["meta", "capabilities"]).cloned().unwrap_or_else(|| json!({})),
+        }
+    });
+    advance_device_release_execution(
+        &state_dir,
+        &mut new_exec,
+        &plan_doc,
+        &provider_doc,
+        false,
+        now_unix_ms,
+    )?;
+    let _ = save_device_release_exec(&state_dir, &new_exec)?;
+    let result = build_control_action_result(
+        &gen_id(
+            "lpact",
+            &format!(
+                "rerun:{}:{now_unix_ms}",
+                get_str(&exec_doc, &["exec_id"]).unwrap_or_default()
+            ),
+        ),
+        "device.release.rerun.manual",
+        "device_release",
+        now_unix_ms,
+        json!({ "release_exec_id": get_str(&exec_doc, &["exec_id"]).unwrap_or_default() }),
+        &args.reason,
+        vec![get_str(&exec_doc, &["exec_id"]).unwrap_or_default()],
+        Some(get_str(&new_exec, &["exec_id"]).unwrap_or_default()),
+        Some(state_before),
+        None,
+        &decision,
+        &signature_status,
+    );
+    record_control_action(&state_dir, &result)?;
+    Ok(cli_report(
+        "device release rerun",
+        true,
+        0,
+        result,
+        get_str(&exec_doc, &["run_id"]).as_deref(),
+        Vec::new(),
+    ))
+}
+
 fn load_device_release_provider_for_exec(state_dir: &Path, exec_doc: &Value) -> Result<Value> {
     let provider_id = get_str(exec_doc, &["meta", "provider_id"])
         .ok_or_else(|| anyhow!("device release execution missing provider_id"))?;
@@ -8796,6 +9979,7 @@ fn command_device_release_control(
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let now_unix_ms = device_release_now(&args.common);
     let mut exec_doc = load_device_release_exec(&state_dir, &args.release_exec_id)?;
+    ensure_device_release_meta_defaults(&mut exec_doc);
     let provider_doc = load_device_release_provider_for_exec(&state_dir, &exec_doc)?;
     let state_before = device_release_control_state_snapshot(&exec_doc);
     let step_doc = match action {
@@ -8806,23 +9990,25 @@ fn command_device_release_control(
         "halt" => json!({"id":"manual_halt","op":"release.pause"}),
         other => bail!("unsupported device release control action={other}"),
     };
-    let (current_state, rollout_percent, store_release_id, message) =
-        if action == "halt" {
-            (
-                "halted".to_string(),
-                device_release_current_percent(&exec_doc),
-                device_release_store_release_id(&exec_doc),
-                "halted device release".to_string(),
-            )
-        } else {
-            apply_device_release_provider_op(
-                &provider_doc,
-                &exec_doc,
-                &step_doc,
-                &args.release_exec_id,
-            )?
-        };
-    let action_id = gen_id("lpact", &format!("{}:{action}:{now_unix_ms}", args.release_exec_id));
+    let (current_state, rollout_percent, store_release_id, message) = if action == "halt" {
+        (
+            "halted".to_string(),
+            device_release_current_percent(&exec_doc),
+            device_release_store_release_id(&exec_doc),
+            "halted device release".to_string(),
+        )
+    } else {
+        apply_device_release_provider_op(
+            &provider_doc,
+            &exec_doc,
+            &step_doc,
+            &args.release_exec_id,
+        )?
+    };
+    let action_id = gen_id(
+        "lpact",
+        &format!("{}:{action}:{now_unix_ms}", args.release_exec_id),
+    );
     let evidence = write_device_release_evidence(
         &state_dir,
         &args.release_exec_id,
@@ -8863,7 +10049,10 @@ fn command_device_release_control(
     );
     meta.insert(
         "latest_store_release_id".to_string(),
-        store_release_id.map(Value::from).unwrap_or(Value::Null),
+        store_release_id
+            .as_ref()
+            .map(|value| Value::from(value.clone()))
+            .unwrap_or(Value::Null),
     );
     meta.insert("updated_unix_ms".to_string(), json!(now_unix_ms));
     meta.insert(
@@ -8874,16 +10063,28 @@ fn command_device_release_control(
         "latest_signed_control_decision_id".to_string(),
         json!(get_str(&decision, &["decision_id"]).unwrap_or_default()),
     );
-    meta.insert("signature_status".to_string(), json!(signature_status.clone()));
+    meta.insert(
+        "signature_status".to_string(),
+        json!(signature_status.clone()),
+    );
     meta.insert(
         "decision_count".to_string(),
         json!(get_u64(&meta.clone().into(), &["decision_count"]).unwrap_or(0) + 1),
+    );
+    meta.insert(
+        "automation_state".to_string(),
+        json!(match action {
+            "pause" => "paused",
+            "halt" => "stopped",
+            "complete" | "rollback" => "terminal",
+            _ => "active",
+        }),
     );
     let next_step_idx = get_path(&exec_doc, &["steps"])
         .and_then(Value::as_array)
         .map(Vec::len)
         .unwrap_or(0);
-    ensure_array_field(&mut exec_doc, "steps").push(build_exec_step(
+    ensure_array_field(&mut exec_doc, "steps").push(build_device_release_step(
         next_step_idx,
         &format!("manual_{action}"),
         action_kind,
@@ -8892,6 +10093,7 @@ fn command_device_release_control(
         Some(now_unix_ms),
         vec![get_str(&decision, &["decision_id"]).unwrap_or_default()],
         rollout_percent,
+        store_release_id.as_deref(),
         None,
     ));
     let status = match action {
@@ -10443,24 +11645,69 @@ fn command_incident_capture(args: IncidentCaptureArgs) -> Result<Value> {
 fn command_incident_capture_execution(args: IncidentCaptureArgs) -> Result<Value> {
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let now_unix_ms = args.common.now_unix_ms.unwrap_or_else(now_ms);
-    let mut exec_doc = load_exec(&state_dir, &args.deployment_id)?;
-    let run_id = get_str(&exec_doc, &["run_id"]).unwrap_or_default();
-    let run_doc = load_json(&run_path(&state_dir, &run_id))?;
-    let latest_decision_id = get_str(&exec_doc, &["meta", "latest_decision_id"]);
-    let (meta, bundle, incident_dir) = capture_incident_impl(
-        &state_dir,
-        &mut exec_doc,
-        &run_doc,
-        &args.reason,
-        &args.classification,
-        &args.source,
-        args.request.as_deref().map(repo_path).as_deref(),
-        args.response.as_deref().map(repo_path).as_deref(),
-        args.trace.as_deref().map(repo_path).as_deref(),
-        latest_decision_id.as_deref(),
-        "not_applicable",
-        now_unix_ms,
-    )?;
+    let selected =
+        usize::from(args.deployment_id.is_some()) + usize::from(args.release_exec_id.is_some());
+    if selected != 1 {
+        return Ok(cli_report(
+            "incident capture",
+            false,
+            2,
+            json!({}),
+            None,
+            vec![result_diag(
+                "LP_INVALID_ARGS",
+                "parse",
+                "incident capture requires exactly one of --deployment-id or --release-exec-id",
+                "error",
+            )],
+        ));
+    }
+    let request_path = args.request.as_deref().map(repo_path);
+    let response_path = args.response.as_deref().map(repo_path);
+    let trace_path = args.trace.as_deref().map(repo_path);
+    let (meta, bundle, incident_dir, run_id) =
+        if let Some(release_exec_id) = args.release_exec_id.as_deref() {
+            let mut exec_doc = load_device_release_exec(&state_dir, release_exec_id)?;
+            let run_id = get_str(&exec_doc, &["run_id"]).unwrap_or_default();
+            let latest_decision_id = get_str(&exec_doc, &["meta", "latest_decision_id"]);
+            let (meta, bundle, incident_dir) = capture_device_release_incident_impl(
+                &state_dir,
+                &mut exec_doc,
+                &args.reason,
+                &args.classification,
+                &args.source,
+                request_path.as_deref(),
+                response_path.as_deref(),
+                trace_path.as_deref(),
+                latest_decision_id.as_deref(),
+                "not_applicable",
+                now_unix_ms,
+            )?;
+            let _ = save_device_release_exec(&state_dir, &exec_doc)?;
+            rebuild_indexes(&state_dir)?;
+            (meta, bundle, incident_dir, run_id)
+        } else {
+            let deployment_id = args.deployment_id.as_deref().unwrap_or_default();
+            let mut exec_doc = load_exec(&state_dir, deployment_id)?;
+            let run_id = get_str(&exec_doc, &["run_id"]).unwrap_or_default();
+            let run_doc = load_json(&run_path(&state_dir, &run_id))?;
+            let latest_decision_id = get_str(&exec_doc, &["meta", "latest_decision_id"]);
+            let (meta, bundle, incident_dir) = capture_incident_impl(
+                &state_dir,
+                &mut exec_doc,
+                &run_doc,
+                &args.reason,
+                &args.classification,
+                &args.source,
+                request_path.as_deref(),
+                response_path.as_deref(),
+                trace_path.as_deref(),
+                latest_decision_id.as_deref(),
+                "not_applicable",
+                now_unix_ms,
+            )?;
+            (meta, bundle, incident_dir, run_id)
+        };
     let (db_path, rebuilt) = maybe_rebuild_phasec(&state_dir, false)?;
     Ok(cli_report(
         "incident capture",
@@ -10558,24 +11805,28 @@ fn command_incident_list_state(args: IncidentListArgs) -> Result<Value> {
             .as_ref()
             .map(|id| get_str(&meta, &["deployment_id"]).as_deref() == Some(id.as_str()))
             .unwrap_or(true);
-        if matches_target && matches_deployment {
-            items.push(json!({
-                "incident_id": get_str(&bundle, &["incident_id"]).unwrap_or_default(),
-                "classification": get_str(&meta, &["classification"]).unwrap_or_default(),
-                "source": get_str(&meta, &["source"]).unwrap_or_default(),
-                "incident_status": get_str(&meta, &["incident_status"]).unwrap_or_default(),
-                "target": get_path(&meta, &["target"]).cloned().unwrap_or_else(|| json!({"app_id":"unknown","environment":"unknown"})),
-                "deployment_id": get_str(&meta, &["deployment_id"]).unwrap_or_default(),
-                "run_id": get_str(&meta, &["run_id"]).unwrap_or_default(),
-                "captured_unix_ms": get_u64(&meta, &["captured_unix_ms"]).unwrap_or(0),
-                "request_id": get_path(&meta, &["request_id"]).cloned().unwrap_or(Value::Null),
-                "trace_id": get_path(&meta, &["trace_id"]).cloned().unwrap_or(Value::Null),
-                "status_code": get_path(&meta, &["status_code"]).cloned().unwrap_or(Value::Null),
-                "decision_id": get_path(&meta, &["decision_id"]).cloned().unwrap_or(Value::Null),
-                "regression_status": get_str(&meta, &["regression_status"]).unwrap_or_else(|| "not_requested".to_string()),
-                "regression_id": get_path(&meta, &["regression_id"]).cloned().unwrap_or(Value::Null),
-                "signature_status": get_str(&meta, &["signature_status"]).unwrap_or_else(|| "not_applicable".to_string()),
-            }));
+        let matches_release = args
+            .release_exec_id
+            .as_ref()
+            .map(|id| get_str(&meta, &["release_exec_id"]).as_deref() == Some(id.as_str()))
+            .unwrap_or(true);
+        let matches_classification = args
+            .classification
+            .as_ref()
+            .map(|value| get_str(&meta, &["classification"]).as_deref() == Some(value.as_str()))
+            .unwrap_or(true);
+        let matches_status = args
+            .status
+            .as_ref()
+            .map(|value| get_str(&meta, &["incident_status"]).as_deref() == Some(value.as_str()))
+            .unwrap_or(true);
+        if matches_target
+            && matches_deployment
+            && matches_release
+            && matches_classification
+            && matches_status
+        {
+            items.push(incident_query_item(&meta, &bundle));
         }
     }
     items.sort_by_key(|item| std::cmp::Reverse(get_u64(item, &["captured_unix_ms"]).unwrap_or(0)));
@@ -10584,6 +11835,8 @@ fn command_incident_list_state(args: IncidentListArgs) -> Result<Value> {
     }
     let resolution = if let Some(deployment_id) = args.deployment_id {
         json!({"by":"deployment_id","requested_deployment_id": deployment_id})
+    } else if let Some(release_exec_id) = args.release_exec_id {
+        json!({"by":"release_exec_id","requested_release_exec_id": release_exec_id})
     } else if let (Some(app_id), Some(env)) = (args.app_id, args.env) {
         json!({"by":"target","requested_target":{"app_id": app_id, "environment": env}})
     } else {
@@ -10606,11 +11859,62 @@ fn command_incident_list_state(args: IncidentListArgs) -> Result<Value> {
     ))
 }
 
+fn incident_uses_device_regression(meta: &Value) -> bool {
+    get_str(meta, &["release_exec_id"]).is_some() || !incident_release_ref(meta).is_null()
+}
+
+fn sync_device_release_incident_link(state_dir: &Path, meta: &Value, bundle: &Value) -> Result<()> {
+    let Some(release_exec_id) = get_str(meta, &["release_exec_id"]) else {
+        return Ok(());
+    };
+    let mut exec_doc = load_device_release_exec(state_dir, &release_exec_id)?;
+    ensure_device_release_meta_defaults(&mut exec_doc);
+    upsert_device_release_linked_incident(&mut exec_doc, meta, bundle);
+    let _ = save_device_release_exec(state_dir, &exec_doc)?;
+    Ok(())
+}
+
 fn command_regress_from_incident(args: RegressFromIncidentArgs) -> Result<Value> {
     if remote_mode_selected(args.target.as_deref())? {
         return remote_command_regress_from_incident(&args);
     }
     command_regress_from_incident_state(args)
+}
+
+fn materialize_device_regression_incident_input(
+    incident_dir: &Path,
+    meta: &Value,
+    bundle: &Value,
+) -> Result<()> {
+    let app_trace_path = incident_dir.join("trace.json");
+    let app_trace = if app_trace_path.is_file() {
+        let candidate = load_json(&app_trace_path).unwrap_or(Value::Null);
+        if get_str(&candidate, &["kind"]).as_deref() == Some("x07.app.trace") {
+            candidate
+        } else {
+            Value::Null
+        }
+    } else {
+        Value::Null
+    };
+    let error = get_str(bundle, &["notes"])
+        .or_else(|| get_str(meta, &["classification"]))
+        .unwrap_or_else(|| "device incident".to_string());
+    let incident_doc = json!({
+        "v": 1,
+        "kind": "x07.web_ui.incident",
+        "error": error,
+        "policySnapshotSha256": Value::Null,
+        "trace": {
+            "v": 1,
+            "kind": "x07.web_ui.trace",
+            "steps": [],
+        },
+        "effectExchanges": [],
+        "appTrace": app_trace,
+    });
+    let _ = write_json(&incident_dir.join("incident.json"), &incident_doc)?;
+    Ok(())
 }
 
 fn command_regress_from_incident_state(args: RegressFromIncidentArgs) -> Result<Value> {
@@ -10639,36 +11943,73 @@ fn command_regress_from_incident_state(args: RegressFromIncidentArgs) -> Result<
         .map(repo_path)
         .unwrap_or_else(|| root_dir().join("tests").join("regress"));
     fs::create_dir_all(&out_dir)?;
+    let regression_id = gen_id(
+        "lprgr",
+        &format!("{}:{}:{now_unix_ms}", args.incident_id, args.name),
+    );
+    let target_artifact = incident_target_artifact(&meta);
+    let incident_artifact = json!({
+        "kind": "lp.incident.bundle@0.1.0",
+        "digest": digest_value(&canon_json_bytes(&bundle)),
+    });
     let request_doc = json!({
-        "incident_id": args.incident_id,
-        "name": args.name,
-        "out_dir": out_dir.to_string_lossy(),
-        "dry_run": args.dry_run,
+        "schema_version": "lp.regression.request@0.1.0",
+        "regression_id": regression_id,
+        "created_unix_ms": now_unix_ms,
+        "incident": incident_artifact,
+        "target_artifact": target_artifact,
+        "invariants": if incident_uses_device_regression(&meta) {
+            json!(["device.trace.replay"])
+        } else {
+            json!(["app.trace.replay"])
+        },
+        "notes": format!("incident_id={} name={}", args.incident_id, args.name),
+        "meta": {
+            "incident_id": args.incident_id,
+            "name": args.name,
+            "out_dir": out_dir.to_string_lossy(),
+            "dry_run": args.dry_run,
+        },
     });
     let request_bytes = write_json(&incident_dir.join("regression.request.json"), &request_doc)?;
     let regression_request_artifact = named_file_artifact(
         &format!(
-            "incidents/{}/{}/{}/regression.request.json",
-            get_str(&meta, &["target", "app_id"]).unwrap_or_default(),
-            get_str(&meta, &["target", "environment"]).unwrap_or_default(),
-            args.incident_id,
+            "{}/regression.request.json",
+            incident_store_prefix(&meta, &args.incident_id)
         ),
         "lp.regression.request@0.1.0",
         "application/json",
         &request_bytes,
     );
+    let use_device_regression = incident_uses_device_regression(&meta);
+    if use_device_regression {
+        materialize_device_regression_incident_input(&incident_dir, &meta, &bundle)?;
+    }
+    let tool_command = if use_device_regression {
+        "device regress from-incident"
+    } else {
+        "app regress from-incident"
+    };
     let report: Value = {
-        let mut argv = vec![
-            "app".to_string(),
-            "regress".to_string(),
-            "from-incident".to_string(),
-            incident_dir.to_string_lossy().into_owned(),
-            "--out-dir".to_string(),
-            out_dir.to_string_lossy().into_owned(),
-            "--name".to_string(),
-            args.name.clone(),
-            "--json".to_string(),
-        ];
+        let mut argv = if use_device_regression {
+            vec![
+                "device".to_string(),
+                "regress".to_string(),
+                "from-incident".to_string(),
+            ]
+        } else {
+            vec![
+                "app".to_string(),
+                "regress".to_string(),
+                "from-incident".to_string(),
+            ]
+        };
+        argv.push(incident_dir.to_string_lossy().into_owned());
+        argv.push("--out-dir".to_string());
+        argv.push(out_dir.to_string_lossy().into_owned());
+        argv.push("--name".to_string());
+        argv.push(args.name.clone());
+        argv.push("--json".to_string());
         if args.dry_run {
             argv.push("--dry-run".to_string());
         }
@@ -10682,6 +12023,16 @@ fn command_regress_from_incident_state(args: RegressFromIncidentArgs) -> Result<
             } else {
                 stderr_msg
             };
+            {
+                let meta_map = ensure_object(&mut meta);
+                meta_map.insert("regression_status".to_string(), json!("failed"));
+                meta_map.insert("regression_id".to_string(), json!(regression_id.clone()));
+            }
+            let _ = write_json(&incident_dir.join("incident.meta.local.json"), &meta)?;
+            if use_device_regression {
+                sync_device_release_incident_link(&state_dir, &meta, &bundle)?;
+            }
+            rebuild_indexes(&state_dir)?;
             return Ok(cli_report(
                 "regress from-incident",
                 false,
@@ -10689,25 +12040,17 @@ fn command_regress_from_incident_state(args: RegressFromIncidentArgs) -> Result<
                 json!({
                     "schema_version": "lp.regression.run.result@0.1.0",
                     "incident_id": args.incident_id,
-                    "regression_id": null,
+                    "regression_id": regression_id,
                     "ok": false,
-                    "tool": { "name": "x07 wasm", "command": "app regress from-incident" },
+                    "tool": { "name": "x07 wasm", "command": tool_command },
                     "dry_run": args.dry_run,
                     "out_dir": out_dir.to_string_lossy(),
-                    "incident_status_after": get_str(&meta, &["regression_status"]).unwrap_or_else(|| "unknown".to_string()),
-                    "target_artifact": json!({
-                        "kind": "lp.incident.bundle@0.1.0",
-                        "digest": digest_value(&canon_json_bytes(&bundle)),
-                        "store_uri": format!(
-                            "file:incidents/{}/{}/{}/incident.bundle.json",
-                            get_str(&meta, &["target", "app_id"]).unwrap_or_default(),
-                            get_str(&meta, &["target", "environment"]).unwrap_or_default(),
-                            args.incident_id,
-                        ),
-                    }),
+                    "incident_status_after": "failed",
+                    "target_artifact": incident_target_artifact(&meta),
+                    "request": regression_request_artifact.clone(),
                     "generated": [],
                 }),
-                Some(&args.incident_id),
+                get_str(&meta, &["run_id"]).as_deref(),
                 vec![result_diag(
                     "LP_REGRESSION_TOOL_FAILED",
                     "run",
@@ -10721,20 +12064,18 @@ fn command_regress_from_incident_state(args: RegressFromIncidentArgs) -> Result<
     let report_bytes = write_json(&report_path, &report)?;
     let report_artifact = named_file_artifact(
         &format!(
-            "incidents/{}/{}/{}/regression.report.json",
-            get_str(&meta, &["target", "app_id"]).unwrap_or_default(),
-            get_str(&meta, &["target", "environment"]).unwrap_or_default(),
-            args.incident_id,
+            "{}/regression.report.json",
+            incident_store_prefix(&meta, &args.incident_id)
         ),
         get_str(&report, &["schema_version"])
             .as_deref()
-            .unwrap_or("x07.wasm.regression.report@0.1.0"),
+            .unwrap_or(if use_device_regression {
+                "x07.wasm.device.regress.from_incident.report@0.1.0"
+            } else {
+                "x07.wasm.app.regress.from_incident.report@0.1.0"
+            }),
         "application/json",
         &report_bytes,
-    );
-    let regression_id = gen_id(
-        "lprgr",
-        &format!("{}:{}:{now_unix_ms}", args.incident_id, args.name),
     );
     let mut generated = Vec::new();
     if !args.dry_run {
@@ -10752,30 +12093,30 @@ fn command_regress_from_incident_state(args: RegressFromIncidentArgs) -> Result<
             }));
         }
     }
+    let regression_status = if args.dry_run {
+        "requested"
+    } else {
+        "generated"
+    };
     {
         let meta_map = ensure_object(&mut meta);
-        meta_map.insert("regression_status".to_string(), json!("generated"));
+        meta_map.insert("regression_status".to_string(), json!(regression_status));
+        meta_map.insert("regression_id".to_string(), json!(regression_id.clone()));
     }
     let _ = write_json(&incident_dir.join("incident.meta.local.json"), &meta)?;
+    if use_device_regression {
+        sync_device_release_incident_link(&state_dir, &meta, &bundle)?;
+    }
     let regression_summary = json!({
         "schema_version": "lp.regression.run.result@0.1.0",
         "incident_id": args.incident_id,
         "regression_id": regression_id,
         "ok": true,
-        "tool": { "name": "x07 wasm", "command": "app regress from-incident" },
+        "tool": { "name": "x07 wasm", "command": tool_command },
         "dry_run": args.dry_run,
         "out_dir": out_dir.to_string_lossy(),
-        "incident_status_after": "generated",
-        "target_artifact": json!({
-            "kind": "lp.incident.bundle@0.1.0",
-            "digest": digest_value(&canon_json_bytes(&bundle)),
-            "store_uri": format!(
-                "file:incidents/{}/{}/{}/incident.bundle.json",
-                get_str(&meta, &["target", "app_id"]).unwrap_or_default(),
-                get_str(&meta, &["target", "environment"]).unwrap_or_default(),
-                args.incident_id,
-            )
-        }),
+        "incident_status_after": regression_status,
+        "target_artifact": incident_target_artifact(&meta),
         "request": regression_request_artifact,
         "report": report_artifact,
         "generated": generated,
@@ -12317,8 +13658,14 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
             let trace_path =
                 materialize_remote_http_doc(state_dir, "trace", body_doc.get("trace"))?;
             let deployment_id = get_http_string(&body_doc, "deployment_id", "");
+            let release_exec_id = get_http_optional_string(&body_doc, "release_exec_id");
             let report = command_incident_capture_execution(IncidentCaptureArgs {
-                deployment_id: deployment_id.clone(),
+                deployment_id: if deployment_id.is_empty() {
+                    None
+                } else {
+                    Some(deployment_id.clone())
+                },
+                release_exec_id: release_exec_id.clone(),
                 reason: get_http_string(&body_doc, "reason", "remote_incident"),
                 request: request_path,
                 response: response_path,
@@ -12328,10 +13675,14 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
                 target: None,
                 common,
             })?;
-            if !deployment_id.is_empty() {
+            if let Some(exec_id) = if !deployment_id.is_empty() {
+                Some(deployment_id.as_str())
+            } else {
+                release_exec_id.as_deref()
+            } {
                 let _ = record_remote_event(
                     state_dir,
-                    &deployment_id,
+                    exec_id,
                     "incident.capture",
                     "remote incident captured",
                     json!({
@@ -12346,6 +13697,9 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
             200,
             command_incident_list_state(IncidentListArgs {
                 deployment_id: request_query_string(&request, "deployment_id"),
+                release_exec_id: request_query_string(&request, "release_exec_id"),
+                classification: request_query_string(&request, "classification"),
+                status: request_query_string(&request, "status"),
                 app_id: request_query_string(&request, "app_id"),
                 env: request_query_string(&request, "env"),
                 limit: request_query_usize(&request, "limit"),
@@ -12373,17 +13727,22 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
                 target: None,
                 common,
             })?;
-            if let Some(exec_id) = get_str(&report, &["result", "deployment_id"]) {
-                let _ = record_remote_event(
-                    state_dir,
-                    &exec_id,
-                    "incident.regress",
-                    "remote regression generated from incident",
-                    json!({
-                        "ok": report.get("ok").and_then(Value::as_bool).unwrap_or(false),
-                        "incident_id": incident_id,
-                    }),
-                );
+            if let Ok(Some((meta, _, _))) = build_incident_summary_from_disk(state_dir, incident_id)
+            {
+                let exec_id = get_str(&meta, &["deployment_id"])
+                    .or_else(|| get_str(&meta, &["release_exec_id"]));
+                if let Some(exec_id) = exec_id {
+                    let _ = record_remote_event(
+                        state_dir,
+                        &exec_id,
+                        "incident.regress",
+                        "remote regression generated from incident",
+                        json!({
+                            "ok": report.get("ok").and_then(Value::as_bool).unwrap_or(false),
+                            "incident_id": incident_id,
+                        }),
+                    );
+                }
             }
             UiHttpResponse::Json(200, report)
         }
@@ -12499,11 +13858,14 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
         ),
         ("GET", "/api/device-releases") => {
             UiHttpResponse::Json(200, command_device_release_list(&common)?)
-        },
+        }
         ("GET", "/api/incidents") => UiHttpResponse::Json(
             200,
             command_incident_list(IncidentListArgs {
                 deployment_id: None,
+                release_exec_id: None,
+                classification: None,
+                status: None,
                 app_id: None,
                 env: None,
                 limit: None,
@@ -12551,6 +13913,24 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                     200,
                     command_incident_list(IncidentListArgs {
                         deployment_id: Some((*exec_id).to_string()),
+                        release_exec_id: None,
+                        classification: None,
+                        status: None,
+                        app_id: None,
+                        env: None,
+                        limit: None,
+                        rebuild_index: false,
+                        target: None,
+                        common: common.clone(),
+                    })?,
+                ),
+                ("GET", ["api", "device-releases", exec_id, "incidents"]) => UiHttpResponse::Json(
+                    200,
+                    command_incident_list(IncidentListArgs {
+                        deployment_id: None,
+                        release_exec_id: Some((*exec_id).to_string()),
+                        classification: None,
+                        status: None,
                         app_id: None,
                         env: None,
                         limit: None,
@@ -12638,12 +14018,24 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                     command_device_release_control(
                         DeviceReleaseControlArgs {
                             release_exec_id: (*exec_id).to_string(),
-                            reason: get_http_string(&body_doc, "reason", "http_device_release_pause"),
+                            reason: get_http_string(
+                                &body_doc,
+                                "reason",
+                                "http_device_release_pause",
+                            ),
                             common: common.clone(),
                         },
                         "pause",
                         "device.release.pause.manual",
                     )?,
+                ),
+                ("POST", ["api", "device-releases", exec_id, "observe"]) => UiHttpResponse::Json(
+                    200,
+                    command_device_release_observe(DeviceReleaseControlArgs {
+                        release_exec_id: (*exec_id).to_string(),
+                        reason: get_http_string(&body_doc, "reason", "http_device_release_observe"),
+                        common: common.clone(),
+                    })?,
                 ),
                 ("POST", ["api", "device-releases", exec_id, "resume"]) => UiHttpResponse::Json(
                     200,
@@ -12666,12 +14058,24 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                     command_device_release_control(
                         DeviceReleaseControlArgs {
                             release_exec_id: (*exec_id).to_string(),
-                            reason: get_http_string(&body_doc, "reason", "http_device_release_halt"),
+                            reason: get_http_string(
+                                &body_doc,
+                                "reason",
+                                "http_device_release_halt",
+                            ),
                             common: common.clone(),
                         },
                         "halt",
                         "device.release.halt.manual",
                     )?,
+                ),
+                ("POST", ["api", "device-releases", exec_id, "stop"]) => UiHttpResponse::Json(
+                    200,
+                    command_device_release_stop(DeviceReleaseControlArgs {
+                        release_exec_id: (*exec_id).to_string(),
+                        reason: get_http_string(&body_doc, "reason", "http_device_release_stop"),
+                        common: common.clone(),
+                    })?,
                 ),
                 ("POST", ["api", "device-releases", exec_id, "complete"]) => UiHttpResponse::Json(
                     200,
@@ -12688,6 +14092,15 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         "complete",
                         "device.release.complete.manual",
                     )?,
+                ),
+                ("POST", ["api", "device-releases", exec_id, "rerun"]) => UiHttpResponse::Json(
+                    200,
+                    command_device_release_rerun(DeviceReleaseRerunArgs {
+                        release_exec_id: (*exec_id).to_string(),
+                        from_step: Some(get_http_u64(&body_doc, "from_step", 0) as usize),
+                        reason: get_http_string(&body_doc, "reason", "http_device_release_rerun"),
+                        common: common.clone(),
+                    })?,
                 ),
                 ("POST", ["api", "device-releases", exec_id, "rollback"]) => UiHttpResponse::Json(
                     200,

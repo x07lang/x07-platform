@@ -11,6 +11,7 @@ prepend_path_if_dir() {
 }
 
 prepend_path_if_dir "${ROOT_DIR}/../x07/target/debug"
+prepend_path_if_dir "${ROOT_DIR}/../x07-wasm-backend/target/debug"
 prepend_path_if_dir "${ROOT_DIR}/../x07-wasm-backend/target/release"
 
 export PATH

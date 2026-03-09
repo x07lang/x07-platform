@@ -9,7 +9,8 @@ CREATE TABLE IF NOT EXISTS incidents (
   incident_id TEXT PRIMARY KEY,
   app_id TEXT NOT NULL,
   environment TEXT NOT NULL,
-  deployment_id TEXT NOT NULL,
+  deployment_id TEXT,
+  release_exec_id TEXT,
   run_id TEXT NOT NULL,
   classification TEXT NOT NULL,
   source TEXT NOT NULL,
@@ -31,6 +32,8 @@ CREATE INDEX IF NOT EXISTS incidents_target_captured_idx
   ON incidents (app_id, environment, captured_unix_ms DESC, incident_id DESC);
 CREATE INDEX IF NOT EXISTS incidents_deployment_idx
   ON incidents (deployment_id, captured_unix_ms DESC);
+CREATE INDEX IF NOT EXISTS incidents_release_exec_idx
+  ON incidents (release_exec_id, captured_unix_ms DESC);
 
 CREATE TABLE IF NOT EXISTS incident_artifacts (
   incident_id TEXT NOT NULL,

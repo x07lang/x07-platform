@@ -1,0 +1,60 @@
+{
+  "v": 1,
+  "kind": "x07.web_ui.trace",
+  "meta": {
+    "name": "fixture",
+    "v": 1
+  },
+  "steps": [
+    {
+      "env": {
+        "v": 1,
+        "kind": "x07.web_ui.dispatch",
+        "state": null,
+        "event": {
+          "type": "init"
+        }
+      },
+      "frame": {
+        "v": 1,
+        "kind": "x07.web_ui.frame",
+        "state": {
+          "count": 0
+        },
+        "ui": {
+          "v": 1,
+          "kind": "x07.web_ui.tree",
+          "root": {
+            "k": "el",
+            "tag": "div",
+            "key": "root",
+            "props": {
+              "attrs": {},
+              "class": [
+                "app"
+              ],
+              "style": {}
+            },
+            "on": [],
+            "children": [
+              {
+                "k": "text",
+                "key": "t1",
+                "text": "Hello"
+              }
+            ]
+          }
+        },
+        "patches": [
+          {
+            "op": "replace",
+            "path": "/root/children/0/text",
+            "value": "Hello"
+          }
+        ],
+        "effects": [],
+        "telemetry": {}
+      }
+    }
+  ]
+}

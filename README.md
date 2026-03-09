@@ -22,7 +22,7 @@ Public surface:
 - local content-addressed state under `.x07lp/` or `--state-dir`
 - local runtime, routing, signed control actions, incident capture, regression generation, and query/index support for `x07.app.pack@0.1.0`
 - self-hosted remote target management, remote deploy API, remote event/log streams, and reference adapter work for the OSS remote path
-- device package release planning, provider validation, staged rollout control, Command Center device-release views, and MCP tools for `lp.device.release.*`
+- device package release planning, optional metrics-gate bootstrap inputs, staged rollout control, Command Center device-release views, and MCP tools for `lp.device.release.*`
 - MCP router/worker integration under `gateway/mcp/`
 - local Command Center HTTP surface served by `x07lpd`
 - compose-backed self-hosted reference target with HTTPS control-plane ingress, authenticated/TLS OCI publishing, and encrypted server-side secret storage
@@ -45,7 +45,8 @@ Developer commands:
 - Run checks: `./scripts/ci/check_all.sh`
 
 Device distribution note:
-- `x07lp device release-create`, `release-validate`, `release-run`, `release-query`, `release-pause`, `release-resume`, `release-halt`, `release-complete`, and `release-rollback` drive the shared device-release engine.
+- `x07lp device release-create`, `release-validate`, `release-run`, `release-query`, `release-observe`, `release-pause`, `release-resume`, `release-halt`, `release-stop`, `release-complete`, `release-rerun`, and `release-rollback` drive the shared device-release engine.
+- `x07lp device release-create` also accepts `--slo-profile`, `--metrics-window-seconds`, and `--metrics-on-fail` to seed a release metrics gate, and `x07lp device release-rerun` accepts `--from-step` to restart from a later step boundary.
 - Default CI and local fixture validation use deterministic provider-matrix simulation for `appstoreconnect_v1` and `googleplay_v1`.
 - Manual live-provider validation remains explicit through `X07LP_DEVICE_PROVIDER_LIVE=1`.
 

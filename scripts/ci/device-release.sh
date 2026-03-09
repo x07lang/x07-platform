@@ -35,6 +35,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
+stop_pid() {
+  local pid="$1"
+  if [ -n "${pid:-}" ] && kill -0 "$pid" >/dev/null 2>&1; then
+    kill "$pid" >/dev/null 2>&1 || true
+    wait "$pid" >/dev/null 2>&1 || true
+  fi
+}
+
 decode_solve_output_b64() {
   local report_path="$1"
   local out_path="$2"
@@ -162,11 +170,16 @@ required = {
     "lp.device.release.validate",
     "lp.device.release.run",
     "lp.device.release.query",
+    "lp.device.release.observe",
     "lp.device.release.pause",
     "lp.device.release.resume",
     "lp.device.release.halt",
+    "lp.device.release.stop",
     "lp.device.release.complete",
+    "lp.device.release.rerun",
     "lp.device.release.rollback",
+    "lp.device.incident.list",
+    "lp.device.incident.get",
 }
 missing = sorted(required - names)
 if missing:
@@ -198,6 +211,10 @@ MOCK_PROD_PROVIDER="spec/fixtures/device-release/common/providers/mock_productio
 GOOGLEPLAY_PROVIDER="spec/fixtures/device-release/common/providers/googleplay_production_android.json"
 APPSTORE_PROVIDER="spec/fixtures/device-release/common/providers/appstoreconnect_production_ios.json"
 INVALID_PLAN="spec/fixtures/device-release/provider_validation_ios_invalid_percent/invalid.plan.json"
+SLO_PROFILE="spec/fixtures/device-release/common/slo_min.json"
+METRICS_OK="spec/fixtures/device-release/common/metrics_ok.json"
+METRICS_BAD="spec/fixtures/device-release/common/metrics_bad.json"
+TRACE_FIXTURE="spec/fixtures/device-release/common/device.trace.json"
 
 run_create() {
   local report_path="$1"
@@ -205,20 +222,33 @@ run_create() {
   local provider="$3"
   local package_manifest="$4"
   local plan_path="$5"
+  local slo_profile="${6:-}"
+  local metrics_window_seconds="${7:-}"
+  local metrics_on_fail="${8:-}"
   local provider_arg
   local package_arg
   local plan_arg
+  local argv=()
   provider_arg="$(repo_path_arg "$provider")"
   package_arg="$(repo_path_arg "$package_manifest")"
   plan_arg="$(repo_path_arg "$plan_path")"
-  run_x07lp "$report_path" "$out_path" \
-    device release-create \
-    --provider-profile "$provider_arg" \
-    --package-manifest "$package_arg" \
-    --out "$plan_arg" \
-    --state-dir "$STATE_DIR_ARG" \
-    --now-unix-ms "$NOW_UNIX_MS" \
-    --json
+  argv=(
+    device release-create
+    --provider-profile "$provider_arg"
+    --package-manifest "$package_arg"
+    --out "$plan_arg"
+  )
+  if [ -n "$slo_profile" ]; then
+    argv+=(--slo-profile "$(repo_path_arg "$slo_profile")")
+  fi
+  if [ -n "$metrics_window_seconds" ]; then
+    argv+=(--metrics-window-seconds "$metrics_window_seconds")
+  fi
+  if [ -n "$metrics_on_fail" ]; then
+    argv+=(--metrics-on-fail "$metrics_on_fail")
+  fi
+  argv+=(--state-dir "$STATE_DIR_ARG" --now-unix-ms "$NOW_UNIX_MS" --json)
+  run_x07lp "$report_path" "$out_path" "${argv[@]}"
 }
 
 run_validate() {
@@ -304,6 +334,60 @@ run_control() {
     --json
 }
 
+run_incident_capture() {
+  local report_path="$1"
+  local out_path="$2"
+  local release_exec_id="$3"
+  local trace_path="$4"
+  run_x07lp "$report_path" "$out_path" \
+    incident capture \
+    --release "$release_exec_id" \
+    --reason device_trace_capture \
+    --classification device_js_unhandled \
+    --source device_host \
+    --trace "$(repo_path_arg "$trace_path")" \
+    --state-dir "$STATE_DIR_ARG" \
+    --now-unix-ms "$NOW_UNIX_MS" \
+    --json
+}
+
+run_incident_list() {
+  local report_path="$1"
+  local out_path="$2"
+  local release_exec_id="$3"
+  run_x07lp "$report_path" "$out_path" \
+    incident list \
+    --release "$release_exec_id" \
+    --state-dir "$STATE_DIR_ARG" \
+    --now-unix-ms "$NOW_UNIX_MS" \
+    --json
+}
+
+run_regress() {
+  local report_path="$1"
+  local out_path="$2"
+  local incident_id="$3"
+  local out_dir="$4"
+  local name="$5"
+  run_x07lp "$report_path" "$out_path" \
+    regress from-incident \
+    --incident-id "$incident_id" \
+    --out-dir "$(repo_path_arg "$out_dir")" \
+    --name "$name" \
+    --state-dir "$STATE_DIR_ARG" \
+    --now-unix-ms "$NOW_UNIX_MS" \
+    --json
+}
+
+seed_metrics_snapshot() {
+  local release_exec_id="$1"
+  local metrics_fixture="$2"
+  local seq="${3:-1}"
+  local dst_dir="${STATE_DIR}/device_release/telemetry/${release_exec_id}"
+  mkdir -p "$dst_dir"
+  cp "$ROOT_DIR/$metrics_fixture" "${dst_dir}/analysis.${seq}.json"
+}
+
 # 11A: beta release
 BETA_DIR="${TMP_DIR}/mock_beta_release"
 mkdir -p "$BETA_DIR"
@@ -357,9 +441,10 @@ run_release "${UI_DIR}/run.run.json" "${UI_DIR}/run.cli.json" "$UI_PLAN" "$IOS_P
 UI_EXEC_ID="$(extract_json_value "${UI_DIR}/run.cli.json" "result.exec_id")"
 (
   cd "$ROOT_DIR"
-  scripts/x07lp-driver ui-serve --addr "$UI_ADDR" --state-dir "$STATE_DIR" >/dev/null 2>&1
+  exec scripts/x07lp-driver ui-serve --addr "$UI_ADDR" --state-dir "$STATE_DIR" >/dev/null 2>&1
 ) &
-PIDS+=("$!")
+UI_SERVER_PID="$!"
+PIDS+=("$UI_SERVER_PID")
 wait_for_http "${UI_BASE_URL}/healthz" 30
 curl -fsS "${UI_BASE_URL}/api/device-releases" >"${UI_DIR}/api.device-releases.json"
 curl -fsS "${UI_BASE_URL}/api/device-releases/${UI_EXEC_ID}" >"${UI_DIR}/api.device-release.get.json"
@@ -371,5 +456,69 @@ assert_json_expr "${UI_DIR}/api.device-releases.json" 'doc["ok"] is True and any
 assert_json_expr "${UI_DIR}/api.device-release.get.json" 'doc["ok"] is True and doc["result"]["exec_id"] == "'"${UI_EXEC_ID}"'" and doc["result"]["current_state"] == "in_progress"' "device release detail did not show the expected in-progress state"
 assert_json_expr "${UI_DIR}/api.device-release.complete.json" 'doc["ok"] is True and doc["result"]["kind"] == "device.release.complete.manual" and doc["result"]["state_after"]["current_state"] == "completed"' "device release complete control did not produce the expected state transition"
 assert_json_expr "${UI_DIR}/api.device-release.after.json" 'doc["ok"] is True and doc["result"]["current_state"] == "completed" and doc["result"]["current_rollout_percent"] == 100' "device release detail did not show a completed rollout after UI actions"
+stop_pid "$UI_SERVER_PID"
+
+# Phase 12: metrics observe / stop / rerun
+OBSERVE_OK_DIR="${TMP_DIR}/metrics_continue"
+mkdir -p "$OBSERVE_OK_DIR"
+OBSERVE_OK_PLAN="${OBSERVE_OK_DIR}/plan.json"
+run_create "${OBSERVE_OK_DIR}/create.run.json" "${OBSERVE_OK_DIR}/create.cli.json" "$MOCK_PROD_PROVIDER" "$IOS_PACKAGE" "$OBSERVE_OK_PLAN" "$SLO_PROFILE" "300" "release.pause"
+run_release "${OBSERVE_OK_DIR}/run.run.json" "${OBSERVE_OK_DIR}/run.cli.json" "$OBSERVE_OK_PLAN" "$IOS_PACKAGE"
+OBSERVE_OK_EXEC_ID="$(extract_json_value "${OBSERVE_OK_DIR}/run.cli.json" "result.exec_id")"
+assert_json_expr "${OBSERVE_OK_DIR}/run.cli.json" 'doc["ok"] is True and doc["result"]["status"] == "started"' "metrics-gated release did not pause at the observe waitpoint"
+run_query "${OBSERVE_OK_DIR}/query.before.run.json" "${OBSERVE_OK_DIR}/query.before.cli.json" "$OBSERVE_OK_EXEC_ID" full
+assert_json_expr "${OBSERVE_OK_DIR}/query.before.cli.json" 'doc["ok"] is True and doc["result"]["automation_state"] == "waiting_for_observation"' "release run did not stop at waiting_for_observation"
+seed_metrics_snapshot "$OBSERVE_OK_EXEC_ID" "$METRICS_OK"
+run_control "${OBSERVE_OK_DIR}/observe.run.json" "${OBSERVE_OK_DIR}/observe.cli.json" observe "$OBSERVE_OK_EXEC_ID" cli_observe
+run_query "${OBSERVE_OK_DIR}/query.after.run.json" "${OBSERVE_OK_DIR}/query.after.cli.json" "$OBSERVE_OK_EXEC_ID" full
+assert_json_expr "${OBSERVE_OK_DIR}/observe.cli.json" 'doc["ok"] is True and doc["result"]["kind"] == "device.release.observe.manual"' "observe did not emit the expected control action result"
+assert_json_expr "${OBSERVE_OK_DIR}/query.after.cli.json" 'doc["ok"] is True and doc["result"]["status"] == "completed" and doc["result"]["latest_eval_outcome"] == "ok" and doc["result"]["latest_metrics_snapshot"] is not None and doc["result"]["latest_slo_eval_report"] is not None' "observe did not promote and persist the metrics evaluation artifacts"
+
+OBSERVE_BAD_DIR="${TMP_DIR}/metrics_pause"
+mkdir -p "$OBSERVE_BAD_DIR"
+OBSERVE_BAD_PLAN="${OBSERVE_BAD_DIR}/plan.json"
+run_create "${OBSERVE_BAD_DIR}/create.run.json" "${OBSERVE_BAD_DIR}/create.cli.json" "$MOCK_PROD_PROVIDER" "$IOS_PACKAGE" "$OBSERVE_BAD_PLAN" "$SLO_PROFILE" "300" "release.pause"
+run_release "${OBSERVE_BAD_DIR}/run.run.json" "${OBSERVE_BAD_DIR}/run.cli.json" "$OBSERVE_BAD_PLAN" "$IOS_PACKAGE"
+OBSERVE_BAD_EXEC_ID="$(extract_json_value "${OBSERVE_BAD_DIR}/run.cli.json" "result.exec_id")"
+seed_metrics_snapshot "$OBSERVE_BAD_EXEC_ID" "$METRICS_BAD"
+run_control "${OBSERVE_BAD_DIR}/observe.run.json" "${OBSERVE_BAD_DIR}/observe.cli.json" observe "$OBSERVE_BAD_EXEC_ID" cli_observe_bad
+run_query "${OBSERVE_BAD_DIR}/query.after.run.json" "${OBSERVE_BAD_DIR}/query.after.cli.json" "$OBSERVE_BAD_EXEC_ID" full
+assert_json_expr "${OBSERVE_BAD_DIR}/query.after.cli.json" 'doc["ok"] is True and doc["result"]["current_state"] == "paused" and doc["result"]["automation_state"] == "paused" and doc["result"]["latest_eval_outcome"] == "fail"' "bad metrics snapshot did not pause the release"
+run_control "${OBSERVE_BAD_DIR}/stop.run.json" "${OBSERVE_BAD_DIR}/stop.cli.json" stop "$OBSERVE_BAD_EXEC_ID" cli_stop
+run_query "${OBSERVE_BAD_DIR}/query.stopped.run.json" "${OBSERVE_BAD_DIR}/query.stopped.cli.json" "$OBSERVE_BAD_EXEC_ID" full
+assert_json_expr "${OBSERVE_BAD_DIR}/stop.cli.json" 'doc["ok"] is True and doc["result"]["kind"] == "device.release.stop.manual"' "stop did not emit the expected control action result"
+assert_json_expr "${OBSERVE_BAD_DIR}/query.stopped.cli.json" 'doc["ok"] is True and doc["result"]["automation_state"] == "stopped" and doc["result"]["current_rollout_percent"] == 25' "stop changed rollout state instead of only stopping automation"
+run_control "${OBSERVE_BAD_DIR}/rerun.run.json" "${OBSERVE_BAD_DIR}/rerun.cli.json" rerun "$OBSERVE_BAD_EXEC_ID" cli_rerun
+RERUN_EXEC_ID="$(extract_json_value "${OBSERVE_BAD_DIR}/rerun.cli.json" "result.new_execution_id")"
+run_query "${OBSERVE_BAD_DIR}/rerun.query.run.json" "${OBSERVE_BAD_DIR}/rerun.query.cli.json" "$RERUN_EXEC_ID" full
+assert_json_expr "${OBSERVE_BAD_DIR}/rerun.cli.json" 'doc["ok"] is True and doc["result"]["kind"] == "device.release.rerun.manual" and doc["result"]["new_execution_id"] == "'"${RERUN_EXEC_ID}"'"' "rerun did not create a new execution id"
+assert_json_expr "${OBSERVE_BAD_DIR}/rerun.query.cli.json" 'doc["ok"] is True and doc["result"]["automation_state"] == "waiting_for_observation"' "rerun did not create a fresh execution at the next metrics waitpoint"
+
+HALT_DIR="${TMP_DIR}/metrics_halt"
+mkdir -p "$HALT_DIR"
+HALT_PLAN="${HALT_DIR}/plan.json"
+run_create "${HALT_DIR}/create.run.json" "${HALT_DIR}/create.cli.json" "$MOCK_PROD_PROVIDER" "$IOS_PACKAGE" "$HALT_PLAN" "$SLO_PROFILE" "300" "release.halt"
+run_release "${HALT_DIR}/run.run.json" "${HALT_DIR}/run.cli.json" "$HALT_PLAN" "$IOS_PACKAGE"
+HALT_EXEC_ID="$(extract_json_value "${HALT_DIR}/run.cli.json" "result.exec_id")"
+seed_metrics_snapshot "$HALT_EXEC_ID" "$METRICS_BAD"
+run_control "${HALT_DIR}/observe.run.json" "${HALT_DIR}/observe.cli.json" observe "$HALT_EXEC_ID" cli_observe_halt
+run_query "${HALT_DIR}/query.after.run.json" "${HALT_DIR}/query.after.cli.json" "$HALT_EXEC_ID" full
+assert_json_expr "${HALT_DIR}/query.after.cli.json" 'doc["ok"] is True and doc["result"]["status"] == "aborted" and doc["result"]["current_state"] == "halted" and doc["result"]["automation_state"] == "stopped" and doc["result"]["latest_eval_outcome"] == "fail"' "bad metrics snapshot did not halt the release"
+
+INCIDENT_DIR="${TMP_DIR}/device_incident_to_regression"
+mkdir -p "$INCIDENT_DIR" "${INCIDENT_DIR}/regress"
+INCIDENT_PLAN="${INCIDENT_DIR}/plan.json"
+run_create "${INCIDENT_DIR}/create.run.json" "${INCIDENT_DIR}/create.cli.json" "$MOCK_PROD_PROVIDER" "$IOS_PACKAGE" "$INCIDENT_PLAN"
+run_release "${INCIDENT_DIR}/run.run.json" "${INCIDENT_DIR}/run.cli.json" "$INCIDENT_PLAN" "$IOS_PACKAGE"
+INCIDENT_EXEC_ID="$(extract_json_value "${INCIDENT_DIR}/run.cli.json" "result.exec_id")"
+run_incident_capture "${INCIDENT_DIR}/capture.run.json" "${INCIDENT_DIR}/capture.cli.json" "$INCIDENT_EXEC_ID" "$TRACE_FIXTURE"
+INCIDENT_ID="$(extract_json_value "${INCIDENT_DIR}/capture.cli.json" "result.incident_id")"
+run_incident_list "${INCIDENT_DIR}/list.run.json" "${INCIDENT_DIR}/list.cli.json" "$INCIDENT_EXEC_ID"
+run_regress "${INCIDENT_DIR}/regress.run.json" "${INCIDENT_DIR}/regress.cli.json" "$INCIDENT_ID" "${INCIDENT_DIR}/regress" device_incident
+run_query "${INCIDENT_DIR}/query.run.json" "${INCIDENT_DIR}/query.cli.json" "$INCIDENT_EXEC_ID" full
+assert_json_expr "${INCIDENT_DIR}/capture.cli.json" 'doc["ok"] is True and doc["result"]["release_exec_id"] == "'"${INCIDENT_EXEC_ID}"'" and doc["result"]["device_release"]["release_exec_id"] == "'"${INCIDENT_EXEC_ID}"'"' "device incident capture did not bind to the release execution"
+assert_json_expr "${INCIDENT_DIR}/list.cli.json" 'doc["ok"] is True and any(item["incident_id"] == "'"${INCIDENT_ID}"'" for item in doc["result"]["items"])' "device incident list did not include the captured incident"
+assert_json_expr "${INCIDENT_DIR}/regress.cli.json" 'doc["ok"] is True and doc["result"]["tool"]["command"] == "device regress from-incident" and doc["result"]["incident_status_after"] == "generated" and len(doc["result"]["generated"]) >= 1' "device incident regression did not complete through the device regression path"
+assert_json_expr "${INCIDENT_DIR}/query.cli.json" 'doc["ok"] is True and any(item["incident_id"] == "'"${INCIDENT_ID}"'" and item["regression_status"] == "generated" for item in doc["result"]["linked_incidents"])' "device release query did not reflect the linked incident regression state"
 
 echo "ok: device release"

@@ -36,8 +36,8 @@
     "trace_id": "__ANY__",
     "status_code": 500,
     "decision_id": "__ANY__",
-    "regression_status": "__ANY__",
-    "regression_id": null,
+    "regression_status": "generated",
+    "regression_id": "__ANY__",
     "signature_status": "__ANY__",
     "bundle": {
       "kind": "lp.incident.bundle@0.1.0",
