@@ -33,6 +33,18 @@ struct DeviceTelemetryRecord {
     attrs: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DeviceReleaseTelemetryProfilePatch<'a> {
+    pub exec_id: &'a str,
+    pub plan_id: &'a str,
+    pub package_sha256: &'a str,
+    pub app_id: &'a str,
+    pub target: &'a str,
+    pub provider_kind: &'a str,
+    pub provider_lane: &'a str,
+    pub rollout_percent: Option<u64>,
+}
+
 pub(super) fn standard_device_release_event_classes() -> Vec<Value> {
     DEVICE_RELEASE_STANDARD_EVENT_CLASSES
         .iter()
@@ -42,14 +54,7 @@ pub(super) fn standard_device_release_event_classes() -> Vec<Value> {
 
 pub(super) fn patch_device_release_telemetry_profile(
     telemetry_doc: &Value,
-    exec_id: &str,
-    plan_id: &str,
-    package_sha256: &str,
-    app_id: &str,
-    target: &str,
-    provider_kind: &str,
-    provider_lane: &str,
-    rollout_percent: Option<u64>,
+    patch: DeviceReleaseTelemetryProfilePatch<'_>,
 ) -> Value {
     let mut patched = telemetry_doc.clone();
     let root = ensure_object(&mut patched);
@@ -68,16 +73,19 @@ pub(super) fn patch_device_release_telemetry_profile(
         *resource = json!({});
     }
     let resource_map = ensure_object(resource);
-    resource_map.insert("app_id".to_string(), json!(app_id));
-    resource_map.insert("target".to_string(), json!(target));
-    resource_map.insert("release_exec_id".to_string(), json!(exec_id));
-    resource_map.insert("release_plan_id".to_string(), json!(plan_id));
-    resource_map.insert("package_sha256".to_string(), json!(package_sha256));
-    resource_map.insert("provider_kind".to_string(), json!(provider_kind));
-    resource_map.insert("provider_lane".to_string(), json!(provider_lane));
+    resource_map.insert("app_id".to_string(), json!(patch.app_id));
+    resource_map.insert("target".to_string(), json!(patch.target));
+    resource_map.insert("release_exec_id".to_string(), json!(patch.exec_id));
+    resource_map.insert("release_plan_id".to_string(), json!(patch.plan_id));
+    resource_map.insert("package_sha256".to_string(), json!(patch.package_sha256));
+    resource_map.insert("provider_kind".to_string(), json!(patch.provider_kind));
+    resource_map.insert("provider_lane".to_string(), json!(patch.provider_lane));
     resource_map.insert(
         "rollout_percent".to_string(),
-        rollout_percent.map(Value::from).unwrap_or(Value::Null),
+        patch
+            .rollout_percent
+            .map(Value::from)
+            .unwrap_or(Value::Null),
     );
     patched
 }
@@ -377,7 +385,8 @@ fn is_permission_block(record: &DeviceTelemetryRecord) -> bool {
         .to_ascii_lowercase();
     let permission = attr_string(&record.attrs, "permission").unwrap_or_default();
     let body = record.body.clone().unwrap_or_default().to_ascii_lowercase();
-    !permission.is_empty() && (status == "denied" || body.contains("permission") && body.contains("denied"))
+    !permission.is_empty()
+        && (status == "denied" || body.contains("permission") && body.contains("denied"))
 }
 
 fn build_native_context_patch(records: &[DeviceTelemetryRecord]) -> Value {
@@ -385,25 +394,30 @@ fn build_native_context_patch(records: &[DeviceTelemetryRecord]) -> Value {
     let mut lifecycle_state = Value::Null;
     let mut connectivity_state = Value::Null;
     let mut breadcrumbs = Vec::new();
-    for record in records.iter().rev().take(8).collect::<Vec<_>>().into_iter().rev() {
-        if let Some(permission) = attr_string(&record.attrs, "permission") {
-            if let Some(status) = attr_string(&record.attrs, "status")
+    for record in records
+        .iter()
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
+        if let Some(permission) = attr_string(&record.attrs, "permission")
+            && let Some(status) = attr_string(&record.attrs, "status")
                 .or_else(|| attr_string(&record.attrs, "result"))
-            {
-                permission_state_snapshot.insert(permission, json!(status));
-            }
+        {
+            permission_state_snapshot.insert(permission, json!(status));
         }
         if record.class_name == "app.lifecycle" && lifecycle_state.is_null() {
             lifecycle_state = attr_string(&record.attrs, "state")
                 .map(Value::String)
                 .unwrap_or_else(|| json!(record.event_name.clone()));
         }
-        if connectivity_state.is_null() {
-            if let Some(state) = attr_string(&record.attrs, "connectivity_state")
+        if connectivity_state.is_null()
+            && let Some(state) = attr_string(&record.attrs, "connectivity_state")
                 .or_else(|| attr_string(&record.attrs, "network_state"))
-            {
-                connectivity_state = json!(state);
-            }
+        {
+            connectivity_state = json!(state);
         }
         let mut breadcrumb = json!({
             "ord": breadcrumbs.len() as u64,
@@ -502,14 +516,16 @@ mod tests {
                 },
                 "event_classes": ["release.lifecycle", "release.error"]
             }),
-            "lpdrexec_demo",
-            "lpdrplan_demo",
-            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-            "io.x07.demo.ios",
-            "ios",
-            "googleplay_v1",
-            "production",
-            Some(25),
+            DeviceReleaseTelemetryProfilePatch {
+                exec_id: "lpdrexec_demo",
+                plan_id: "lpdrplan_demo",
+                package_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                app_id: "io.x07.demo.ios",
+                target: "ios",
+                provider_kind: "googleplay_v1",
+                provider_lane: "production",
+                rollout_percent: Some(25),
+            },
         );
         assert_eq!(
             get_str(&patched, &["resource", "release_exec_id"]).as_deref(),
@@ -564,9 +580,11 @@ mod tests {
         assert!(classes.contains("native_bridge_timeout"));
         assert!(classes.contains("native_policy_violation"));
         assert!(classes.contains("native_host_crash"));
-        assert!(analysis
-            .incidents
-            .iter()
-            .all(|incident| incident.native_context_patch.is_object()));
+        assert!(
+            analysis
+                .incidents
+                .iter()
+                .all(|incident| incident.native_context_patch.is_object())
+        );
     }
 }

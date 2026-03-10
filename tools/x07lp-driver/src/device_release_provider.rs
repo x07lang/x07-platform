@@ -63,6 +63,13 @@ struct JsonHttpResponse {
     doc: Value,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct GooglePlayReleaseUpdate<'a> {
+    status: &'a str,
+    rollout_percent: Option<u64>,
+    message: &'a str,
+}
+
 pub(super) fn device_release_provider_mode(provider_doc: &Value) -> &'static str {
     if get_str(provider_doc, &["provider_kind"]).as_deref() == Some("mock_v1") {
         "mock"
@@ -544,9 +551,11 @@ fn apply_googleplay_device_release_op(
                 &track,
                 provider_doc,
                 exec_doc,
-                googleplay_release_status_for_percent(provider_doc, rollout_percent),
-                rollout_percent,
-                "started Google Play release",
+                GooglePlayReleaseUpdate {
+                    status: googleplay_release_status_for_percent(provider_doc, rollout_percent),
+                    rollout_percent,
+                    message: "started Google Play release",
+                },
             )
         }
         "rollout.set_percent" => {
@@ -560,9 +569,11 @@ fn apply_googleplay_device_release_op(
                 &track,
                 provider_doc,
                 exec_doc,
-                googleplay_release_status_for_percent(provider_doc, Some(percent)),
-                Some(percent),
-                &format!("updated Google Play rollout to {percent}%"),
+                GooglePlayReleaseUpdate {
+                    status: googleplay_release_status_for_percent(provider_doc, Some(percent)),
+                    rollout_percent: Some(percent),
+                    message: &format!("updated Google Play rollout to {percent}%"),
+                },
             )
         }
         "release.pause" => googleplay_update_release(
@@ -572,9 +583,11 @@ fn apply_googleplay_device_release_op(
             &track,
             provider_doc,
             exec_doc,
-            "halted",
-            device_release_current_percent(exec_doc),
-            "paused Google Play rollout",
+            GooglePlayReleaseUpdate {
+                status: "halted",
+                rollout_percent: device_release_current_percent(exec_doc),
+                message: "paused Google Play rollout",
+            },
         ),
         "release.resume" => {
             let percent = device_release_current_percent(exec_doc)
@@ -586,9 +599,11 @@ fn apply_googleplay_device_release_op(
                 &track,
                 provider_doc,
                 exec_doc,
-                googleplay_release_status_for_percent(provider_doc, percent),
-                percent,
-                "resumed Google Play rollout",
+                GooglePlayReleaseUpdate {
+                    status: googleplay_release_status_for_percent(provider_doc, percent),
+                    rollout_percent: percent,
+                    message: "resumed Google Play rollout",
+                },
             )
         }
         "release.complete" => googleplay_update_release(
@@ -598,9 +613,11 @@ fn apply_googleplay_device_release_op(
             &track,
             provider_doc,
             exec_doc,
-            "completed",
-            Some(100),
-            "completed Google Play rollout",
+            GooglePlayReleaseUpdate {
+                status: "completed",
+                rollout_percent: Some(100),
+                message: "completed Google Play rollout",
+            },
         ),
         "rollback.previous" => googleplay_rollback_previous(
             &base_url,
@@ -621,9 +638,7 @@ fn googleplay_update_release(
     track: &str,
     provider_doc: &Value,
     exec_doc: &Value,
-    status: &str,
-    rollout_percent: Option<u64>,
-    message: &str,
+    update: GooglePlayReleaseUpdate<'_>,
 ) -> Result<DeviceProviderStepOutcome> {
     let edit_id = googleplay_create_edit(base_url, access_token, package_name)?;
     let url = format!(
@@ -641,11 +656,11 @@ fn googleplay_update_release(
     let version_codes = googleplay_version_codes(provider_doc, exec_doc);
     let mut release = json!({
         "name": release_name,
-        "status": status,
+        "status": update.status,
         "versionCodes": version_codes,
     });
-    if let Some(percent) = rollout_percent
-        && status == "inProgress"
+    if let Some(percent) = update.rollout_percent
+        && update.status == "inProgress"
         && percent < 100
     {
         ensure_object(&mut release)
@@ -658,7 +673,7 @@ fn googleplay_update_release(
     let response = provider_request_json("PUT", &url, access_token, Some(&body))?;
     ensure_provider_success(&response, "PUT", &url)?;
     googleplay_commit_edit(base_url, access_token, package_name, &edit_id)?;
-    let current_state = match status {
+    let current_state = match update.status {
         "completed" if get_str(provider_doc, &["distribution_lane"]).as_deref() == Some("beta") => {
             "available"
         }
@@ -668,9 +683,9 @@ fn googleplay_update_release(
     };
     Ok(DeviceProviderStepOutcome {
         current_state: current_state.to_string(),
-        rollout_percent,
+        rollout_percent: update.rollout_percent,
         store_release_id: Some(format!("track:{track}")),
-        message: message.to_string(),
+        message: update.message.to_string(),
         evidence: json!({
             "provider_mode": "live",
             "edit_id": edit_id,

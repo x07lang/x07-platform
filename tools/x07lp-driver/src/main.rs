@@ -100,6 +100,8 @@ const REDACTED_HTTP_HEADER_NAMES: &[&str] = &[
     "x-api-key",
 ];
 
+type AppIncidentCountSummary = (u64, u64, Option<String>, u64);
+
 #[derive(Debug, Clone)]
 struct RemoteSlotDeployment {
     app_name: String,
@@ -870,7 +872,7 @@ fn load_pem_certificates(path: &Path) -> Result<Vec<Vec<u8>>> {
             .find(end)
             .ok_or_else(|| anyhow!("unterminated certificate PEM in {}", path.display()))?;
         let finish = start + end_rel + end.len();
-        certs.push(text[start..finish].as_bytes().to_vec());
+        certs.push(text.as_bytes()[start..finish].to_vec());
         offset = finish;
     }
     if certs.is_empty() {
@@ -1596,60 +1598,58 @@ fn materialize_pack_dir(
     fs::create_dir_all(out_dir)?;
     write_bytes(&out_dir.join("app.pack.json"), &manifest_raw)?;
     let mut specs: Vec<(String, String)> = Vec::new();
-    if let Some(bundle) = get_path(&manifest, &["bundle_manifest"]).and_then(Value::as_object) {
-        if let (Some(sha), Some(path)) = (
+    if let Some(bundle) = get_path(&manifest, &["bundle_manifest"]).and_then(Value::as_object)
+        && let (Some(sha), Some(path)) = (
             bundle.get("sha256").and_then(Value::as_str),
             bundle.get("path").and_then(Value::as_str),
-        ) {
-            specs.push((sha.to_string(), path.to_string()));
-            let bundle_bytes = load_cas_blob(state_dir, sha)?;
-            write_bytes(&out_dir.join(path), &bundle_bytes)?;
-            let bundle_doc: Value = serde_json::from_slice(&bundle_bytes)?;
-            if let Some(backend) =
-                get_path(&bundle_doc, &["backend", "artifact"]).and_then(Value::as_object)
-            {
-                if let (Some(bsha), Some(bpath)) = (
-                    backend.get("sha256").and_then(Value::as_str),
-                    backend.get("path").and_then(Value::as_str),
-                ) {
-                    specs.push((bsha.to_string(), bpath.to_string()));
-                }
-            }
-            if let Some(frontend) =
-                get_path(&bundle_doc, &["frontend", "artifacts"]).and_then(Value::as_array)
-            {
-                for artifact in frontend {
-                    if let Some(obj) = artifact.as_object() {
-                        if let (Some(sha), Some(path)) = (
-                            obj.get("sha256").and_then(Value::as_str),
-                            obj.get("path").and_then(Value::as_str),
-                        ) {
-                            specs.push((sha.to_string(), path.to_string()));
-                        }
-                    }
+        )
+    {
+        specs.push((sha.to_string(), path.to_string()));
+        let bundle_bytes = load_cas_blob(state_dir, sha)?;
+        write_bytes(&out_dir.join(path), &bundle_bytes)?;
+        let bundle_doc: Value = serde_json::from_slice(&bundle_bytes)?;
+        if let Some(backend) =
+            get_path(&bundle_doc, &["backend", "artifact"]).and_then(Value::as_object)
+            && let (Some(bsha), Some(bpath)) = (
+                backend.get("sha256").and_then(Value::as_str),
+                backend.get("path").and_then(Value::as_str),
+            )
+        {
+            specs.push((bsha.to_string(), bpath.to_string()));
+        }
+        if let Some(frontend) =
+            get_path(&bundle_doc, &["frontend", "artifacts"]).and_then(Value::as_array)
+        {
+            for artifact in frontend {
+                if let Some(obj) = artifact.as_object()
+                    && let (Some(sha), Some(path)) = (
+                        obj.get("sha256").and_then(Value::as_str),
+                        obj.get("path").and_then(Value::as_str),
+                    )
+                {
+                    specs.push((sha.to_string(), path.to_string()));
                 }
             }
         }
     }
     if let Some(component) =
         get_path(&manifest, &["backend", "component"]).and_then(Value::as_object)
-    {
-        if let (Some(sha), Some(path)) = (
+        && let (Some(sha), Some(path)) = (
             component.get("sha256").and_then(Value::as_str),
             component.get("path").and_then(Value::as_str),
-        ) {
-            specs.push((sha.to_string(), path.to_string()));
-        }
+        )
+    {
+        specs.push((sha.to_string(), path.to_string()));
     }
     if let Some(assets) = get_path(&manifest, &["assets"]).and_then(Value::as_array) {
         for asset in assets {
-            if let Some(file) = get_path(asset, &["file"]).and_then(Value::as_object) {
-                if let (Some(sha), Some(path)) = (
+            if let Some(file) = get_path(asset, &["file"]).and_then(Value::as_object)
+                && let (Some(sha), Some(path)) = (
                     file.get("sha256").and_then(Value::as_str),
                     file.get("path").and_then(Value::as_str),
-                ) {
-                    specs.push((sha.to_string(), path.to_string()));
-                }
+                )
+            {
+                specs.push((sha.to_string(), path.to_string()));
             }
         }
     }
@@ -1990,7 +1990,8 @@ fn publish_remote_component(
         "org.opencontainers.image.title".to_string(),
         format!("{app_id}-backend"),
     )]));
-    let manifest = OciImageManifest::build(&[image_layer.clone()], &config_obj, annotations);
+    let manifest =
+        OciImageManifest::build(std::slice::from_ref(&image_layer), &config_obj, annotations);
     let registry_base_url = remote_registry_base_url(&registry, Some(&oci_tls));
     let protocol = if registry_base_url.starts_with("http://") {
         ClientProtocol::Http
@@ -2454,12 +2455,11 @@ fn authority_host_port(raw: &str, default_port: u16) -> Option<(String, u16)> {
     if authority.is_empty() {
         return None;
     }
-    if let Some((host, port)) = authority.rsplit_once(':') {
-        if !host.is_empty()
-            && let Ok(port) = port.parse::<u16>()
-        {
-            return Some((host.to_string(), port));
-        }
+    if let Some((host, port)) = authority.rsplit_once(':')
+        && !host.is_empty()
+        && let Ok(port) = port.parse::<u16>()
+    {
+        return Some((host.to_string(), port));
     }
     Some((authority.to_string(), default_port))
 }
@@ -3390,6 +3390,7 @@ fn prepare_runtime_terminal_state(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_router_state(
     state_dir: &Path,
     exec_id: &str,
@@ -3503,6 +3504,7 @@ fn decision_record_ref(record: &Value) -> Value {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_decision_record(
     state_dir: &Path,
     seed: &str,
@@ -3590,6 +3592,7 @@ fn artifact_summary(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_exec_step(
     idx: usize,
     name: &str,
@@ -3620,6 +3623,7 @@ fn build_exec_step(
     step
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_device_release_step(
     idx: usize,
     name: &str,
@@ -4078,11 +4082,9 @@ fn sanitize_query_decision(decision: &Value, public_aliases: bool) -> Value {
                 .iter()
                 .map(|reason| {
                     let mut doc = reason.clone();
-                    if public_aliases {
-                        if let Some(code) = get_str(reason, &["code"]) {
-                            ensure_object(&mut doc)
-                                .insert("code".to_string(), json!(public_reason_code(&code)));
-                        }
+                    if public_aliases && let Some(code) = get_str(reason, &["code"]) {
+                        ensure_object(&mut doc)
+                            .insert("code".to_string(), json!(public_reason_code(&code)));
                     }
                     doc
                 })
@@ -4281,6 +4283,7 @@ fn build_execution_view(exec_doc: &Value, run_doc: &Value, state_dir: &Path) -> 
     execution
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_query_result(
     exec_doc: &Value,
     run_doc: &Value,
@@ -4613,23 +4616,21 @@ fn generated_plan_from_accepted(
             "--json".to_string(),
         ];
         let (tool, code, stdout, stderr) = run_wasm_tool_capture(&argv, Some(&cwd))?;
-        if code == 0 {
-            if let Ok(report) = serde_json::from_slice::<Value>(&stdout) {
-                if let Some(plan_manifest) = get_str(&report, &["result", "plan_manifest", "path"])
-                {
-                    let path = {
-                        let plan_path = PathBuf::from(plan_manifest);
-                        if plan_path.is_absolute() {
-                            plan_path
-                        } else {
-                            out_dir.join(plan_path)
-                        }
-                    };
-                    let bytes = fs::read(&path)?;
-                    let plan = normalize_plan(serde_json::from_slice(&bytes)?);
-                    return Ok((plan.clone(), canon_json_bytes(&plan)));
+        if code == 0
+            && let Ok(report) = serde_json::from_slice::<Value>(&stdout)
+            && let Some(plan_manifest) = get_str(&report, &["result", "plan_manifest", "path"])
+        {
+            let path = {
+                let plan_path = PathBuf::from(plan_manifest);
+                if plan_path.is_absolute() {
+                    plan_path
+                } else {
+                    out_dir.join(plan_path)
                 }
-            }
+            };
+            let bytes = fs::read(&path)?;
+            let plan = normalize_plan(serde_json::from_slice(&bytes)?);
+            return Ok((plan.clone(), canon_json_bytes(&plan)));
         }
         let stderr_msg = String::from_utf8_lossy(&stderr).trim().to_string();
         bail!(
@@ -4662,13 +4663,13 @@ fn push_decision(exec_doc: &mut Value, decision: Value, signature_status: Option
             "latest_decision_id".to_string(),
             decision.get("decision_id").cloned().unwrap_or(Value::Null),
         );
-        if let Some(status) = signature_status {
-            if status == "valid" {
-                meta.insert(
-                    "latest_signed_control_decision_id".to_string(),
-                    decision.get("decision_id").cloned().unwrap_or(Value::Null),
-                );
-            }
+        if let Some(status) = signature_status
+            && status == "valid"
+        {
+            meta.insert(
+                "latest_signed_control_decision_id".to_string(),
+                decision.get("decision_id").cloned().unwrap_or(Value::Null),
+            );
         }
     }
     if let Some(record) = decision.get("record").cloned() {
@@ -4756,7 +4757,7 @@ fn load_exec_docs(state_dir: &Path) -> Result<Vec<Value>> {
     Ok(docs)
 }
 
-fn newest_matching_exec<'a, F>(exec_docs: &'a [Value], predicate: F) -> Option<&'a Value>
+fn newest_matching_exec<F>(exec_docs: &[Value], predicate: F) -> Option<&Value>
 where
     F: Fn(&Value) -> bool,
 {
@@ -4821,10 +4822,11 @@ fn collect_exec_ids_for_target(
         let matches_env = environment
             .map(|wanted| get_str(&target, &["environment"]).as_deref() == Some(wanted))
             .unwrap_or(true);
-        if matches_app && matches_env {
-            if let Some(exec_id) = get_str(&exec_doc, &["exec_id"]) {
-                ids.push(exec_id);
-            }
+        if matches_app
+            && matches_env
+            && let Some(exec_id) = get_str(&exec_doc, &["exec_id"])
+        {
+            ids.push(exec_id);
         }
     }
     ids.sort();
@@ -5165,7 +5167,7 @@ fn insert_phasec_rows(
     state_dir: &Path,
     latest_heads: &BTreeMap<(String, String), (String, u64)>,
 ) -> Result<()> {
-    let mut app_incident_counts: BTreeMap<(String, String), (u64, u64, Option<String>, u64)> =
+    let mut app_incident_counts: BTreeMap<(String, String), AppIncidentCountSummary> =
         BTreeMap::new();
     for meta_path in read_incident_meta_paths(state_dir) {
         let meta = load_json(&meta_path)?;
@@ -5226,10 +5228,10 @@ fn insert_phasec_rows(
             .cloned()
             .unwrap_or_default();
         for key in ["request", "response", "trace"] {
-            if let Some(value) = get_path(&bundle, &[key]).cloned() {
-                if value.is_object() {
-                    refs.push(value);
-                }
+            if let Some(value) = get_path(&bundle, &[key]).cloned()
+                && value.is_object()
+            {
+                refs.push(value);
             }
         }
         for (ord, artifact) in refs.iter().enumerate() {
@@ -5455,16 +5457,16 @@ fn schema_public_id(schema: &Value) -> Option<String> {
 
 fn supported_schema_ids() -> Vec<String> {
     let mut ids = Vec::new();
-    if let Ok(index) = load_json(&contracts_schema_index_path()) {
-        if let Some(items) = index.get("schemas").and_then(Value::as_array) {
-            for item in items {
-                if let Some(path) = item.get("path").and_then(Value::as_str) {
-                    let schema_path = contracts_schema_dir().join(path);
-                    if let Ok(schema) = load_json(&schema_path) {
-                        if let Some(id) = schema_public_id(&schema) {
-                            ids.push(id);
-                        }
-                    }
+    if let Ok(index) = load_json(&contracts_schema_index_path())
+        && let Some(items) = index.get("schemas").and_then(Value::as_array)
+    {
+        for item in items {
+            if let Some(path) = item.get("path").and_then(Value::as_str) {
+                let schema_path = contracts_schema_dir().join(path);
+                if let Ok(schema) = load_json(&schema_path)
+                    && let Some(id) = schema_public_id(&schema)
+                {
+                    ids.push(id);
                 }
             }
         }
@@ -5511,9 +5513,9 @@ fn load_target_token(profile: &Value, name: &str) -> Result<String> {
 
 fn resolved_target_from_profile_doc(profile: &Value) -> Result<ResolvedTarget> {
     let name = get_str(profile, &["name"]).ok_or_else(|| anyhow!("missing target name"))?;
-    let base_url = get_str(&profile, &["base_url"]).ok_or_else(|| anyhow!("missing base_url"))?;
-    let (tls_mode, ca_bundle_path, pinned_spki_sha256) = tls_mode_from_profile(&profile)?;
-    let token = load_target_token(&profile, &name)?;
+    let base_url = get_str(profile, &["base_url"]).ok_or_else(|| anyhow!("missing base_url"))?;
+    let (tls_mode, ca_bundle_path, pinned_spki_sha256) = tls_mode_from_profile(profile)?;
+    let token = load_target_token(profile, &name)?;
     Ok(ResolvedTarget {
         name,
         base_url,
@@ -6167,17 +6169,18 @@ fn load_accept_ops_docs(
 fn collect_sha256_refs(value: &Value, out: &mut BTreeSet<String>) {
     match value {
         Value::Object(map) => {
-            if let Some(sha) = map.get("sha256").and_then(Value::as_str) {
-                if sha.len() == 64 && sha.chars().all(|ch| ch.is_ascii_hexdigit()) {
-                    out.insert(sha.to_string());
-                }
+            if let Some(sha) = map.get("sha256").and_then(Value::as_str)
+                && sha.len() == 64
+                && sha.chars().all(|ch| ch.is_ascii_hexdigit())
+            {
+                out.insert(sha.to_string());
             }
-            if let Some(store_uri) = map.get("store_uri").and_then(Value::as_str) {
-                if let Some(sha) = store_uri.strip_prefix("sha256:") {
-                    if sha.len() == 64 && sha.chars().all(|ch| ch.is_ascii_hexdigit()) {
-                        out.insert(sha.to_string());
-                    }
-                }
+            if let Some(store_uri) = map.get("store_uri").and_then(Value::as_str)
+                && let Some(sha) = store_uri.strip_prefix("sha256:")
+                && sha.len() == 64
+                && sha.chars().all(|ch| ch.is_ascii_hexdigit())
+            {
+                out.insert(sha.to_string());
             }
             for value in map.values() {
                 collect_sha256_refs(value, out);
@@ -6661,7 +6664,7 @@ fn command_adapter_conformance(args: AdapterConformanceArgs) -> Result<Value> {
         "ok": query_ok,
         "details": if query_ok { "remote full query returned a promoted deployment" } else { "remote full query did not return the expected promoted deployment" }
     }));
-    let incident_ok = read_incident_meta_paths(&state_dir).first().is_some();
+    let incident_ok = !read_incident_meta_paths(&state_dir).is_empty();
     scenarios.push(json!({
         "name": "remote_incident_capture",
         "ok": incident_ok,
@@ -6973,10 +6976,10 @@ fn remote_result_decision_ids(report: &Value) -> Vec<String> {
     if let Some(id) = get_str(report, &["result", "decision_id"]) {
         ids.push(id);
     }
-    if let Some(id) = get_str(report, &["result", "final_decision_id"]) {
-        if !ids.contains(&id) {
-            ids.push(id);
-        }
+    if let Some(id) = get_str(report, &["result", "final_decision_id"])
+        && !ids.contains(&id)
+    {
+        ids.push(id);
     }
     ids
 }
@@ -7403,19 +7406,18 @@ fn incident_target_artifact(meta: &Value) -> Value {
     if let Some(package_digest) = get_path(meta, &["device_release", "package_digest"])
         .cloned()
         .or_else(|| get_path(meta, &["package_digest"]).cloned())
+        && package_digest.is_object()
     {
-        if package_digest.is_object() {
-            let package_store_uri = get_str(&package_digest, &["sha256"])
-                .map(|sha| format!("file:device_release/package_sources/{sha}/package.manifest.json"))
-                .unwrap_or_else(|| "sha256:unknown".to_string());
-            return json!({
-                "kind": DEVICE_PACKAGE_MANIFEST_KIND,
-                "digest": package_digest,
-                "logical_name": "device.package.manifest.json",
-                "media_type": "application/json",
-                "store_uri": package_store_uri,
-            });
-        }
+        let package_store_uri = get_str(&package_digest, &["sha256"])
+            .map(|sha| format!("file:device_release/package_sources/{sha}/package.manifest.json"))
+            .unwrap_or_else(|| "sha256:unknown".to_string());
+        return json!({
+            "kind": DEVICE_PACKAGE_MANIFEST_KIND,
+            "digest": package_digest,
+            "logical_name": "device.package.manifest.json",
+            "media_type": "application/json",
+            "store_uri": package_store_uri,
+        });
     }
     json!({
         "kind": get_str(meta, &["artifact_kind"]).unwrap_or_else(|| "x07.app.pack@0.1.0".to_string()),
@@ -7561,10 +7563,12 @@ fn device_release_native_health_rollup_from_items(linked_incidents: &[Value]) ->
         let captured_unix_ms = get_u64(item, &["captured_unix_ms"]).unwrap_or(0);
         if captured_unix_ms >= latest_captured_unix_ms {
             latest_captured_unix_ms = captured_unix_ms;
-            latest_native_incident_id =
-                get_path(item, &["incident_id"]).cloned().unwrap_or(Value::Null);
-            latest_regression_id =
-                get_path(item, &["regression_id"]).cloned().unwrap_or(Value::Null);
+            latest_native_incident_id = get_path(item, &["incident_id"])
+                .cloned()
+                .unwrap_or(Value::Null);
+            latest_regression_id = get_path(item, &["regression_id"])
+                .cloned()
+                .unwrap_or(Value::Null);
             latest_regression_status = json!(
                 get_str(item, &["regression_status"])
                     .unwrap_or_else(|| "not_requested".to_string())
@@ -7810,6 +7814,7 @@ fn find_existing_incident_for_key(
     Ok(None)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_incident_result(
     state_dir: &Path,
     meta: &Value,
@@ -7893,13 +7898,12 @@ fn build_incident_result(
             ("meta".to_string(), meta.clone()),
         ]));
         if let Some(regression_id) = get_str(meta, &["regression_id"]) {
-            let regression_path = state_dir.join("regressions").join(format!("{regression_id}.json"));
+            let regression_path = state_dir
+                .join("regressions")
+                .join(format!("{regression_id}.json"));
             if regression_path.is_file() {
                 let regression_summary = load_json(&regression_path)?;
-                ensure_object(&mut result).insert(
-                    "regression".to_string(),
-                    regression_summary,
-                );
+                ensure_object(&mut result).insert("regression".to_string(), regression_summary);
             }
         }
     }
@@ -7920,6 +7924,7 @@ fn merge_object_values(base: &Value, patch: &Value) -> Value {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capture_incident_with_context(
     state_dir: &Path,
     context: &IncidentContext,
@@ -7986,7 +7991,7 @@ fn capture_incident_with_context(
     let mut response_ref = Value::Null;
     let mut trace_ref = Value::Null;
     if let Some((_, bytes)) = request_env.as_ref() {
-        write_bytes(&incident_dir.join("request.envelope.json"), &bytes)?;
+        write_bytes(&incident_dir.join("request.envelope.json"), bytes)?;
         request_ref = named_file_artifact(
             &format!(
                 "incidents/{}/{}/{}/request.envelope.json",
@@ -7994,7 +7999,7 @@ fn capture_incident_with_context(
             ),
             "x07.http.request.envelope@0.1.0",
             "application/json",
-            &bytes,
+            bytes,
         );
         refs.push(json!({
             "kind": "x07.http.request.envelope@0.1.0",
@@ -8003,7 +8008,7 @@ fn capture_incident_with_context(
         }));
     }
     if let Some((_, bytes)) = response_env.as_ref() {
-        write_bytes(&incident_dir.join("response.envelope.json"), &bytes)?;
+        write_bytes(&incident_dir.join("response.envelope.json"), bytes)?;
         response_ref = named_file_artifact(
             &format!(
                 "incidents/{}/{}/{}/response.envelope.json",
@@ -8011,7 +8016,7 @@ fn capture_incident_with_context(
             ),
             "x07.http.response.envelope@0.1.0",
             "application/json",
-            &bytes,
+            bytes,
         );
         refs.push(json!({
             "kind": "x07.http.response.envelope@0.1.0",
@@ -8131,6 +8136,7 @@ fn capture_incident_with_context(
     Ok((meta_doc, bundle, incident_dir))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capture_incident_impl(
     state_dir: &Path,
     exec_doc: &mut Value,
@@ -8184,6 +8190,7 @@ fn capture_incident_impl(
     Ok((meta_doc, bundle, incident_dir))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capture_device_release_incident_impl(
     state_dir: &Path,
     exec_doc: &mut Value,
@@ -8222,6 +8229,7 @@ fn capture_device_release_incident_impl(
     Ok((meta_doc, bundle, incident_dir))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_control_action_result(
     action_id: &str,
     kind: &str,
@@ -8796,7 +8804,10 @@ fn device_native_release_metadata(
 ) -> Result<(Value, Value, Vec<Value>, Vec<Value>)> {
     let package_manifest_bytes = canon_json_bytes(package_doc);
     let manifest_sha256 = normalize_sha256_text(
-        get_str(package_report_doc, &["result", "package_manifest", "sha256"]),
+        get_str(
+            package_report_doc,
+            &["result", "package_manifest", "sha256"],
+        ),
         Some(&package_manifest_bytes),
     );
     let capabilities_doc = load_device_package_sidecar(
@@ -8837,7 +8848,10 @@ fn device_native_release_metadata(
     if !missing_classes.is_empty() {
         errors.push(native_readiness_item(
             "LP_DEVICE_RELEASE_TELEMETRY_CLASSES_MISSING",
-            format!("missing required telemetry classes: {}", missing_classes.join(", ")),
+            format!(
+                "missing required telemetry classes: {}",
+                missing_classes.join(", ")
+            ),
         ));
     }
     let permissions = device_permission_declarations(&capabilities_doc);
@@ -8856,7 +8870,8 @@ fn device_native_release_metadata(
     let existing_capabilities = get_path(&report_native_summary, &["capabilities"]).cloned();
     let existing_permissions =
         get_path(&report_native_summary, &["permission_declarations"]).cloned();
-    let existing_telemetry_classes = get_path(&report_native_summary, &["telemetry_classes"]).cloned();
+    let existing_telemetry_classes =
+        get_path(&report_native_summary, &["telemetry_classes"]).cloned();
     let mut native_summary = if report_native_summary.is_object() {
         report_native_summary
     } else {
@@ -8879,13 +8894,11 @@ fn device_native_release_metadata(
     );
     native_summary_map.insert(
         "permission_declarations".to_string(),
-        existing_permissions
-            .unwrap_or_else(|| Value::Array(permissions.clone())),
+        existing_permissions.unwrap_or_else(|| Value::Array(permissions.clone())),
     );
     native_summary_map.insert(
         "telemetry_classes".to_string(),
-        existing_telemetry_classes
-            .unwrap_or_else(|| Value::Array(telemetry_class_values.clone())),
+        existing_telemetry_classes.unwrap_or_else(|| Value::Array(telemetry_class_values.clone())),
     );
 
     let mut release_readiness = if report_release_readiness.is_object() {
@@ -8910,16 +8923,18 @@ fn device_native_release_metadata(
     );
     readiness_map.insert("warnings".to_string(), Value::Array(warnings.clone()));
     readiness_map.insert("errors".to_string(), Value::Array(errors.clone()));
-    native_summary_map.insert(
-        "release_readiness".to_string(),
-        release_readiness.clone(),
-    );
+    native_summary_map.insert("release_readiness".to_string(), release_readiness.clone());
     Ok((native_summary, release_readiness, warnings, errors))
 }
 
 fn device_release_readiness_status(plan_or_exec: &Value) -> String {
     get_str(plan_or_exec, &["release_readiness", "status"])
-        .or_else(|| get_str(plan_or_exec, &["native_summary", "release_readiness", "status"]))
+        .or_else(|| {
+            get_str(
+                plan_or_exec,
+                &["native_summary", "release_readiness", "status"],
+            )
+        })
         .unwrap_or_else(|| "unknown".to_string())
 }
 
@@ -8949,10 +8964,8 @@ fn device_release_native_health_rollup(exec_doc: &Value) -> Value {
                 if let Some(classification) = get_str(&item, &["classification"])
                     .and_then(|value| canonical_native_classification(&value, &reason))
                 {
-                    ensure_object(&mut item).insert(
-                        "native_classification".to_string(),
-                        json!(classification),
-                    );
+                    ensure_object(&mut item)
+                        .insert("native_classification".to_string(), json!(classification));
                 }
             }
             item
@@ -9828,14 +9841,16 @@ fn stage_device_release_package_for_exec(
     let telemetry_doc = load_json(&stage_telemetry_path)?;
     let patched_telemetry_doc = device_release_telemetry::patch_device_release_telemetry_profile(
         &telemetry_doc,
-        exec_id,
-        &get_str(plan_doc, &["plan_id"]).unwrap_or_default(),
-        &source_sha,
-        &get_str(plan_doc, &["app", "app_id"]).unwrap_or_default(),
-        &get_str(provider_doc, &["target"]).unwrap_or_default(),
-        &get_str(provider_doc, &["provider_kind"]).unwrap_or_default(),
-        &get_str(provider_doc, &["distribution_lane"]).unwrap_or_default(),
-        device_release_staged_rollout_percent(provider_doc),
+        device_release_telemetry::DeviceReleaseTelemetryProfilePatch {
+            exec_id,
+            plan_id: &get_str(plan_doc, &["plan_id"]).unwrap_or_default(),
+            package_sha256: &source_sha,
+            app_id: &get_str(plan_doc, &["app", "app_id"]).unwrap_or_default(),
+            target: &get_str(provider_doc, &["target"]).unwrap_or_default(),
+            provider_kind: &get_str(provider_doc, &["provider_kind"]).unwrap_or_default(),
+            provider_lane: &get_str(provider_doc, &["distribution_lane"]).unwrap_or_default(),
+            rollout_percent: device_release_staged_rollout_percent(provider_doc),
+        },
     );
     let telemetry_bytes = write_json(&stage_telemetry_path, &patched_telemetry_doc)?;
     if let Some(telemetry_profile) = ensure_object(&mut stage_manifest_doc)
@@ -9874,10 +9889,10 @@ fn device_release_decision_ids(exec_doc: &Value) -> Vec<Value> {
             .into_iter()
             .flatten()
         {
-            if let Some(decision_id) = decision_id.as_str() {
-                if seen.insert(decision_id.to_string()) {
-                    ids.push(json!(decision_id));
-                }
+            if let Some(decision_id) = decision_id.as_str()
+                && seen.insert(decision_id.to_string())
+            {
+                ids.push(json!(decision_id));
             }
         }
     }
@@ -10389,7 +10404,9 @@ fn command_device_release_run(args: DeviceReleaseRunArgs) -> Result<Value> {
     );
     exec_meta.insert(
         "package_report".to_string(),
-        get_path(&plan_doc, &["package_report"]).cloned().unwrap_or(Value::Null),
+        get_path(&plan_doc, &["package_report"])
+            .cloned()
+            .unwrap_or(Value::Null),
     );
     exec_meta.insert("current_state".to_string(), json!("draft"));
     exec_meta.insert("current_rollout_percent".to_string(), Value::Null);
@@ -10415,24 +10432,34 @@ fn command_device_release_run(args: DeviceReleaseRunArgs) -> Result<Value> {
     exec_meta.insert("decisions".to_string(), json!([]));
     exec_meta.insert(
         "app".to_string(),
-        get_path(&plan_doc, &["app"]).cloned().unwrap_or_else(|| json!({})),
+        get_path(&plan_doc, &["app"])
+            .cloned()
+            .unwrap_or_else(|| json!({})),
     );
     exec_meta.insert("capabilities".to_string(), capabilities);
     exec_meta.insert(
         "native_summary".to_string(),
-        get_path(&plan_doc, &["native_summary"]).cloned().unwrap_or_else(|| json!({})),
+        get_path(&plan_doc, &["native_summary"])
+            .cloned()
+            .unwrap_or_else(|| json!({})),
     );
     exec_meta.insert(
         "release_readiness".to_string(),
-        get_path(&plan_doc, &["release_readiness"]).cloned().unwrap_or_else(|| json!({})),
+        get_path(&plan_doc, &["release_readiness"])
+            .cloned()
+            .unwrap_or_else(|| json!({})),
     );
     exec_meta.insert(
         "native_validation_warnings".to_string(),
-        get_path(&plan_doc, &["native_validation_warnings"]).cloned().unwrap_or_else(|| json!([])),
+        get_path(&plan_doc, &["native_validation_warnings"])
+            .cloned()
+            .unwrap_or_else(|| json!([])),
     );
     exec_meta.insert(
         "native_validation_errors".to_string(),
-        get_path(&plan_doc, &["native_validation_errors"]).cloned().unwrap_or_else(|| json!([])),
+        get_path(&plan_doc, &["native_validation_errors"])
+            .cloned()
+            .unwrap_or_else(|| json!([])),
     );
     exec_meta.insert(
         "source_package_manifest_path".to_string(),
@@ -10530,25 +10557,25 @@ fn resolve_device_release_exec_id(
         let meta = get_path(&exec_doc, &["meta"])
             .cloned()
             .unwrap_or_else(|| json!({}));
-        if let Some(app_id) = args.app_id.as_deref() {
-            if get_str(&meta, &["app", "app_id"]).as_deref() != Some(app_id) {
-                continue;
-            }
+        if let Some(app_id) = args.app_id.as_deref()
+            && get_str(&meta, &["app", "app_id"]).as_deref() != Some(app_id)
+        {
+            continue;
         }
-        if let Some(provider_id) = args.provider_id.as_deref() {
-            if get_str(&meta, &["provider_id"]).as_deref() != Some(provider_id) {
-                continue;
-            }
+        if let Some(provider_id) = args.provider_id.as_deref()
+            && get_str(&meta, &["provider_id"]).as_deref() != Some(provider_id)
+        {
+            continue;
         }
-        if let Some(lane) = args.distribution_lane.as_deref() {
-            if get_str(&meta, &["distribution_lane"]).as_deref() != Some(lane) {
-                continue;
-            }
+        if let Some(lane) = args.distribution_lane.as_deref()
+            && get_str(&meta, &["distribution_lane"]).as_deref() != Some(lane)
+        {
+            continue;
         }
-        if let Some(target) = args.target.as_deref() {
-            if get_str(&meta, &["target"]).as_deref() != Some(target) {
-                continue;
-            }
+        if let Some(target) = args.target.as_deref()
+            && get_str(&meta, &["target"]).as_deref() != Some(target)
+        {
+            continue;
         }
         let updated = get_u64(&meta, &["updated_unix_ms"]).unwrap_or(0);
         let exec_id = get_str(&exec_doc, &["exec_id"]).unwrap_or_default();
@@ -10919,7 +10946,9 @@ fn command_device_release_rerun(args: DeviceReleaseRerunArgs) -> Result<Value> {
     new_exec_meta.insert("decisions".to_string(), json!([]));
     new_exec_meta.insert(
         "app".to_string(),
-        get_path(&plan_doc, &["app"]).cloned().unwrap_or_else(|| json!({})),
+        get_path(&plan_doc, &["app"])
+            .cloned()
+            .unwrap_or_else(|| json!({})),
     );
     new_exec_meta.insert(
         "capabilities".to_string(),
@@ -10929,23 +10958,33 @@ fn command_device_release_rerun(args: DeviceReleaseRerunArgs) -> Result<Value> {
     );
     new_exec_meta.insert(
         "package_report".to_string(),
-        get_path(&plan_doc, &["package_report"]).cloned().unwrap_or(Value::Null),
+        get_path(&plan_doc, &["package_report"])
+            .cloned()
+            .unwrap_or(Value::Null),
     );
     new_exec_meta.insert(
         "native_summary".to_string(),
-        get_path(&plan_doc, &["native_summary"]).cloned().unwrap_or_else(|| json!({})),
+        get_path(&plan_doc, &["native_summary"])
+            .cloned()
+            .unwrap_or_else(|| json!({})),
     );
     new_exec_meta.insert(
         "release_readiness".to_string(),
-        get_path(&plan_doc, &["release_readiness"]).cloned().unwrap_or_else(|| json!({})),
+        get_path(&plan_doc, &["release_readiness"])
+            .cloned()
+            .unwrap_or_else(|| json!({})),
     );
     new_exec_meta.insert(
         "native_validation_warnings".to_string(),
-        get_path(&plan_doc, &["native_validation_warnings"]).cloned().unwrap_or_else(|| json!([])),
+        get_path(&plan_doc, &["native_validation_warnings"])
+            .cloned()
+            .unwrap_or_else(|| json!([])),
     );
     new_exec_meta.insert(
         "native_validation_errors".to_string(),
-        get_path(&plan_doc, &["native_validation_errors"]).cloned().unwrap_or_else(|| json!([])),
+        get_path(&plan_doc, &["native_validation_errors"])
+            .cloned()
+            .unwrap_or_else(|| json!([])),
     );
     new_exec_meta.insert(
         "source_package_manifest_path".to_string(),
@@ -12883,7 +12922,9 @@ fn command_incident_list_state(args: IncidentListArgs) -> Result<Value> {
         let matches_native_classification = args
             .native_classification
             .as_ref()
-            .map(|value| get_str(&meta, &["native_classification"]).as_deref() == Some(value.as_str()))
+            .map(|value| {
+                get_str(&meta, &["native_classification"]).as_deref() == Some(value.as_str())
+            })
             .unwrap_or(true);
         let matches_status = args
             .status
@@ -14153,13 +14194,13 @@ fn persist_remote_accept_docs(
     let _ = write_json(&run_path(state_dir, &run_id), &rewritten_run)?;
     let _ = write_json(&exec_path(state_dir, &exec_id), &rewritten_exec)?;
     let _ = write_json(&decision_path(state_dir, &decision_id), &rewritten_decision)?;
-    if let Some(change_doc) = change_doc {
-        if let Some(change_id) = get_str(change_doc, &["change_id"]) {
-            let _ = write_json(
-                &state_dir.join("changes").join(format!("{change_id}.json")),
-                change_doc,
-            )?;
-        }
+    if let Some(change_doc) = change_doc
+        && let Some(change_id) = get_str(change_doc, &["change_id"])
+    {
+        let _ = write_json(
+            &state_dir.join("changes").join(format!("{change_id}.json")),
+            change_doc,
+        )?;
     }
     Ok((run_id, exec_id, decision_id))
 }
@@ -14356,10 +14397,10 @@ fn read_remote_stream_items(
                 continue;
             }
             let item = serde_json::from_str::<Value>(&line).context("parse remote stream line")?;
-            if let Some(slot) = slot {
-                if get_str(&item, &["slot"]).as_deref() != Some(slot) {
-                    continue;
-                }
+            if let Some(slot) = slot
+                && get_str(&item, &["slot"]).as_deref() != Some(slot)
+            {
+                continue;
             }
             items.push(item);
         }
@@ -15347,37 +15388,37 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
             break;
         }
         buffer.extend_from_slice(&chunk[..read]);
-        if header_end.is_none() {
-            if let Some(pos) = find_bytes(&buffer, b"\r\n\r\n") {
-                header_end = Some(pos + 4);
-                content_length = parse_content_length(&buffer[..pos + 4])?;
-            }
+        if header_end.is_none()
+            && let Some(pos) = find_bytes(&buffer, b"\r\n\r\n")
+        {
+            header_end = Some(pos + 4);
+            content_length = parse_content_length(&buffer[..pos + 4])?;
         }
-        if let Some(end) = header_end {
-            if buffer.len() >= end + content_length {
-                let head = std::str::from_utf8(&buffer[..end]).context("decode request head")?;
-                let mut lines = head.lines();
-                let mut parts = lines.next().unwrap_or_default().split_whitespace();
-                let method = parts.next().unwrap_or_default().to_string();
-                let target = parts.next().unwrap_or("/");
-                let (path, query) = match target.split_once('?') {
-                    Some((path, query)) => (path.to_string(), parse_query_string(query)),
-                    None => (target.to_string(), BTreeMap::new()),
-                };
-                let mut headers = BTreeMap::new();
-                for line in lines {
-                    if let Some((name, value)) = line.split_once(':') {
-                        headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
-                    }
+        if let Some(end) = header_end
+            && buffer.len() >= end + content_length
+        {
+            let head = std::str::from_utf8(&buffer[..end]).context("decode request head")?;
+            let mut lines = head.lines();
+            let mut parts = lines.next().unwrap_or_default().split_whitespace();
+            let method = parts.next().unwrap_or_default().to_string();
+            let target = parts.next().unwrap_or("/");
+            let (path, query) = match target.split_once('?') {
+                Some((path, query)) => (path.to_string(), parse_query_string(query)),
+                None => (target.to_string(), BTreeMap::new()),
+            };
+            let mut headers = BTreeMap::new();
+            for line in lines {
+                if let Some((name, value)) = line.split_once(':') {
+                    headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
                 }
-                return Ok(HttpRequest {
-                    method,
-                    path,
-                    query,
-                    headers,
-                    body: buffer[end..end + content_length].to_vec(),
-                });
             }
+            return Ok(HttpRequest {
+                method,
+                path,
+                query,
+                headers,
+                body: buffer[end..end + content_length].to_vec(),
+            });
         }
         if buffer.len() > 1_048_576 {
             bail!("request too large");
@@ -15402,13 +15443,13 @@ fn parse_content_length(head: &[u8]) -> Result<usize> {
     let head = std::str::from_utf8(head).context("decode request headers")?;
     for line in head.lines() {
         let lower = line.to_ascii_lowercase();
-        if let Some((_, value)) = lower.split_once(':') {
-            if lower.starts_with("content-length:") {
-                return value
-                    .trim()
-                    .parse::<usize>()
-                    .context("parse content-length");
-            }
+        if let Some((_, value)) = lower.split_once(':')
+            && lower.starts_with("content-length:")
+        {
+            return value
+                .trim()
+                .parse::<usize>()
+                .context("parse content-length");
         }
     }
     Ok(0)
