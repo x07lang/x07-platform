@@ -1,0 +1,28 @@
+{
+  "schema_version": "lp.remote.fixture.index.internal@0.1.0",
+  "fixtures": [
+    {
+      "name": "remote_promote",
+      "plan": "spec/fixtures/remote-oss/remote_promote/deploy.plan.json",
+      "dir": "spec/fixtures/remote-oss/remote_promote"
+    },
+    {
+      "name": "remote_query",
+      "alias_of": "remote_promote"
+    },
+    {
+      "name": "remote_query_index_rebuild",
+      "alias_of": "remote_promote"
+    },
+    {
+      "name": "remote_pause_rerun",
+      "plan": "spec/fixtures/remote-oss/remote_pause_rerun/deploy.plan.json",
+      "dir": "spec/fixtures/remote-oss/remote_pause_rerun"
+    },
+    {
+      "name": "remote_rollback",
+      "plan": "spec/fixtures/remote-oss/remote_rollback/deploy.plan.json",
+      "dir": "spec/fixtures/remote-oss/remote_rollback"
+    }
+  ]
+}

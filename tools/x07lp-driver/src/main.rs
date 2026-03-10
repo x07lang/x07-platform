@@ -40,6 +40,10 @@ use wasmcloud_control_interface::{
 };
 use x509_parser::prelude::*;
 
+mod device_release_provider;
+mod device_release_telemetry;
+mod remote_fixture_manifest;
+
 const DEFAULT_STATE_DIR: &str = "out/x07lp_state";
 const DEFAULT_UI_ADDR: &str = "127.0.0.1:17090";
 const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -8066,6 +8070,26 @@ fn device_release_provider_path(state_dir: &Path, provider_id: &str) -> PathBuf 
         .join(format!("{provider_id}.json"))
 }
 
+fn device_release_source_package_dir(state_dir: &Path, sha256: &str) -> PathBuf {
+    device_release_root_dir(state_dir)
+        .join("package_sources")
+        .join(sha256)
+}
+
+fn device_release_source_package_manifest_path(state_dir: &Path, sha256: &str) -> PathBuf {
+    device_release_source_package_dir(state_dir, sha256).join("package.manifest.json")
+}
+
+fn device_release_staged_package_dir(state_dir: &Path, exec_id: &str) -> PathBuf {
+    device_release_root_dir(state_dir)
+        .join("packages")
+        .join(exec_id)
+}
+
+fn device_release_staged_package_manifest_path(state_dir: &Path, exec_id: &str) -> PathBuf {
+    device_release_staged_package_dir(state_dir, exec_id).join("device.package.manifest.json")
+}
+
 fn device_release_package_path(state_dir: &Path, sha256: &str) -> PathBuf {
     device_release_root_dir(state_dir)
         .join("packages")
@@ -8115,6 +8139,10 @@ fn device_release_metrics_dir(state_dir: &Path, exec_id: &str) -> PathBuf {
     device_release_root_dir(state_dir)
         .join("telemetry")
         .join(exec_id)
+}
+
+fn device_release_otlp_export_path(state_dir: &Path, exec_id: &str, analysis_seq: u64) -> PathBuf {
+    device_release_metrics_dir(state_dir, exec_id).join(format!("analysis.{analysis_seq}.jsonl"))
 }
 
 fn load_device_release_exec(state_dir: &Path, exec_id: &str) -> Result<Value> {
@@ -8181,27 +8209,6 @@ fn device_release_collect_artifacts(exec_doc: &Value) -> Vec<Value> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default()
-}
-
-fn find_device_release_metrics_snapshot(
-    state_dir: &Path,
-    exec_id: &str,
-) -> Result<Option<PathBuf>> {
-    let dir = device_release_metrics_dir(state_dir, exec_id);
-    if !dir.exists() {
-        return Ok(None);
-    }
-    let mut paths = Vec::new();
-    for entry in fs::read_dir(&dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(OsStr::to_str) != Some("json") {
-            continue;
-        }
-        paths.push(path);
-    }
-    paths.sort();
-    Ok(paths.into_iter().next())
 }
 
 fn device_release_step_outcome(step_doc: &Value) -> String {
@@ -8583,13 +8590,7 @@ fn device_provider_live_enabled() -> bool {
 }
 
 fn device_release_provider_mode(provider_doc: &Value) -> &'static str {
-    if get_str(provider_doc, &["provider_kind"]).as_deref() == Some("mock_v1") {
-        "mock"
-    } else if device_provider_live_enabled() {
-        "live_requested"
-    } else {
-        "fixture"
-    }
+    device_release_provider::device_release_provider_mode(provider_doc)
 }
 
 fn device_release_initial_percent(provider_doc: &Value) -> u64 {
@@ -8600,80 +8601,19 @@ fn device_release_initial_percent(provider_doc: &Value) -> u64 {
 }
 
 fn apply_device_release_provider_op(
+    state_dir: &Path,
     provider_doc: &Value,
     exec_doc: &Value,
     step_doc: &Value,
     exec_id: &str,
-) -> Result<(String, Option<u64>, Option<String>, String)> {
-    let provider_kind = get_str(provider_doc, &["provider_kind"])
-        .ok_or_else(|| anyhow!("provider profile missing provider_kind"))?;
-    let distribution_lane = get_str(provider_doc, &["distribution_lane"])
-        .ok_or_else(|| anyhow!("provider profile missing distribution_lane"))?;
-    let op = get_str(step_doc, &["op"]).ok_or_else(|| anyhow!("step missing op"))?;
-    let current_percent = device_release_current_percent(exec_doc);
-    let current_state = device_release_state(exec_doc);
-    let store_release_id =
-        device_release_store_release_id(exec_doc).or_else(|| Some(format!("store-{exec_id}")));
-    let outcome = match op.as_str() {
-        "release.start" => {
-            if distribution_lane == "beta" {
-                (
-                    "available".to_string(),
-                    Some(100),
-                    "store release started on beta lane".to_string(),
-                )
-            } else if provider_kind == "appstoreconnect_v1" {
-                (
-                    "in_progress".to_string(),
-                    None,
-                    "started phased production release".to_string(),
-                )
-            } else {
-                let initial = device_release_initial_percent(provider_doc);
-                (
-                    "in_progress".to_string(),
-                    Some(initial),
-                    format!("started staged production release at {initial}%"),
-                )
-            }
-        }
-        "rollout.set_percent" => {
-            let percent = get_u64(step_doc, &["percent"])
-                .ok_or_else(|| anyhow!("rollout.set_percent requires percent"))?
-                .min(100);
-            (
-                "in_progress".to_string(),
-                Some(percent),
-                format!("updated staged rollout to {percent}%"),
-            )
-        }
-        "release.pause" => (
-            "paused".to_string(),
-            current_percent,
-            "paused device release".to_string(),
-        ),
-        "release.resume" => (
-            if current_state == "available" {
-                "available".to_string()
-            } else {
-                "in_progress".to_string()
-            },
-            current_percent,
-            "resumed device release".to_string(),
-        ),
-        "release.complete" => (
-            "completed".to_string(),
-            Some(100),
-            "completed device release rollout".to_string(),
-        ),
-        "rollback.previous" => (
-            "rolled_back".to_string(),
-            Some(0),
-            "rolled back to previous store release".to_string(),
-        ),
-        other => bail!("unsupported device release op={other}"),
-    };
-    Ok((outcome.0, outcome.1, store_release_id, outcome.2))
+) -> Result<device_release_provider::DeviceProviderStepOutcome> {
+    device_release_provider::apply_device_release_provider_op(
+        state_dir,
+        provider_doc,
+        exec_doc,
+        step_doc,
+        exec_id,
+    )
 }
 
 fn resolve_device_release_slo_profile_path(state_dir: &Path, step_doc: &Value) -> Result<PathBuf> {
@@ -8696,10 +8636,12 @@ fn upsert_device_release_step(exec_doc: &mut Value, step_doc: Value) {
     }
 }
 
-fn device_release_metrics_snapshot_for_next_analysis(
+fn materialize_device_release_metrics_snapshot(
     state_dir: &Path,
     exec_doc: &Value,
-) -> Result<Option<PathBuf>> {
+    plan_doc: &Value,
+    provider_doc: &Value,
+) -> Result<Option<(PathBuf, device_release_telemetry::DeviceTelemetryAnalysis)>> {
     let exec_id =
         get_str(exec_doc, &["exec_id"]).ok_or_else(|| anyhow!("missing device release exec_id"))?;
     let dir = device_release_metrics_dir(state_dir, &exec_id);
@@ -8707,11 +8649,26 @@ fn device_release_metrics_snapshot_for_next_analysis(
         return Ok(None);
     }
     let next_seq = get_u64(exec_doc, &["meta", "analysis_seq"]).unwrap_or(0) + 1;
-    let preferred = dir.join(format!("analysis.{next_seq}.json"));
-    if preferred.is_file() {
-        return Ok(Some(preferred));
-    }
-    find_device_release_metrics_snapshot(state_dir, &exec_id)
+    let preferred = device_release_otlp_export_path(state_dir, &exec_id, next_seq);
+    let export_path = if preferred.is_file() {
+        preferred
+    } else {
+        let fallback = dir.join("otlp.jsonl");
+        if fallback.is_file() {
+            fallback
+        } else {
+            return Ok(None);
+        }
+    };
+    let analysis = device_release_telemetry::analyze_device_release_otlp_export(
+        &export_path,
+        exec_doc,
+        provider_doc,
+    )?;
+    let snapshot_path = dir.join(format!("analysis.{next_seq}.json"));
+    let _ = write_json(&snapshot_path, &analysis.snapshot)?;
+    let _ = plan_doc;
+    Ok(Some((snapshot_path, analysis)))
 }
 
 fn advance_device_release_execution(
@@ -8764,13 +8721,18 @@ fn advance_device_release_execution(
                 );
                 return Ok(());
             }
-            let Some(metrics_path) =
-                device_release_metrics_snapshot_for_next_analysis(state_dir, exec_doc)?
+            let Some((metrics_path, telemetry_analysis)) =
+                materialize_device_release_metrics_snapshot(
+                    state_dir,
+                    exec_doc,
+                    plan_doc,
+                    provider_doc,
+                )?
             else {
                 bail!("missing metrics snapshot for device release observe");
             };
             let slo_profile_path = resolve_device_release_slo_profile_path(state_dir, step_doc)?;
-            let (decision_value, slo_report) =
+            let (mut decision_value, slo_report) =
                 run_slo_eval(Some(&slo_profile_path), &metrics_path)?;
             let metrics_bytes = fs::read(&metrics_path)?;
             let mut metrics_raw = cas_put(
@@ -8800,11 +8762,52 @@ fn advance_device_release_execution(
             let slo_artifact = artifact_summary("slo_eval_report", &slo_raw, 0, Some(&slo_kind));
             push_artifact(exec_doc, metrics_artifact.clone());
             push_artifact(exec_doc, slo_artifact.clone());
-            let (decision_outcome, reason_code) = match decision_value.as_str() {
-                "promote" => ("allow", "LP_DEVICE_RELEASE_SLO_PROMOTE"),
-                "rollback" => ("deny", "LP_DEVICE_RELEASE_SLO_FAIL"),
-                _ => ("error", "LP_DEVICE_RELEASE_SLO_INCONCLUSIVE"),
-            };
+            let telemetry_incidents = telemetry_analysis.incidents;
+            let (decision_outcome, reason_code, decision_message) =
+                if !telemetry_incidents.is_empty() {
+                    decision_value = "rollback".to_string();
+                    (
+                        "deny",
+                        "LP_DEVICE_RELEASE_TELEMETRY_INCIDENT",
+                        format!(
+                            "device release telemetry produced {} blocking incident(s)",
+                            telemetry_incidents.len()
+                        ),
+                    )
+                } else {
+                    match decision_value.as_str() {
+                        "promote" => (
+                            "allow",
+                            "LP_DEVICE_RELEASE_SLO_PROMOTE",
+                            format!("device release metrics decision is {decision_value}"),
+                        ),
+                        "rollback" => (
+                            "deny",
+                            "LP_DEVICE_RELEASE_SLO_FAIL",
+                            format!("device release metrics decision is {decision_value}"),
+                        ),
+                        _ => (
+                            "error",
+                            "LP_DEVICE_RELEASE_SLO_INCONCLUSIVE",
+                            format!("device release metrics decision is {decision_value}"),
+                        ),
+                    }
+                };
+            let mut decision_evidence = vec![metrics_artifact.clone(), slo_artifact.clone()];
+            if !telemetry_incidents.is_empty() {
+                decision_evidence.push(write_device_release_evidence(
+                    state_dir,
+                    &exec_id,
+                    &format!("metrics_eval_{idx}_telemetry"),
+                    &json!({
+                        "telemetry_source": logical_name_from_path(&metrics_path),
+                        "incident_classes": telemetry_incidents
+                            .iter()
+                            .map(|incident| incident.classification.clone())
+                            .collect::<Vec<_>>(),
+                    }),
+                )?);
+            }
             let (decision, _) = write_decision_record(
                 state_dir,
                 &format!("{exec_id}:metrics:{idx}"),
@@ -8813,9 +8816,9 @@ fn advance_device_release_execution(
                 decision_outcome,
                 vec![json!({
                     "code": reason_code,
-                    "message": format!("device release metrics decision is {decision_value}"),
+                    "message": decision_message,
                 })],
-                vec![metrics_artifact.clone(), slo_artifact.clone()],
+                decision_evidence,
                 started_unix_ms,
                 Some(idx),
                 false,
@@ -8844,6 +8847,21 @@ fn advance_device_release_execution(
                     json!(get_u64(&meta.clone().into(), &["decision_count"]).unwrap_or(0) + 1),
                 );
                 meta.insert("updated_unix_ms".to_string(), json!(started_unix_ms));
+            }
+            for incident in &telemetry_incidents {
+                let _ = capture_device_release_incident_impl(
+                    state_dir,
+                    exec_doc,
+                    &incident.reason,
+                    &incident.classification,
+                    &incident.source,
+                    None,
+                    None,
+                    None,
+                    get_str(&decision, &["decision_id"]).as_deref(),
+                    "not_applicable",
+                    started_unix_ms,
+                )?;
             }
             let mut status = "ok";
             if decision_value != "promote" {
@@ -8922,15 +8940,22 @@ fn advance_device_release_execution(
             idx += 1;
             continue;
         }
-        match apply_device_release_provider_op(provider_doc, exec_doc, step_doc, &exec_id) {
-            Ok((current_state, rollout_percent, store_release_id, message)) => {
+        match apply_device_release_provider_op(
+            state_dir,
+            provider_doc,
+            exec_doc,
+            step_doc,
+            &exec_id,
+        ) {
+            Ok(outcome) => {
                 let evidence_doc = json!({
                     "provider_kind": get_str(provider_doc, &["provider_kind"]).unwrap_or_default(),
                     "provider_mode": device_release_provider_mode(provider_doc),
                     "op": op,
-                    "state": current_state,
-                    "rollout_percent": rollout_percent,
-                    "store_release_id": store_release_id,
+                    "state": outcome.current_state,
+                    "rollout_percent": outcome.rollout_percent,
+                    "store_release_id": outcome.store_release_id,
+                    "provider": outcome.evidence,
                 });
                 let evidence = write_device_release_evidence(
                     state_dir,
@@ -8946,7 +8971,7 @@ fn advance_device_release_execution(
                     "allow",
                     vec![json!({
                         "code": "LP_DEVICE_RELEASE_STEP_OK",
-                        "message": message,
+                        "message": outcome.message,
                     })],
                     vec![evidence],
                     started_unix_ms,
@@ -8955,14 +8980,18 @@ fn advance_device_release_execution(
                 )?;
                 push_decision(exec_doc, decision.clone(), None);
                 let meta = ensure_object_field(exec_doc, "meta");
-                meta.insert("current_state".to_string(), json!(current_state));
+                meta.insert("current_state".to_string(), json!(outcome.current_state));
                 meta.insert(
                     "current_rollout_percent".to_string(),
-                    rollout_percent.map(Value::from).unwrap_or(Value::Null),
+                    outcome
+                        .rollout_percent
+                        .map(Value::from)
+                        .unwrap_or(Value::Null),
                 );
                 meta.insert(
                     "latest_store_release_id".to_string(),
-                    store_release_id
+                    outcome
+                        .store_release_id
                         .as_ref()
                         .map(|value| Value::from(value.clone()))
                         .unwrap_or(Value::Null),
@@ -8985,8 +9014,8 @@ fn advance_device_release_execution(
                         started_unix_ms,
                         Some(started_unix_ms),
                         vec![get_str(&decision, &["decision_id"]).unwrap_or_default()],
-                        rollout_percent,
-                        store_release_id.as_deref(),
+                        outcome.rollout_percent,
+                        outcome.store_release_id.as_deref(),
                         None,
                     ),
                 );
@@ -9106,13 +9135,169 @@ fn write_device_release_provider_copy(
 
 fn write_device_release_package_copy(
     state_dir: &Path,
+    package_manifest_path: &Path,
     package_doc: &Value,
 ) -> Result<(PathBuf, Vec<u8>)> {
     let bytes = canon_json_bytes(package_doc);
     let sha = sha256_hex(&bytes);
     let path = device_release_package_path(state_dir, &sha);
     let bytes = write_json(&path, package_doc)?;
+    store_device_release_source_package(state_dir, package_manifest_path, package_doc, &sha)?;
     Ok((path, bytes))
+}
+
+fn store_device_release_source_package(
+    state_dir: &Path,
+    package_manifest_path: &Path,
+    package_doc: &Value,
+    sha256: &str,
+) -> Result<()> {
+    let manifest_dir = package_manifest_path
+        .parent()
+        .ok_or_else(|| anyhow!("package manifest parent directory is missing"))?;
+    let source_root = device_release_source_package_dir(state_dir, sha256);
+    remove_dir_if_exists(&source_root)?;
+    copy_dir_recursive(manifest_dir, &source_root)?;
+    let _ = write_json(
+        &device_release_source_package_manifest_path(state_dir, sha256),
+        package_doc,
+    )?;
+    Ok(())
+}
+
+fn remove_dir_if_exists(path: &Path) -> Result<()> {
+    if path.exists() {
+        fs::remove_dir_all(path).with_context(|| format!("remove directory {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(src_dir: &Path, dst_dir: &Path) -> Result<()> {
+    if !src_dir.is_dir() {
+        bail!("copy source must be a directory: {}", src_dir.display());
+    }
+    for entry in WalkDir::new(src_dir) {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path.strip_prefix(src_dir).with_context(|| {
+            format!("strip prefix {} from {}", src_dir.display(), path.display())
+        })?;
+        let dst = dst_dir.join(rel);
+        if entry.file_type().is_dir() {
+            fs::create_dir_all(&dst).with_context(|| format!("mkdir {}", dst.display()))?;
+            continue;
+        }
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+        }
+        fs::copy(path, &dst)
+            .with_context(|| format!("copy {} -> {}", path.display(), dst.display()))?;
+    }
+    Ok(())
+}
+
+struct StagedDevicePackage {
+    manifest_path: PathBuf,
+    manifest_bytes: Vec<u8>,
+}
+
+fn resolve_device_release_source_package(
+    state_dir: &Path,
+    plan_doc: &Value,
+    package_manifest_override: Option<&str>,
+) -> Result<(PathBuf, Value)> {
+    if let Some(package_manifest) = package_manifest_override {
+        let manifest_path = repo_path(package_manifest);
+        let package_doc = load_json(&manifest_path)?;
+        validate_device_package_manifest_doc(&package_doc)?;
+        let _ = write_device_release_package_copy(state_dir, &manifest_path, &package_doc)?;
+        return Ok((manifest_path, package_doc));
+    }
+    let sha256 = get_str(plan_doc, &["package", "digest", "sha256"])
+        .ok_or_else(|| anyhow!("device release plan missing package.digest.sha256"))?;
+    let manifest_path = device_release_source_package_manifest_path(state_dir, &sha256);
+    if !manifest_path.exists() {
+        bail!(
+            "device release source package is missing from state; rerun release-create or pass --package-manifest"
+        );
+    }
+    let package_doc = load_json(&manifest_path)?;
+    validate_device_package_manifest_doc(&package_doc)?;
+    Ok((manifest_path, package_doc))
+}
+
+fn device_release_staged_rollout_percent(provider_doc: &Value) -> Option<u64> {
+    match (
+        get_str(provider_doc, &["distribution_lane"]).as_deref(),
+        get_str(provider_doc, &["provider_kind"]).as_deref(),
+    ) {
+        (Some("beta"), _) => Some(100),
+        (Some("production"), Some("appstoreconnect_v1")) => None,
+        (Some("production"), _) => Some(device_release_initial_percent(provider_doc)),
+        _ => None,
+    }
+}
+
+fn stage_device_release_package_for_exec(
+    state_dir: &Path,
+    exec_id: &str,
+    plan_doc: &Value,
+    provider_doc: &Value,
+    package_manifest_path: &Path,
+    package_doc: &Value,
+) -> Result<StagedDevicePackage> {
+    let source_sha = get_str(plan_doc, &["package", "digest", "sha256"])
+        .ok_or_else(|| anyhow!("device release plan missing package.digest.sha256"))?;
+    let source_root = device_release_source_package_dir(state_dir, &source_sha);
+    if !source_root.exists() {
+        bail!(
+            "device release source package payload is missing from state: {}",
+            source_root.display()
+        );
+    }
+    let stage_root = device_release_staged_package_dir(state_dir, exec_id);
+    remove_dir_if_exists(&stage_root)?;
+    copy_dir_recursive(&source_root, &stage_root)?;
+    let stage_manifest_path = device_release_staged_package_manifest_path(state_dir, exec_id);
+    let mut stage_manifest_doc = package_doc.clone();
+    let stage_telemetry_path = stage_manifest_path.parent().unwrap_or(&stage_root).join(
+        get_str(&stage_manifest_doc, &["telemetry_profile", "path"])
+            .ok_or_else(|| anyhow!("package manifest missing telemetry_profile.path"))?,
+    );
+    let telemetry_doc = load_json(&stage_telemetry_path)?;
+    let patched_telemetry_doc = device_release_telemetry::patch_device_release_telemetry_profile(
+        &telemetry_doc,
+        exec_id,
+        &get_str(plan_doc, &["plan_id"]).unwrap_or_default(),
+        &source_sha,
+        &get_str(plan_doc, &["app", "app_id"]).unwrap_or_default(),
+        &get_str(provider_doc, &["target"]).unwrap_or_default(),
+        &get_str(provider_doc, &["provider_kind"]).unwrap_or_default(),
+        &get_str(provider_doc, &["distribution_lane"]).unwrap_or_default(),
+        device_release_staged_rollout_percent(provider_doc),
+    );
+    let telemetry_bytes = write_json(&stage_telemetry_path, &patched_telemetry_doc)?;
+    if let Some(telemetry_profile) = ensure_object(&mut stage_manifest_doc)
+        .get_mut("telemetry_profile")
+        .and_then(Value::as_object_mut)
+    {
+        telemetry_profile.insert("sha256".to_string(), json!(sha256_hex(&telemetry_bytes)));
+        telemetry_profile.insert("bytes_len".to_string(), json!(telemetry_bytes.len() as u64));
+    }
+    let manifest_bytes = write_json(&stage_manifest_path, &stage_manifest_doc)?;
+    let _ = write_json(
+        &stage_root.join(
+            package_manifest_path
+                .file_name()
+                .and_then(OsStr::to_str)
+                .unwrap_or("device.package.manifest.json"),
+        ),
+        &stage_manifest_doc,
+    )?;
+    Ok(StagedDevicePackage {
+        manifest_path: stage_manifest_path,
+        manifest_bytes,
+    })
 }
 
 fn device_release_decision_ids(exec_doc: &Value) -> Vec<Value> {
@@ -9307,7 +9492,8 @@ fn command_device_release_create(args: DeviceReleaseCreateArgs) -> Result<Value>
     if get_str(&package_doc, &["target"]).unwrap_or_default() != provider_target {
         bail!("provider target does not match package manifest target");
     }
-    let (_, package_bytes) = write_device_release_package_copy(&state_dir, &package_doc)?;
+    let (_, package_bytes) =
+        write_device_release_package_copy(&state_dir, &package_manifest_path, &package_doc)?;
     let (_, provider_bytes) = write_device_release_provider_copy(&state_dir, &provider_doc)?;
     let (_, device_profile_doc) =
         load_device_profile_from_package_manifest(&package_manifest_path, &package_doc)?;
@@ -9464,11 +9650,11 @@ fn command_device_release_run(args: DeviceReleaseRunArgs) -> Result<Value> {
             ));
         }
     };
-    if let Some(package_manifest) = args.package_manifest.as_deref() {
-        let package_doc = load_json(&repo_path(package_manifest))?;
-        validate_device_package_manifest_doc(&package_doc)?;
-        let _ = write_device_release_package_copy(&state_dir, &package_doc)?;
-    }
+    let (source_package_manifest_path, source_package_doc) = resolve_device_release_source_package(
+        &state_dir,
+        &plan_doc,
+        args.package_manifest.as_deref(),
+    )?;
     let _ = write_device_release_provider_copy(&state_dir, &provider_doc)?;
     let plan_store_bytes = write_json(
         &device_release_plan_path(
@@ -9482,6 +9668,26 @@ fn command_device_release_run(args: DeviceReleaseRunArgs) -> Result<Value> {
         &state_dir,
         &format!("{plan_id}:{now_unix_ms}"),
         now_unix_ms,
+    );
+    let staged_package = stage_device_release_package_for_exec(
+        &state_dir,
+        &exec_id,
+        &plan_doc,
+        &provider_doc,
+        &source_package_manifest_path,
+        &source_package_doc,
+    )?;
+    let staged_manifest_rel = staged_package
+        .manifest_path
+        .strip_prefix(&state_dir)
+        .unwrap_or(&staged_package.manifest_path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let staged_package_artifact = named_file_artifact(
+        &staged_manifest_rel,
+        DEVICE_PACKAGE_MANIFEST_KIND,
+        "application/json",
+        &staged_package.manifest_bytes,
     );
     let mut exec_doc = json!({
         "schema_version": DEVICE_RELEASE_EXECUTION_KIND,
@@ -9521,8 +9727,20 @@ fn command_device_release_run(args: DeviceReleaseRunArgs) -> Result<Value> {
             "decisions": [],
             "app": get_path(&plan_doc, &["app"]).cloned().unwrap_or_else(|| json!({})),
             "capabilities": capabilities,
+            "source_package_manifest_path": source_package_manifest_path.to_string_lossy(),
+            "staged_package_manifest_path": staged_package.manifest_path.to_string_lossy(),
+            "staged_package_root": device_release_staged_package_dir(&state_dir, &exec_id).to_string_lossy(),
         }
     });
+    push_artifact(
+        &mut exec_doc,
+        artifact_summary(
+            "staged_package_manifest",
+            &staged_package_artifact,
+            0,
+            Some(DEVICE_PACKAGE_MANIFEST_KIND),
+        ),
+    );
     advance_device_release_execution(
         &state_dir,
         &mut exec_doc,
@@ -9885,6 +10103,28 @@ fn command_device_release_rerun(args: DeviceReleaseRerunArgs) -> Result<Value> {
         now_unix_ms,
     );
     let plan_bytes = canon_json_bytes(&plan_doc);
+    let (source_package_manifest_path, source_package_doc) =
+        resolve_device_release_source_package(&state_dir, &plan_doc, None)?;
+    let staged_package = stage_device_release_package_for_exec(
+        &state_dir,
+        &new_exec_id,
+        &plan_doc,
+        &provider_doc,
+        &source_package_manifest_path,
+        &source_package_doc,
+    )?;
+    let staged_manifest_rel = staged_package
+        .manifest_path
+        .strip_prefix(&state_dir)
+        .unwrap_or(&staged_package.manifest_path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let staged_package_artifact = named_file_artifact(
+        &staged_manifest_rel,
+        DEVICE_PACKAGE_MANIFEST_KIND,
+        "application/json",
+        &staged_package.manifest_bytes,
+    );
     let mut new_exec = json!({
         "schema_version": DEVICE_RELEASE_EXECUTION_KIND,
         "exec_id": new_exec_id,
@@ -9923,8 +10163,20 @@ fn command_device_release_rerun(args: DeviceReleaseRerunArgs) -> Result<Value> {
             "decisions": [],
             "app": get_path(&plan_doc, &["app"]).cloned().unwrap_or_else(|| json!({})),
             "capabilities": get_path(&exec_doc, &["meta", "capabilities"]).cloned().unwrap_or_else(|| json!({})),
+            "source_package_manifest_path": source_package_manifest_path.to_string_lossy(),
+            "staged_package_manifest_path": staged_package.manifest_path.to_string_lossy(),
+            "staged_package_root": device_release_staged_package_dir(&state_dir, &new_exec_id).to_string_lossy(),
         }
     });
+    push_artifact(
+        &mut new_exec,
+        artifact_summary(
+            "staged_package_manifest",
+            &staged_package_artifact,
+            0,
+            Some(DEVICE_PACKAGE_MANIFEST_KIND),
+        ),
+    );
     advance_device_release_execution(
         &state_dir,
         &mut new_exec,
@@ -9990,15 +10242,17 @@ fn command_device_release_control(
         "halt" => json!({"id":"manual_halt","op":"release.pause"}),
         other => bail!("unsupported device release control action={other}"),
     };
-    let (current_state, rollout_percent, store_release_id, message) = if action == "halt" {
-        (
-            "halted".to_string(),
-            device_release_current_percent(&exec_doc),
-            device_release_store_release_id(&exec_doc),
-            "halted device release".to_string(),
-        )
+    let outcome = if action == "halt" {
+        device_release_provider::DeviceProviderStepOutcome {
+            current_state: "halted".to_string(),
+            rollout_percent: device_release_current_percent(&exec_doc),
+            store_release_id: device_release_store_release_id(&exec_doc),
+            message: "halted device release".to_string(),
+            evidence: json!({ "provider_mode": "manual_halt" }),
+        }
     } else {
         apply_device_release_provider_op(
+            &state_dir,
             &provider_doc,
             &exec_doc,
             &step_doc,
@@ -10016,9 +10270,10 @@ fn command_device_release_control(
         &json!({
             "action": action,
             "provider_mode": device_release_provider_mode(&provider_doc),
-            "state": current_state,
-            "rollout_percent": rollout_percent,
-            "store_release_id": store_release_id,
+            "state": outcome.current_state,
+            "rollout_percent": outcome.rollout_percent,
+            "store_release_id": outcome.store_release_id,
+            "provider": outcome.evidence,
         }),
     )?;
     let (decision, signature_status) = write_decision_record(
@@ -10029,7 +10284,7 @@ fn command_device_release_control(
         "allow",
         vec![json!({
             "code": "LP_DEVICE_RELEASE_CONTROL_OK",
-            "message": message,
+            "message": outcome.message,
         })],
         vec![evidence],
         now_unix_ms,
@@ -10042,14 +10297,18 @@ fn command_device_release_control(
         true,
     )?;
     let meta = ensure_object_field(&mut exec_doc, "meta");
-    meta.insert("current_state".to_string(), json!(current_state));
+    meta.insert("current_state".to_string(), json!(outcome.current_state));
     meta.insert(
         "current_rollout_percent".to_string(),
-        rollout_percent.map(Value::from).unwrap_or(Value::Null),
+        outcome
+            .rollout_percent
+            .map(Value::from)
+            .unwrap_or(Value::Null),
     );
     meta.insert(
         "latest_store_release_id".to_string(),
-        store_release_id
+        outcome
+            .store_release_id
             .as_ref()
             .map(|value| Value::from(value.clone()))
             .unwrap_or(Value::Null),
@@ -10092,8 +10351,8 @@ fn command_device_release_control(
         now_unix_ms,
         Some(now_unix_ms),
         vec![get_str(&decision, &["decision_id"]).unwrap_or_default()],
-        rollout_percent,
-        store_release_id.as_deref(),
+        outcome.rollout_percent,
+        outcome.store_release_id.as_deref(),
         None,
     ));
     let status = match action {
@@ -12789,33 +13048,11 @@ fn remote_accept_required_secrets(body_doc: &Value) -> Vec<String> {
 }
 
 fn remote_fixture_name(raw: Option<&str>) -> Option<String> {
-    raw.and_then(|value| {
-        Path::new(value)
-            .file_name()
-            .and_then(OsStr::to_str)
-            .map(ToOwned::to_owned)
-    })
+    remote_fixture_manifest::remote_fixture_name(raw)
 }
 
 fn resolve_remote_fixture_inputs(fixture: Option<&str>) -> (Option<String>, Option<String>) {
-    match remote_fixture_name(fixture).as_deref() {
-        Some("remote_rollback") => (
-            Some("spec/fixtures/remote-oss/remote_rollback/deploy.plan.json".to_string()),
-            Some("spec/fixtures/remote-oss/remote_rollback".to_string()),
-        ),
-        Some("remote_pause_rerun") => (
-            Some("spec/fixtures/remote-oss/remote_pause_rerun/deploy.plan.json".to_string()),
-            Some("spec/fixtures/remote-oss/remote_pause_rerun".to_string()),
-        ),
-        Some("remote_query_index_rebuild")
-        | Some("remote_query")
-        | Some("remote_promote")
-        | None => (
-            Some("spec/fixtures/remote-oss/remote_promote/deploy.plan.json".to_string()),
-            Some("spec/fixtures/remote-oss/remote_promote".to_string()),
-        ),
-        _ => (None, None),
-    }
+    remote_fixture_manifest::resolve_remote_fixture_inputs(fixture)
 }
 
 fn remote_accept_target_name(exec_doc: &Value) -> String {

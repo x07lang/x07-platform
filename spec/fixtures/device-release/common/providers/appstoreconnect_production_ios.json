@@ -4,7 +4,7 @@
   "provider_kind": "appstoreconnect_v1",
   "distribution_lane": "production",
   "target": "ios",
-  "credentials_ref": "spec/fixtures/device-release/common/credentials/appstoreconnect.ref.txt",
+  "credentials_ref": "secrets://device/appstore-production-ios",
   "app_ref": {
     "bundle_id": "io.x07.demo.ios"
   },

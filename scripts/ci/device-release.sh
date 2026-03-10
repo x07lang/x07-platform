@@ -20,6 +20,10 @@ TMP_DIR="${ROOT_DIR}/_tmp/ci_device_release"
 STATE_DIR="${TMP_DIR}/state"
 UI_ADDR="127.0.0.1:17091"
 UI_BASE_URL="http://${UI_ADDR}"
+SECRET_DIR="${TMP_DIR}/device-secrets"
+SECRET_STORE_SOURCE_PATH="${SECRET_DIR}/device-secret-store.plain.json"
+SECRET_STORE_PATH="${SECRET_DIR}/device-secret-store.enc.json"
+SECRET_MASTER_KEY_PATH="${SECRET_DIR}/device-secret-store.key"
 
 rm -rf "$TMP_DIR"
 mkdir -p "$TMP_DIR" "$STATE_DIR"
@@ -92,7 +96,9 @@ run_x07lp() {
   mkdir -p "$(dirname "$report_path")" "$(dirname "$out_path")"
   (
     cd "$ROOT_DIR"
-    x07 run -- "$@" >"$report_path"
+    X07LP_REMOTE_SECRET_MASTER_KEY_FILE="$SECRET_MASTER_KEY_PATH" \
+    X07LP_REMOTE_SECRET_STORE_PATH="$SECRET_STORE_PATH" \
+      x07 run -- "$@" >"$report_path"
   )
   decode_solve_output_b64 "$report_path" "$out_path"
 }
@@ -187,6 +193,50 @@ if missing:
 PY
 }
 
+pack_device_secret_store() {
+  mkdir -p "$SECRET_DIR"
+  printf '%064d' 0 >"$SECRET_MASTER_KEY_PATH"
+  chmod 600 "$SECRET_MASTER_KEY_PATH"
+  "$PYTHON" - "$SECRET_STORE_SOURCE_PATH" <<'PY'
+import json
+import pathlib
+import sys
+
+doc = {
+    "schema_version": "lp.remote.secret.store.internal@0.1.0",
+    "targets": {},
+    "device": {
+        "mock-beta-ios": "fixture-mock-beta-ios",
+        "mock-production-ios": "fixture-mock-production-ios",
+        "mock-production-android": "fixture-mock-production-android",
+        "appstore-production-ios": json.dumps(
+            {
+                "issuer_id": "fixture-appstore-issuer",
+                "key_id": "fixture-appstore-key",
+                "private_key_pem": "-----BEGIN PRIVATE KEY-----\nfixture-appstore-key\n-----END PRIVATE KEY-----\n",
+            }
+        ),
+        "googleplay-production-android": json.dumps(
+            {
+                "client_email": "fixture-device-release@example.iam.gserviceaccount.com",
+                "private_key": "-----BEGIN PRIVATE KEY-----\nfixture-googleplay-key\n-----END PRIVATE KEY-----\n",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        ),
+    },
+}
+pathlib.Path(sys.argv[1]).write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+PY
+  chmod 600 "$SECRET_STORE_SOURCE_PATH"
+  (
+    cd "$ROOT_DIR"
+    X07LP_REMOTE_SECRET_MASTER_KEY_FILE="$SECRET_MASTER_KEY_PATH" \
+      scripts/x07lp-driver secret-store-pack \
+        --input "$(repo_path_arg "$SECRET_STORE_SOURCE_PATH")" \
+        --output "$(repo_path_arg "$SECRET_STORE_PATH")" >/dev/null
+  )
+}
+
 wait_for_http() {
   local url="$1"
   local attempts="${2:-30}"
@@ -203,17 +253,17 @@ wait_for_http() {
 assert_tools_present
 
 STATE_DIR_ARG="$(repo_path_arg "$STATE_DIR")"
+pack_device_secret_store
 
 IOS_PACKAGE="spec/fixtures/device-release/common/package_ios_demo/device.package.manifest.json"
 ANDROID_PACKAGE="spec/fixtures/device-release/common/package_android_demo/device.package.manifest.json"
 MOCK_BETA_PROVIDER="spec/fixtures/device-release/common/providers/mock_beta_ios.json"
 MOCK_PROD_PROVIDER="spec/fixtures/device-release/common/providers/mock_production_ios.json"
+MOCK_PROD_ANDROID_PROVIDER="spec/fixtures/device-release/common/providers/mock_production_android.json"
 GOOGLEPLAY_PROVIDER="spec/fixtures/device-release/common/providers/googleplay_production_android.json"
 APPSTORE_PROVIDER="spec/fixtures/device-release/common/providers/appstoreconnect_production_ios.json"
 INVALID_PLAN="spec/fixtures/device-release/provider_validation_ios_invalid_percent/invalid.plan.json"
 SLO_PROFILE="spec/fixtures/device-release/common/slo_min.json"
-METRICS_OK="spec/fixtures/device-release/common/metrics_ok.json"
-METRICS_BAD="spec/fixtures/device-release/common/metrics_bad.json"
 TRACE_FIXTURE="spec/fixtures/device-release/common/device.trace.json"
 
 run_create() {
@@ -379,16 +429,133 @@ run_regress() {
     --json
 }
 
-seed_metrics_snapshot() {
+seed_otlp_export() {
   local release_exec_id="$1"
-  local metrics_fixture="$2"
+  local scenario="$2"
   local seq="${3:-1}"
   local dst_dir="${STATE_DIR}/device_release/telemetry/${release_exec_id}"
   mkdir -p "$dst_dir"
-  cp "$ROOT_DIR/$metrics_fixture" "${dst_dir}/analysis.${seq}.json"
+  "$PYTHON" - "$STATE_DIR" "$release_exec_id" "$scenario" >"${dst_dir}/analysis.${seq}.jsonl" <<'PY'
+import json
+import pathlib
+import sys
+
+state_dir = pathlib.Path(sys.argv[1])
+exec_id = sys.argv[2]
+scenario = sys.argv[3]
+exec_doc = json.loads(
+    (state_dir / "device_release" / "executions" / f"{exec_id}.json").read_text(encoding="utf-8")
+)
+plan_id = exec_doc["plan_id"]
+app_id = exec_doc["meta"]["app"]["app_id"]
+package_sha = exec_doc["meta"]["package_digest"]["sha256"]
+
+resource_attrs = [
+    {"key": "x07.release.exec_id", "value": {"stringValue": exec_id}},
+    {"key": "x07.release.plan_id", "value": {"stringValue": plan_id}},
+    {"key": "x07.app_id", "value": {"stringValue": app_id}},
+    {"key": "x07.package.sha256", "value": {"stringValue": package_sha}},
+]
+
+def log_record(class_name, event_name, attrs, body=None):
+    record = {
+        "attributes": [
+            {"key": "x07.event.class", "value": {"stringValue": class_name}},
+            {"key": "x07.event.name", "value": {"stringValue": event_name}},
+        ]
+        + attrs
+    }
+    if body is not None:
+        record["body"] = {"stringValue": body}
+    return record
+
+if scenario == "ok":
+    records = [
+        log_record(
+            "app.http",
+            "app.http",
+            [
+                {"key": "status", "value": {"intValue": "200"}},
+                {"key": "duration_ms", "value": {"doubleValue": 90.0}},
+            ],
+            "app.http",
+        ),
+        log_record(
+            "app.http",
+            "app.http",
+            [
+                {"key": "status", "value": {"intValue": "200"}},
+                {"key": "duration_ms", "value": {"doubleValue": 110.0}},
+            ],
+            "app.http",
+        ),
+    ]
+elif scenario == "bridge_error":
+    records = [
+        log_record(
+            "app.http",
+            "app.http",
+            [
+                {"key": "status", "value": {"intValue": "500"}},
+                {"key": "duration_ms", "value": {"doubleValue": 420.0}},
+            ],
+            "app.http",
+        ),
+        log_record(
+            "app.http",
+            "app.http",
+            [
+                {"key": "status", "value": {"intValue": "503"}},
+                {"key": "duration_ms", "value": {"doubleValue": 460.0}},
+            ],
+            "app.http",
+        ),
+        log_record(
+            "runtime.error",
+            "runtime.error",
+            [
+                {"key": "message", "value": {"stringValue": "bridge payload invalid"}},
+                {"key": "stage", "value": {"stringValue": "bridge_parse"}},
+            ],
+            "bridge payload invalid",
+        ),
+    ]
+elif scenario == "webview_crash":
+    records = [
+        log_record(
+            "app.http",
+            "app.http",
+            [
+                {"key": "status", "value": {"intValue": "500"}},
+                {"key": "duration_ms", "value": {"doubleValue": 420.0}},
+            ],
+            "app.http",
+        ),
+        log_record(
+            "host.webview_crash",
+            "host.webview_crash",
+            [
+                {"key": "message", "value": {"stringValue": "device host webview crashed"}},
+            ],
+            "device host webview crashed",
+        ),
+    ]
+else:
+    raise SystemExit(f"unsupported telemetry scenario: {scenario}")
+
+payload = {
+    "resourceLogs": [
+        {
+            "resource": {"attributes": resource_attrs},
+            "scopeLogs": [{"logRecords": records}],
+        }
+    ]
+}
+print(json.dumps(payload))
+PY
 }
 
-# 11A: beta release
+# Beta release
 BETA_DIR="${TMP_DIR}/mock_beta_release"
 mkdir -p "$BETA_DIR"
 BETA_PLAN="${BETA_DIR}/plan.json"
@@ -398,7 +565,7 @@ BETA_EXEC_ID="$(extract_json_value "${BETA_DIR}/run.cli.json" "result.exec_id")"
 run_query "${BETA_DIR}/query.run.json" "${BETA_DIR}/query.cli.json" "$BETA_EXEC_ID" full
 assert_json_expr "${BETA_DIR}/query.cli.json" 'doc["ok"] is True and doc["result"]["current_state"] == "available" and doc["result"]["current_rollout_percent"] == 100 and doc["result"]["distribution_lane"] == "beta"' "mock beta release query did not show an available full rollout"
 
-# 11B: production promote with pause/resume/complete
+# Production promote with pause/resume/complete
 PROMOTE_DIR="${TMP_DIR}/mock_production_promote"
 mkdir -p "$PROMOTE_DIR"
 PROMOTE_PLAN="${PROMOTE_DIR}/plan.json"
@@ -420,17 +587,33 @@ mkdir -p "$INVALID_DIR"
 run_validate "${INVALID_DIR}/validate.run.json" "${INVALID_DIR}/validate.cli.json" "$INVALID_PLAN" "$APPSTORE_PROVIDER"
 assert_json_expr "${INVALID_DIR}/validate.cli.json" 'doc["ok"] is False and doc["exit_code"] == 10 and doc["diagnostics"][0]["code"] == "LP_DEVICE_RELEASE_PLAN_INVALID"' "App Store Connect invalid percent plan was not rejected"
 
-# Google Play rollback
-ROLLBACK_DIR="${TMP_DIR}/mock_googleplay_rollback"
+# Live-provider gating stays explicit outside the default CI lane.
+LIVE_REQUIRED_DIR="${TMP_DIR}/live_provider_required"
+mkdir -p "$LIVE_REQUIRED_DIR"
+APPSTORE_LIVE_PLAN="${LIVE_REQUIRED_DIR}/appstore.plan.json"
+GOOGLEPLAY_LIVE_PLAN="${LIVE_REQUIRED_DIR}/googleplay.plan.json"
+run_create "${LIVE_REQUIRED_DIR}/appstore.create.run.json" "${LIVE_REQUIRED_DIR}/appstore.create.cli.json" "$APPSTORE_PROVIDER" "$IOS_PACKAGE" "$APPSTORE_LIVE_PLAN"
+run_release "${LIVE_REQUIRED_DIR}/appstore.run.run.json" "${LIVE_REQUIRED_DIR}/appstore.run.cli.json" "$APPSTORE_LIVE_PLAN" "$IOS_PACKAGE" || true
+APPSTORE_LIVE_EXEC_ID="$(extract_json_value "${LIVE_REQUIRED_DIR}/appstore.run.cli.json" "result.exec_id")"
+assert_json_expr "${LIVE_REQUIRED_DIR}/appstore.run.cli.json" 'doc["ok"] is False and doc["exit_code"] == 18 and doc["result"]["provider_kind"] == "appstoreconnect_v1" and doc["result"]["status"] == "failed"' "App Store Connect run did not surface a failed live-provider execution"
+assert_json_expr "${STATE_DIR}/device_release/executions/${APPSTORE_LIVE_EXEC_ID}.json" 'doc["status"] == "failed" and "X07LP_DEVICE_PROVIDER_LIVE=1" in doc["meta"]["decisions"][0]["reasons"][0]["message"]' "App Store Connect execution did not record the live-provider requirement"
+run_create "${LIVE_REQUIRED_DIR}/googleplay.create.run.json" "${LIVE_REQUIRED_DIR}/googleplay.create.cli.json" "$GOOGLEPLAY_PROVIDER" "$ANDROID_PACKAGE" "$GOOGLEPLAY_LIVE_PLAN"
+run_release "${LIVE_REQUIRED_DIR}/googleplay.run.run.json" "${LIVE_REQUIRED_DIR}/googleplay.run.cli.json" "$GOOGLEPLAY_LIVE_PLAN" "$ANDROID_PACKAGE" || true
+GOOGLEPLAY_LIVE_EXEC_ID="$(extract_json_value "${LIVE_REQUIRED_DIR}/googleplay.run.cli.json" "result.exec_id")"
+assert_json_expr "${LIVE_REQUIRED_DIR}/googleplay.run.cli.json" 'doc["ok"] is False and doc["exit_code"] == 18 and doc["result"]["provider_kind"] == "googleplay_v1" and doc["result"]["status"] == "failed"' "Google Play run did not surface a failed live-provider execution"
+assert_json_expr "${STATE_DIR}/device_release/executions/${GOOGLEPLAY_LIVE_EXEC_ID}.json" 'doc["status"] == "failed" and "X07LP_DEVICE_PROVIDER_LIVE=1" in doc["meta"]["decisions"][0]["reasons"][0]["message"]' "Google Play execution did not record the live-provider requirement"
+
+# Android staged rollback stays on the mock lane in default CI.
+ROLLBACK_DIR="${TMP_DIR}/mock_android_rollback"
 mkdir -p "$ROLLBACK_DIR"
 ROLLBACK_PLAN="${ROLLBACK_DIR}/plan.json"
-run_create "${ROLLBACK_DIR}/create.run.json" "${ROLLBACK_DIR}/create.cli.json" "$GOOGLEPLAY_PROVIDER" "$ANDROID_PACKAGE" "$ROLLBACK_PLAN"
-run_validate "${ROLLBACK_DIR}/validate.run.json" "${ROLLBACK_DIR}/validate.cli.json" "$ROLLBACK_PLAN" "$GOOGLEPLAY_PROVIDER"
+run_create "${ROLLBACK_DIR}/create.run.json" "${ROLLBACK_DIR}/create.cli.json" "$MOCK_PROD_ANDROID_PROVIDER" "$ANDROID_PACKAGE" "$ROLLBACK_PLAN"
+run_validate "${ROLLBACK_DIR}/validate.run.json" "${ROLLBACK_DIR}/validate.cli.json" "$ROLLBACK_PLAN"
 run_release "${ROLLBACK_DIR}/run.run.json" "${ROLLBACK_DIR}/run.cli.json" "$ROLLBACK_PLAN" "$ANDROID_PACKAGE"
 ROLLBACK_EXEC_ID="$(extract_json_value "${ROLLBACK_DIR}/run.cli.json" "result.exec_id")"
 run_control "${ROLLBACK_DIR}/rollback.run.json" "${ROLLBACK_DIR}/rollback.cli.json" rollback "$ROLLBACK_EXEC_ID" cli_rollback
 run_query "${ROLLBACK_DIR}/query.run.json" "${ROLLBACK_DIR}/query.cli.json" "$ROLLBACK_EXEC_ID" full
-assert_json_expr "${ROLLBACK_DIR}/query.cli.json" 'doc["ok"] is True and doc["result"]["provider_kind"] == "googleplay_v1" and doc["result"]["current_state"] == "rolled_back" and doc["result"]["current_rollout_percent"] == 0' "Google Play release did not roll back to zero percent"
+assert_json_expr "${ROLLBACK_DIR}/query.cli.json" 'doc["ok"] is True and doc["result"]["provider_kind"] == "mock_v1" and doc["result"]["target"] == "android" and doc["result"]["current_state"] == "rolled_back" and doc["result"]["current_rollout_percent"] == 0' "mock Android release did not roll back to zero percent"
 
 # Command Center list/detail/actions
 UI_DIR="${TMP_DIR}/command_center_device_release"
@@ -458,7 +641,7 @@ assert_json_expr "${UI_DIR}/api.device-release.complete.json" 'doc["ok"] is True
 assert_json_expr "${UI_DIR}/api.device-release.after.json" 'doc["ok"] is True and doc["result"]["current_state"] == "completed" and doc["result"]["current_rollout_percent"] == 100' "device release detail did not show a completed rollout after UI actions"
 stop_pid "$UI_SERVER_PID"
 
-# Phase 12: metrics observe / stop / rerun
+# Metrics observe / stop / rerun
 OBSERVE_OK_DIR="${TMP_DIR}/metrics_continue"
 mkdir -p "$OBSERVE_OK_DIR"
 OBSERVE_OK_PLAN="${OBSERVE_OK_DIR}/plan.json"
@@ -467,12 +650,12 @@ run_release "${OBSERVE_OK_DIR}/run.run.json" "${OBSERVE_OK_DIR}/run.cli.json" "$
 OBSERVE_OK_EXEC_ID="$(extract_json_value "${OBSERVE_OK_DIR}/run.cli.json" "result.exec_id")"
 assert_json_expr "${OBSERVE_OK_DIR}/run.cli.json" 'doc["ok"] is True and doc["result"]["status"] == "started"' "metrics-gated release did not pause at the observe waitpoint"
 run_query "${OBSERVE_OK_DIR}/query.before.run.json" "${OBSERVE_OK_DIR}/query.before.cli.json" "$OBSERVE_OK_EXEC_ID" full
-assert_json_expr "${OBSERVE_OK_DIR}/query.before.cli.json" 'doc["ok"] is True and doc["result"]["automation_state"] == "waiting_for_observation"' "release run did not stop at waiting_for_observation"
-seed_metrics_snapshot "$OBSERVE_OK_EXEC_ID" "$METRICS_OK"
+assert_json_expr "${OBSERVE_OK_DIR}/query.before.cli.json" 'doc["ok"] is True and doc["result"]["automation_state"] == "waiting_for_observation" and doc["result"]["meta"]["source_package_manifest_path"] != doc["result"]["meta"]["staged_package_manifest_path"] and doc["result"]["meta"]["staged_package_manifest_path"].endswith("/device_release/packages/" + doc["result"]["exec_id"] + "/device.package.manifest.json")' "release run did not stop at waiting_for_observation with an isolated staged package"
+seed_otlp_export "$OBSERVE_OK_EXEC_ID" ok
 run_control "${OBSERVE_OK_DIR}/observe.run.json" "${OBSERVE_OK_DIR}/observe.cli.json" observe "$OBSERVE_OK_EXEC_ID" cli_observe
 run_query "${OBSERVE_OK_DIR}/query.after.run.json" "${OBSERVE_OK_DIR}/query.after.cli.json" "$OBSERVE_OK_EXEC_ID" full
 assert_json_expr "${OBSERVE_OK_DIR}/observe.cli.json" 'doc["ok"] is True and doc["result"]["kind"] == "device.release.observe.manual"' "observe did not emit the expected control action result"
-assert_json_expr "${OBSERVE_OK_DIR}/query.after.cli.json" 'doc["ok"] is True and doc["result"]["status"] == "completed" and doc["result"]["latest_eval_outcome"] == "ok" and doc["result"]["latest_metrics_snapshot"] is not None and doc["result"]["latest_slo_eval_report"] is not None' "observe did not promote and persist the metrics evaluation artifacts"
+assert_json_expr "${OBSERVE_OK_DIR}/query.after.cli.json" 'doc["ok"] is True and doc["result"]["status"] == "completed" and doc["result"]["latest_eval_outcome"] == "ok" and doc["result"]["latest_metrics_snapshot"] is not None and doc["result"]["latest_slo_eval_report"] is not None and doc["result"]["meta"]["staged_package_manifest_path"].endswith("/device_release/packages/" + doc["result"]["exec_id"] + "/device.package.manifest.json")' "observe did not promote and persist the OTLP-derived metrics evaluation artifacts"
 
 OBSERVE_BAD_DIR="${TMP_DIR}/metrics_pause"
 mkdir -p "$OBSERVE_BAD_DIR"
@@ -480,10 +663,10 @@ OBSERVE_BAD_PLAN="${OBSERVE_BAD_DIR}/plan.json"
 run_create "${OBSERVE_BAD_DIR}/create.run.json" "${OBSERVE_BAD_DIR}/create.cli.json" "$MOCK_PROD_PROVIDER" "$IOS_PACKAGE" "$OBSERVE_BAD_PLAN" "$SLO_PROFILE" "300" "release.pause"
 run_release "${OBSERVE_BAD_DIR}/run.run.json" "${OBSERVE_BAD_DIR}/run.cli.json" "$OBSERVE_BAD_PLAN" "$IOS_PACKAGE"
 OBSERVE_BAD_EXEC_ID="$(extract_json_value "${OBSERVE_BAD_DIR}/run.cli.json" "result.exec_id")"
-seed_metrics_snapshot "$OBSERVE_BAD_EXEC_ID" "$METRICS_BAD"
+seed_otlp_export "$OBSERVE_BAD_EXEC_ID" bridge_error
 run_control "${OBSERVE_BAD_DIR}/observe.run.json" "${OBSERVE_BAD_DIR}/observe.cli.json" observe "$OBSERVE_BAD_EXEC_ID" cli_observe_bad
 run_query "${OBSERVE_BAD_DIR}/query.after.run.json" "${OBSERVE_BAD_DIR}/query.after.cli.json" "$OBSERVE_BAD_EXEC_ID" full
-assert_json_expr "${OBSERVE_BAD_DIR}/query.after.cli.json" 'doc["ok"] is True and doc["result"]["current_state"] == "paused" and doc["result"]["automation_state"] == "paused" and doc["result"]["latest_eval_outcome"] == "fail"' "bad metrics snapshot did not pause the release"
+assert_json_expr "${OBSERVE_BAD_DIR}/query.after.cli.json" 'doc["ok"] is True and doc["result"]["current_state"] == "paused" and doc["result"]["automation_state"] == "paused" and doc["result"]["latest_eval_outcome"] == "fail" and any(item["classification"] == "device_bridge_parse" for item in doc["result"]["linked_incidents"])' "bad OTLP telemetry did not pause the release and capture the bridge incident"
 run_control "${OBSERVE_BAD_DIR}/stop.run.json" "${OBSERVE_BAD_DIR}/stop.cli.json" stop "$OBSERVE_BAD_EXEC_ID" cli_stop
 run_query "${OBSERVE_BAD_DIR}/query.stopped.run.json" "${OBSERVE_BAD_DIR}/query.stopped.cli.json" "$OBSERVE_BAD_EXEC_ID" full
 assert_json_expr "${OBSERVE_BAD_DIR}/stop.cli.json" 'doc["ok"] is True and doc["result"]["kind"] == "device.release.stop.manual"' "stop did not emit the expected control action result"
@@ -492,7 +675,7 @@ run_control "${OBSERVE_BAD_DIR}/rerun.run.json" "${OBSERVE_BAD_DIR}/rerun.cli.js
 RERUN_EXEC_ID="$(extract_json_value "${OBSERVE_BAD_DIR}/rerun.cli.json" "result.new_execution_id")"
 run_query "${OBSERVE_BAD_DIR}/rerun.query.run.json" "${OBSERVE_BAD_DIR}/rerun.query.cli.json" "$RERUN_EXEC_ID" full
 assert_json_expr "${OBSERVE_BAD_DIR}/rerun.cli.json" 'doc["ok"] is True and doc["result"]["kind"] == "device.release.rerun.manual" and doc["result"]["new_execution_id"] == "'"${RERUN_EXEC_ID}"'"' "rerun did not create a new execution id"
-assert_json_expr "${OBSERVE_BAD_DIR}/rerun.query.cli.json" 'doc["ok"] is True and doc["result"]["automation_state"] == "waiting_for_observation"' "rerun did not create a fresh execution at the next metrics waitpoint"
+assert_json_expr "${OBSERVE_BAD_DIR}/rerun.query.cli.json" 'doc["ok"] is True and doc["result"]["automation_state"] == "waiting_for_observation" and doc["result"]["meta"]["parent_exec_id"] == "'"${OBSERVE_BAD_EXEC_ID}"'" and doc["result"]["meta"]["staged_package_manifest_path"].endswith("/device_release/packages/" + doc["result"]["exec_id"] + "/device.package.manifest.json")' "rerun did not create a fresh execution with a new staged package at the next metrics waitpoint"
 
 HALT_DIR="${TMP_DIR}/metrics_halt"
 mkdir -p "$HALT_DIR"
@@ -500,10 +683,10 @@ HALT_PLAN="${HALT_DIR}/plan.json"
 run_create "${HALT_DIR}/create.run.json" "${HALT_DIR}/create.cli.json" "$MOCK_PROD_PROVIDER" "$IOS_PACKAGE" "$HALT_PLAN" "$SLO_PROFILE" "300" "release.halt"
 run_release "${HALT_DIR}/run.run.json" "${HALT_DIR}/run.cli.json" "$HALT_PLAN" "$IOS_PACKAGE"
 HALT_EXEC_ID="$(extract_json_value "${HALT_DIR}/run.cli.json" "result.exec_id")"
-seed_metrics_snapshot "$HALT_EXEC_ID" "$METRICS_BAD"
+seed_otlp_export "$HALT_EXEC_ID" webview_crash
 run_control "${HALT_DIR}/observe.run.json" "${HALT_DIR}/observe.cli.json" observe "$HALT_EXEC_ID" cli_observe_halt
 run_query "${HALT_DIR}/query.after.run.json" "${HALT_DIR}/query.after.cli.json" "$HALT_EXEC_ID" full
-assert_json_expr "${HALT_DIR}/query.after.cli.json" 'doc["ok"] is True and doc["result"]["status"] == "aborted" and doc["result"]["current_state"] == "halted" and doc["result"]["automation_state"] == "stopped" and doc["result"]["latest_eval_outcome"] == "fail"' "bad metrics snapshot did not halt the release"
+assert_json_expr "${HALT_DIR}/query.after.cli.json" 'doc["ok"] is True and doc["result"]["status"] == "aborted" and doc["result"]["current_state"] == "halted" and doc["result"]["automation_state"] == "stopped" and doc["result"]["latest_eval_outcome"] == "fail" and any(item["classification"] == "device_webview_crash" for item in doc["result"]["linked_incidents"])' "bad OTLP telemetry did not halt the release on a webview crash"
 
 INCIDENT_DIR="${TMP_DIR}/device_incident_to_regression"
 mkdir -p "$INCIDENT_DIR" "${INCIDENT_DIR}/regress"

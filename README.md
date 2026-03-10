@@ -47,8 +47,11 @@ Developer commands:
 Device distribution note:
 - `x07lp device release-create`, `release-validate`, `release-run`, `release-query`, `release-observe`, `release-pause`, `release-resume`, `release-halt`, `release-stop`, `release-complete`, `release-rerun`, and `release-rollback` drive the shared device-release engine.
 - `x07lp device release-create` also accepts `--slo-profile`, `--metrics-window-seconds`, and `--metrics-on-fail` to seed a release metrics gate, and `x07lp device release-rerun` accepts `--from-step` to restart from a later step boundary.
-- Default CI and local fixture validation use deterministic provider-matrix simulation for `appstoreconnect_v1` and `googleplay_v1`.
-- Manual live-provider validation remains explicit through `X07LP_DEVICE_PROVIDER_LIVE=1`.
+- Default CI and local fixture validation stay on the `mock_v1` lane. `appstoreconnect_v1` and `googleplay_v1` execute only when `X07LP_DEVICE_PROVIDER_LIVE=1` is set.
+- Store credentials resolve from the encrypted secret store through `secrets://device/<id>` entries and `X07LP_REMOTE_SECRET_MASTER_KEY_FILE`.
+- `device release-run` stages a private package copy under state for each execution and patches only the staged telemetry profile with release correlation fields.
+- `metrics.eval` derives `x07.metrics.snapshot@0.1.0` from correlated OTLP log exports and captures blocking telemetry incidents before applying the plan `on_fail` action.
+- Manual live-provider validation lives in `scripts/ci/device-release-live-smoke.sh`.
 
 CI note:
 - The platform CI scripts prefer sibling workspace builds from `../x07/target/debug` and `../x07-wasm-backend/target/release` when those directories exist so the repo tests the current release train rather than an older installed toolchain.

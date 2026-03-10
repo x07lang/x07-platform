@@ -89,6 +89,7 @@ PACK_FIXTURE="spec/fixtures/phaseA/pack_min/app.pack.json"
 ROLLBACK_PACK_FIXTURE="spec/fixtures/remote-oss/common/pack_app_min_spin/app.pack.json"
 PACK_DIGEST_MISMATCH_FIXTURE="spec/fixtures/phaseA/pack_min/app.pack.bad.json"
 CHANGE_FIXTURE="spec/fixtures/phaseB/common/change_request.app_min.json"
+REMOTE_FIXTURE_INDEX="spec/fixtures/remote-oss/fixture_index.json"
 
 rm -rf "$TMP_DIR"
 mkdir -p "$TMP_DIR" "$TOKEN_DIR" "$OCI_CRED_DIR" "$OTLP_EXPORT_DIR"
@@ -311,6 +312,46 @@ except ValueError:
     print(path.absolute())
 PY
 }
+
+remote_fixture_field() {
+  local fixture_name="$1"
+  local field_name="$2"
+  "$PYTHON" - "$ROOT_DIR" "$REMOTE_FIXTURE_INDEX" "$fixture_name" "$field_name" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1]).resolve()
+index_path = root / sys.argv[2]
+fixture_name = sys.argv[3]
+field_name = sys.argv[4]
+doc = json.loads(index_path.read_text(encoding='utf-8'))
+items = {item["name"]: item for item in doc.get("fixtures", [])}
+seen = set()
+current = fixture_name
+while True:
+    if current in seen:
+        raise SystemExit(f"fixture alias cycle for {fixture_name}")
+    seen.add(current)
+    item = items[current]
+    alias = item.get("alias_of")
+    if not alias:
+        value = item.get(field_name)
+        if value is None and field_name == "plan":
+            fixture_dir = item.get("dir")
+            if fixture_dir:
+                value = fixture_dir.rstrip("/") + "/deploy.plan.json"
+        if value is None:
+            raise SystemExit(f"missing {field_name} for fixture {fixture_name}")
+        print(value)
+        break
+    current = alias
+PY
+}
+
+REMOTE_PROMOTE_FIXTURE_DIR="$(remote_fixture_field remote_promote dir)"
+REMOTE_ROLLBACK_FIXTURE_DIR="$(remote_fixture_field remote_rollback dir)"
+REMOTE_PAUSE_RERUN_FIXTURE_DIR="$(remote_fixture_field remote_pause_rerun dir)"
 
 check_schema_validate_ok() {
   local schema_path="$1"
@@ -898,8 +939,8 @@ validate_cli_report "${TMP_DIR}/remote_promote.query.summary.cli.json" "${TMP_DI
 validate_cli_report "${TMP_DIR}/remote_promote.query.full.cli.json" "${TMP_DIR}/remote_promote.query.full"
 validate_report_result_schema "contracts/spec/schemas/lp.deploy.query.result.schema.json" "${TMP_DIR}/remote_promote.query.summary.cli.json" "${TMP_DIR}/remote_promote.query.summary" "deploy.query.summary"
 validate_report_result_schema "contracts/spec/schemas/lp.deploy.query.result.schema.json" "${TMP_DIR}/remote_promote.query.full.cli.json" "${TMP_DIR}/remote_promote.query.full" "deploy.query.full"
-assert_report_matches_template "${TMP_DIR}/remote_promote.query.summary.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_promote/expected/query.summary.report.json"
-assert_report_matches_template "${TMP_DIR}/remote_promote.query.full.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_promote/expected/query.full.report.json"
+assert_report_matches_template "${TMP_DIR}/remote_promote.query.summary.cli.json" "${ROOT_DIR}/${REMOTE_PROMOTE_FIXTURE_DIR}/expected/query.summary.report.json"
+assert_report_matches_template "${TMP_DIR}/remote_promote.query.full.cli.json" "${ROOT_DIR}/${REMOTE_PROMOTE_FIXTURE_DIR}/expected/query.full.report.json"
 normalize_remote_query_full "${TMP_DIR}/remote_promote.query.full.cli.json" "${TMP_DIR}/remote_promote.query.full.normalized.json"
 assert_report_matches_template "${TMP_DIR}/remote_promote.query.full.normalized.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_parity/expected/query.full.normalized.json"
 
@@ -921,9 +962,9 @@ print(doc.get('result', {}).get('run_id') or '')
 PY
 )"
 run_x07lp "${TMP_DIR}/remote_rollback.run.run_report.json" "${TMP_DIR}/remote_rollback.run.cli.json" \
-  deploy run --target "$TARGET_NAME" --accepted-run "$ROLLBACK_RUN_ID" --fixture spec/fixtures/remote-oss/remote_rollback --json || true
+  deploy run --target "$TARGET_NAME" --accepted-run "$ROLLBACK_RUN_ID" --fixture "$REMOTE_ROLLBACK_FIXTURE_DIR" --json || true
 assert_negative_code "${TMP_DIR}/remote_rollback.run.cli.json" "LP_SLO_DECISION_ROLLBACK"
-assert_report_matches_template "${TMP_DIR}/remote_rollback.run.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_rollback/expected/deploy.run.report.json"
+assert_report_matches_template "${TMP_DIR}/remote_rollback.run.cli.json" "${ROOT_DIR}/${REMOTE_ROLLBACK_FIXTURE_DIR}/expected/deploy.run.report.json"
 ROLLBACK_EXEC_ID="$("$PYTHON" - "${TMP_DIR}/remote_rollback.run.cli.json" <<'PY'
 import json, pathlib, sys
 doc = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding='utf-8'))
@@ -935,7 +976,7 @@ assert_metrics_snapshot_labels \
   "${TMP_DIR}/remote_state/.x07lp/telemetry/${ROLLBACK_EXEC_ID}/analysis.1.json" \
   "$ROLLBACK_EXEC_ID" \
   "remote_runtime_probe"
-assert_report_matches_template "${TMP_DIR}/remote_rollback.query.summary.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_rollback/expected/query.summary.report.json"
+assert_report_matches_template "${TMP_DIR}/remote_rollback.query.summary.cli.json" "${ROOT_DIR}/${REMOTE_ROLLBACK_FIXTURE_DIR}/expected/query.summary.report.json"
 run_x07lp "${TMP_DIR}/remote_rollback.stop.run_report.json" "${TMP_DIR}/remote_rollback.stop.cli.json" \
   deploy stop --target "$TARGET_NAME" --deployment "$ROLLBACK_EXEC_ID" --reason "ci cleanup rollback" --json
 
@@ -955,19 +996,19 @@ PY
 )"
 (
   run_x07lp "${TMP_DIR}/remote_pause.run.run_report.json" "${TMP_DIR}/remote_pause.run.cli.json" \
-    deploy run --target "$TARGET_NAME" --accepted-run "$PAUSE_RUN_ID" --fixture spec/fixtures/remote-oss/remote_pause_rerun --json
+    deploy run --target "$TARGET_NAME" --accepted-run "$PAUSE_RUN_ID" --fixture "$REMOTE_PAUSE_RERUN_FIXTURE_DIR" --json
 ) &
 PAUSE_RUN_PID=$!
 PIDS+=("$PAUSE_RUN_PID")
 wait_for_pause_step "${TMP_DIR}/remote_state/deploy/${PAUSE_EXEC_ID}.json" 20
 run_x07lp "${TMP_DIR}/remote_pause.control.run_report.json" "${TMP_DIR}/remote_pause.control.cli.json" \
   deploy pause --target "$TARGET_NAME" --deployment "$PAUSE_EXEC_ID" --reason "ci pause" --json
-assert_report_matches_template "${TMP_DIR}/remote_pause.control.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_pause_rerun/expected/pause.report.json"
+assert_report_matches_template "${TMP_DIR}/remote_pause.control.cli.json" "${ROOT_DIR}/${REMOTE_PAUSE_RERUN_FIXTURE_DIR}/expected/pause.report.json"
 wait_for_control_state "${TMP_DIR}/remote_state/deploy/${PAUSE_EXEC_ID}.json" paused 20
 wait "$PAUSE_RUN_PID" || true
 run_x07lp "${TMP_DIR}/remote_rerun.control.run_report.json" "${TMP_DIR}/remote_rerun.control.cli.json" \
   deploy rerun --target "$TARGET_NAME" --deployment "$PAUSE_EXEC_ID" --reason "ci rerun" --json
-assert_report_matches_template "${TMP_DIR}/remote_rerun.control.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_pause_rerun/expected/rerun.report.json"
+assert_report_matches_template "${TMP_DIR}/remote_rerun.control.cli.json" "${ROOT_DIR}/${REMOTE_PAUSE_RERUN_FIXTURE_DIR}/expected/rerun.report.json"
 run_x07lp "${TMP_DIR}/remote_pause.stop.run_report.json" "${TMP_DIR}/remote_pause.stop.cli.json" \
   deploy stop --target "$TARGET_NAME" --deployment "$PAUSE_EXEC_ID" --reason "ci cleanup" --json
 
@@ -1073,7 +1114,7 @@ PY
 (
   run_x07lp "${TMP_DIR}/remote_lease_conflict.a.run_report.json" "${TMP_DIR}/remote_lease_conflict.a.cli.json" \
     deploy run --target "$TARGET_NAME" --accepted-run "$LEASE_CONFLICT_RUN_ID" \
-    --fixture spec/fixtures/remote-oss/remote_pause_rerun --pause-scale 0.2 --json
+    --fixture "$REMOTE_PAUSE_RERUN_FIXTURE_DIR" --pause-scale 0.2 --json
 ) &
 LEASE_CONFLICT_PID=$!
 PIDS+=("$LEASE_CONFLICT_PID")
@@ -1081,7 +1122,7 @@ wait_for_pause_step "${TMP_DIR}/remote_state/deploy/${LEASE_CONFLICT_EXEC_ID}.js
 sleep 3
 run_x07lp "${TMP_DIR}/remote_lease_conflict.b.run_report.json" "${TMP_DIR}/remote_lease_conflict.b.cli.json" \
   deploy run --target "$TARGET_NAME" --accepted-run "$LEASE_CONFLICT_RUN_ID" \
-  --fixture spec/fixtures/remote-oss/remote_pause_rerun --pause-scale 0.2 --json || true
+  --fixture "$REMOTE_PAUSE_RERUN_FIXTURE_DIR" --pause-scale 0.2 --json || true
 assert_negative_code "${TMP_DIR}/remote_lease_conflict.b.cli.json" "LP_REMOTE_LEASE_CONFLICT"
 assert_report_matches_template "${TMP_DIR}/remote_lease_conflict.b.cli.json" "${ROOT_DIR}/spec/fixtures/remote-oss/remote_lease_conflict/expected/deploy.run.report.json"
 wait "$LEASE_CONFLICT_PID" || true
