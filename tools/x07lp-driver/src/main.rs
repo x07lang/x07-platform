@@ -9499,16 +9499,6 @@ fn command_device_release_create(args: DeviceReleaseCreateArgs) -> Result<Value>
         load_device_profile_from_package_manifest(&package_manifest_path, &package_doc)?;
     let provider_id = get_str(&provider_doc, &["provider_id"]).unwrap_or_default();
     let package_digest = digest_value(&package_bytes);
-    let plan_id = gen_id(
-        "lpdrplan",
-        &format!(
-            "{provider_id}:{}:{now_unix_ms}",
-            package_digest
-                .get("sha256")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-        ),
-    );
     let app = json!({
         "app_id": get_str(&device_profile_doc, &["identity", "app_id"]).unwrap_or_else(|| "unknown".to_string()),
         "track_or_lane": get_str(&provider_doc, &["track"]).unwrap_or_else(|| {
@@ -9530,6 +9520,21 @@ fn command_device_release_create(args: DeviceReleaseCreateArgs) -> Result<Value>
                 .unwrap_or_else(|| "release.pause".to_string()),
         }));
     }
+    let plan_seed = json!({
+        "created_unix_ms": now_unix_ms,
+        "provider_id": provider_id,
+        "provider_kind": get_str(&provider_doc, &["provider_kind"]).unwrap_or_default(),
+        "distribution_lane": get_str(&provider_doc, &["distribution_lane"]).unwrap_or_default(),
+        "target": provider_target,
+        "app": app,
+        "package_digest": package_digest,
+        "slo_profile_ref": slo_profile_ref,
+        "steps": steps,
+    });
+    let plan_id = gen_id(
+        "lpdrplan",
+        &String::from_utf8_lossy(&canon_json_bytes(&plan_seed)),
+    );
     let plan_doc = json!({
         "schema_version": DEVICE_RELEASE_PLAN_KIND,
         "plan_id": plan_id,

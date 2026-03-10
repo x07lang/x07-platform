@@ -459,7 +459,7 @@ mod tests {
         fs::create_dir_all(&tmp).expect("create tmp dir");
         write_bytes(
             &export_path,
-            br#"{"resourceLogs":[{"resource":{"attributes":[{"key":"x07.release.exec_id","value":{"stringValue":"lpdrexec_demo"}},{"key":"x07.release.plan_id","value":{"stringValue":"lpdrplan_demo"}},{"key":"x07.app_id","value":{"stringValue":"io.x07.demo.ios"}},{"key":"x07.package.sha256","value":{"stringValue":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}]},"scopeLogs":[{"logRecords":[{"body":{"stringValue":"app.http"},"attributes":[{"key":"x07.event.class","value":{"stringValue":"app.http"}},{"key":"x07.event.name","value":{"stringValue":"app.http"}},{"key":"status","value":{"intValue":"200"}},{"key":"duration_ms","value":{"doubleValue":90.0}}]},{"body":{"stringValue":"app.http"},"attributes":[{"key":"x07.event.class","value":{"stringValue":"app.http"}},{"key":"x07.event.name","value":{"stringValue":"app.http"}},{"key":"status","value":{"intValue":"200"}},{"key":"duration_ms","value":{"doubleValue":110.0}}]},{"body":{"stringValue":"runtime.error"},"attributes":[{"key":"x07.event.class","value":{"stringValue":"runtime.error"}},{"key":"x07.event.name","value":{"stringValue":"runtime.error"}},{"key":"message","value":{"stringValue":"boom"}}]}]}]}]}
+            br#"{"resourceLogs":[{"resource":{"attributes":[{"key":"x07.release.exec_id","value":{"stringValue":"lpdrexec_demo"}},{"key":"x07.release.plan_id","value":{"stringValue":"lpdrplan_demo"}},{"key":"x07.app_id","value":{"stringValue":"io.x07.demo.ios"}},{"key":"x07.package.sha256","value":{"stringValue":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}]},"scopeLogs":[{"logRecords":[{"body":{"stringValue":"app.http"},"attributes":[{"key":"x07.event.class","value":{"stringValue":"app.http"}},{"key":"x07.event.name","value":{"stringValue":"app.http"}},{"key":"status","value":{"intValue":"200"}},{"key":"duration_ms","value":{"doubleValue":90.0}}]},{"body":{"stringValue":"app.http"},"attributes":[{"key":"x07.event.class","value":{"stringValue":"app.http"}},{"key":"x07.event.name","value":{"stringValue":"app.http"}},{"key":"status","value":{"intValue":"200"}},{"key":"duration_ms","value":{"doubleValue":110.0}}]},{"body":{"stringValue":"runtime.error"},"attributes":[{"key":"x07.event.class","value":{"stringValue":"runtime.error"}},{"key":"x07.event.name","value":{"stringValue":"runtime.error"}},{"key":"stage","value":{"stringValue":"bridge_parse"}},{"key":"message","value":{"stringValue":"boom"}}]},{"body":{"stringValue":"policy.violation"},"attributes":[{"key":"x07.event.class","value":{"stringValue":"policy.violation"}},{"key":"x07.event.name","value":{"stringValue":"policy.violation"}},{"key":"message","value":{"stringValue":"policy blocked rollout"}}]},{"body":{"stringValue":"host.webview_crash"},"attributes":[{"key":"x07.event.class","value":{"stringValue":"host.webview_crash"}},{"key":"x07.event.name","value":{"stringValue":"host.webview_crash"}},{"key":"message","value":{"stringValue":"webview crashed"}}]}]}]}]}
 "#,
         )
         .expect("write export");
@@ -483,6 +483,14 @@ mod tests {
             get_str(&analysis.snapshot, &["schema_version"]).as_deref(),
             Some("x07.metrics.snapshot@0.1.0")
         );
-        assert_eq!(analysis.incidents.len(), 1);
+        let classes = analysis
+            .incidents
+            .iter()
+            .map(|incident| incident.classification.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(classes.len(), 3);
+        assert!(classes.contains("device_bridge_parse"));
+        assert!(classes.contains("device_policy_violation"));
+        assert!(classes.contains("device_webview_crash"));
     }
 }
