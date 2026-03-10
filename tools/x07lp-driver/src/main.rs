@@ -4,6 +4,7 @@ use aes_gcm_siv::{Aes256GcmSiv, KeyInit, Nonce, aead::Aead};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL_SAFE_NO_PAD;
 use clap::{Args, Parser, Subcommand};
 use ed25519_dalek::{Signer, SigningKey};
 use native_tls::{Certificate as NativeTlsCertificate, TlsConnector};
@@ -62,6 +63,10 @@ const DEFAULT_REMOTE_SECRET_STORE_FILE: &str = "remote-secret-store.enc.json";
 const DEFAULT_REMOTE_OTLP_EXPORT_FILE: &str = "collector-metrics.jsonl";
 const DEFAULT_REMOTE_NATS_URL: &str = "nats://127.0.0.1:4222";
 const DEFAULT_REMOTE_LATTICE: &str = "default";
+const DEFAULT_HOSTED_CLIENT_ID: &str = "x07lp-cli";
+const DEFAULT_HOSTED_SCOPE: &str = "cloud:all offline_access";
+const HOSTED_SESSION_REFRESH_SKEW_MS: u64 = 30_000;
+const HOSTED_LOGIN_TIMEOUT_SECS: u64 = 300;
 const REMOTE_SECRET_MASTER_KEY_FILE_ENV: &str = "X07LP_REMOTE_SECRET_MASTER_KEY_FILE";
 const REMOTE_SYNTHETIC_TELEMETRY_ENV: &str = "X07LP_REMOTE_SYNTHETIC_TELEMETRY";
 const REMOTE_SECRET_STORE_SCHEMA_VERSION: &str = "lp.remote.secret.store.encrypted.internal@0.1.0";
@@ -170,6 +175,20 @@ struct ResolvedOciTls {
     ca_bundle_path: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone)]
+struct HostedAuthMetadata {
+    api_base: String,
+    metadata_url: String,
+    issuer: String,
+    authorization_endpoint: String,
+    token_endpoint: String,
+    device_authorization_endpoint: String,
+    revocation_endpoint: String,
+    jwks_uri: String,
+    client_id: String,
+    scope: String,
+}
+
 #[derive(Parser, Debug)]
 #[command(disable_help_subcommand = true, version = TOOL_VERSION)]
 struct Cli {
@@ -179,6 +198,13 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    Login(LoginArgs),
+    Whoami(HostedCommonArgs),
+    Logout(HostedCommonArgs),
+    Org(HostedOrgArgs),
+    Project(HostedProjectArgs),
+    Env(HostedEnvironmentArgs),
+    Context(HostedContextArgs),
     Accept(DeployAcceptArgs),
     Run(DeployRunArgs),
     Query(DeployQueryArgs),
@@ -227,6 +253,133 @@ struct CommonStateArgs {
     now_unix_ms: Option<u64>,
     #[arg(long, default_value_t = false)]
     json: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+struct HostedCommonArgs {
+    #[arg(long)]
+    api_base: Option<String>,
+    #[arg(long, default_value_t = false)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct LoginArgs {
+    #[arg(long)]
+    api_base: Option<String>,
+    #[arg(long, default_value_t = false)]
+    device: bool,
+    #[arg(long, default_value_t = false)]
+    json: bool,
+}
+
+#[derive(Args, Debug)]
+struct HostedOrgArgs {
+    #[command(subcommand)]
+    command: HostedOrgCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum HostedOrgCommand {
+    List(HostedCommonArgs),
+    Create(HostedCreateArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+struct HostedCreateArgs {
+    #[arg(long)]
+    name: String,
+    #[arg(long)]
+    slug: Option<String>,
+    #[command(flatten)]
+    common: HostedCommonArgs,
+}
+
+#[derive(Args, Debug)]
+struct HostedProjectArgs {
+    #[command(subcommand)]
+    command: HostedProjectCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum HostedProjectCommand {
+    List(HostedProjectListArgs),
+    Create(HostedProjectCreateArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+struct HostedProjectListArgs {
+    #[arg(long)]
+    org: String,
+    #[command(flatten)]
+    common: HostedCommonArgs,
+}
+
+#[derive(Args, Debug, Clone)]
+struct HostedProjectCreateArgs {
+    #[arg(long)]
+    org: String,
+    #[arg(long)]
+    name: String,
+    #[arg(long)]
+    slug: Option<String>,
+    #[command(flatten)]
+    common: HostedCommonArgs,
+}
+
+#[derive(Args, Debug)]
+struct HostedEnvironmentArgs {
+    #[command(subcommand)]
+    command: HostedEnvironmentCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum HostedEnvironmentCommand {
+    List(HostedEnvironmentListArgs),
+    Create(HostedEnvironmentCreateArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+struct HostedEnvironmentListArgs {
+    #[arg(long)]
+    project: String,
+    #[command(flatten)]
+    common: HostedCommonArgs,
+}
+
+#[derive(Args, Debug, Clone)]
+struct HostedEnvironmentCreateArgs {
+    #[arg(long)]
+    project: String,
+    #[arg(long)]
+    name: String,
+    #[arg(long)]
+    slug: Option<String>,
+    #[command(flatten)]
+    common: HostedCommonArgs,
+}
+
+#[derive(Args, Debug)]
+struct HostedContextArgs {
+    #[command(subcommand)]
+    command: HostedContextCommand,
+}
+
+#[derive(Subcommand, Debug)]
+enum HostedContextCommand {
+    Use(HostedContextUseArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+struct HostedContextUseArgs {
+    #[arg(long)]
+    org: String,
+    #[arg(long)]
+    project: String,
+    #[arg(long = "env")]
+    environment: Option<String>,
+    #[command(flatten)]
+    common: HostedCommonArgs,
 }
 
 #[derive(Args, Debug)]
@@ -602,6 +755,13 @@ fn main() -> std::process::ExitCode {
 fn real_main() -> Result<i32> {
     let cli = Cli::parse();
     let report = match cli.command {
+        Commands::Login(args) => command_login(args)?,
+        Commands::Whoami(args) => command_whoami(args)?,
+        Commands::Logout(args) => command_logout(args)?,
+        Commands::Org(args) => command_org(args)?,
+        Commands::Project(args) => command_project(args)?,
+        Commands::Env(args) => command_environment(args)?,
+        Commands::Context(args) => command_context(args)?,
         Commands::UiServe(args) => return command_ui_serve(args),
         Commands::Accept(args) => command_accept(args)?,
         Commands::Run(args) => command_run(args)?,
@@ -767,6 +927,12 @@ fn home_dir() -> Result<PathBuf> {
 }
 
 fn x07lp_config_dir() -> Result<PathBuf> {
+    if let Some(raw) = std::env::var_os("X07LP_CONFIG_DIR").filter(|value| !value.is_empty()) {
+        return expand_user_path(&raw.to_string_lossy());
+    }
+    if let Some(raw) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+        return Ok(expand_user_path(&raw.to_string_lossy())?.join("x07lp"));
+    }
     Ok(home_dir()?.join(".config").join("x07lp"))
 }
 
@@ -780,6 +946,10 @@ fn x07lp_tokens_dir() -> Result<PathBuf> {
 
 fn x07lp_current_target_path() -> Result<PathBuf> {
     Ok(x07lp_config_dir()?.join("current_target"))
+}
+
+fn x07lp_session_path() -> Result<PathBuf> {
+    Ok(x07lp_config_dir()?.join("session.json"))
 }
 
 fn target_profile_path(name: &str) -> Result<PathBuf> {
@@ -1166,6 +1336,459 @@ fn write_json_600(path: &Path, value: &Value) -> Result<Vec<u8>> {
     let bytes = canon_json_bytes(value);
     write_bytes_600(path, &bytes)?;
     Ok(bytes)
+}
+
+fn normalize_hosted_api_base(raw: &str) -> Result<String> {
+    let api_base = raw.trim();
+    if api_base.is_empty() {
+        bail!("hosted api base must not be empty");
+    }
+    let parsed = parse_url(api_base)?;
+    match parsed.scheme() {
+        "https" => {}
+        "http" if loopback_url(&parsed) => {}
+        "http" => bail!("non-loopback hosted api base must use https://"),
+        other => bail!("unsupported hosted api base scheme: {other}"),
+    }
+    if parsed.host_str().is_none() {
+        bail!("missing host in hosted api base");
+    }
+    Ok(api_base.trim_end_matches('/').to_string())
+}
+
+fn requested_hosted_api_base(explicit: Option<&str>) -> Result<Option<String>> {
+    if let Some(value) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+        return Ok(Some(normalize_hosted_api_base(value)?));
+    }
+    if let Ok(value) = std::env::var("X07LP_HOSTED_API_BASE") {
+        let value = value.trim();
+        if !value.is_empty() {
+            return Ok(Some(normalize_hosted_api_base(value)?));
+        }
+    }
+    Ok(None)
+}
+
+fn session_api_base(session: &Value) -> Result<String> {
+    let api_base = get_str(session, &["target", "api_base"])
+        .ok_or_else(|| anyhow!("missing session target.api_base"))?;
+    normalize_hosted_api_base(&api_base)
+}
+
+fn resolve_hosted_api_base(explicit: Option<&str>) -> Result<String> {
+    if let Some(api_base) = requested_hosted_api_base(explicit)? {
+        return Ok(api_base);
+    }
+    if let Some(session) = load_hosted_session_doc_if_exists()? {
+        return session_api_base(&session);
+    }
+    bail!("hosted operation requires --api-base, X07LP_HOSTED_API_BASE, or a saved hosted session")
+}
+
+fn split_scope_string(raw: &str) -> Vec<String> {
+    raw.split_whitespace()
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn scope_array(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|item| !item.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn access_token_kid(access_token: &str) -> Option<String> {
+    let header_segment = access_token.split('.').next()?;
+    let bytes = BASE64_URL_SAFE_NO_PAD.decode(header_segment.as_bytes()).ok()?;
+    let doc: Value = serde_json::from_slice(&bytes).ok()?;
+    doc.get("kid").and_then(Value::as_str).map(ToOwned::to_owned)
+}
+
+fn validate_hosted_token_response(doc: &Value) -> Result<()> {
+    if get_str(doc, &["schema_version"]).as_deref() != Some("lp.auth.token.response@0.1.0") {
+        bail!("invalid hosted token response schema_version");
+    }
+    if get_str(doc, &["token_type"]).as_deref() != Some("Bearer") {
+        bail!("invalid hosted token response token_type");
+    }
+    if get_str(doc, &["access_token"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted token response access_token");
+    }
+    if get_u64(doc, &["expires_in"]).unwrap_or(0) == 0 {
+        bail!("missing hosted token response expires_in");
+    }
+    if split_scope_string(&get_str(doc, &["scope"]).unwrap_or_default()).is_empty() {
+        bail!("missing hosted token response scope");
+    }
+    if get_str(doc, &["issuer"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted token response issuer");
+    }
+    if get_str(doc, &["audience"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted token response audience");
+    }
+    if get_str(doc, &["subject", "subject_id"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted token response subject.subject_id");
+    }
+    if get_str(doc, &["subject", "subject_kind"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted token response subject.subject_kind");
+    }
+    Ok(())
+}
+
+fn validate_hosted_whoami_result(doc: &Value) -> Result<()> {
+    if get_str(doc, &["schema_version"]).as_deref() != Some("lp.auth.whoami.result@0.1.0") {
+        bail!("invalid hosted whoami schema_version");
+    }
+    if get_str(doc, &["account", "account_id"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted whoami account.account_id");
+    }
+    if get_str(doc, &["account", "subject_kind"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted whoami account.subject_kind");
+    }
+    if get_str(doc, &["target", "name"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted whoami target.name");
+    }
+    if get_str(doc, &["target", "api_base"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted whoami target.api_base");
+    }
+    if get_str(doc, &["target", "audience"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted whoami target.audience");
+    }
+    if get_str(doc, &["default_context", "org_id"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted whoami default_context.org_id");
+    }
+    if get_str(doc, &["default_context", "project_id"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted whoami default_context.project_id");
+    }
+    if scope_array(doc.get("scope").unwrap_or(&Value::Null)).is_empty() {
+        bail!("missing hosted whoami scope");
+    }
+    if get_u64(doc, &["session_expires_unix_ms"]).unwrap_or(0) == 0 {
+        bail!("missing hosted whoami session_expires_unix_ms");
+    }
+    Ok(())
+}
+
+fn validate_hosted_session_doc(doc: &Value) -> Result<()> {
+    if get_str(doc, &["schema_version"]).as_deref() != Some("lp.auth.session@0.1.0") {
+        bail!("invalid hosted session schema_version");
+    }
+    if get_str(doc, &["issuer"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted session issuer");
+    }
+    if get_str(doc, &["auth_metadata_url"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted session auth_metadata_url");
+    }
+    if get_str(doc, &["jwks_uri"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted session jwks_uri");
+    }
+    if get_str(doc, &["target", "name"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted session target.name");
+    }
+    if get_str(doc, &["target", "api_base"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted session target.api_base");
+    }
+    if get_str(doc, &["target", "audience"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted session target.audience");
+    }
+    if get_str(doc, &["account", "account_id"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted session account.account_id");
+    }
+    if get_str(doc, &["account", "subject_kind"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted session account.subject_kind");
+    }
+    if get_str(doc, &["default_context", "org_id"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted session default_context.org_id");
+    }
+    if get_str(doc, &["default_context", "project_id"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted session default_context.project_id");
+    }
+    if get_str(doc, &["tokens", "token_type"]).as_deref() != Some("Bearer") {
+        bail!("invalid hosted session tokens.token_type");
+    }
+    if get_str(doc, &["tokens", "access_token"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+        == false
+    {
+        bail!("missing hosted session tokens.access_token");
+    }
+    if get_u64(doc, &["tokens", "access_token_expires_unix_ms"]).unwrap_or(0) == 0 {
+        bail!("missing hosted session tokens.access_token_expires_unix_ms");
+    }
+    if scope_array(
+        doc.get("tokens")
+            .and_then(|tokens| tokens.get("scope"))
+            .unwrap_or(&Value::Null),
+    )
+    .is_empty()
+    {
+        bail!("missing hosted session tokens.scope");
+    }
+    let refresh_token = get_str(doc, &["tokens", "refresh_token"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false);
+    let refresh_ref = get_str(doc, &["tokens", "refresh_token_ref"])
+        .map(|value| !value.is_empty())
+        .unwrap_or(false);
+    if !refresh_token && !refresh_ref {
+        bail!("hosted session requires refresh_token or refresh_token_ref");
+    }
+    if get_u64(doc, &["created_unix_ms"]).unwrap_or(0) == 0 {
+        bail!("missing hosted session created_unix_ms");
+    }
+    if get_u64(doc, &["updated_unix_ms"]).unwrap_or(0) == 0 {
+        bail!("missing hosted session updated_unix_ms");
+    }
+    Ok(())
+}
+
+fn load_hosted_session_doc_if_exists() -> Result<Option<Value>> {
+    let path = x07lp_session_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    ensure_owner_only_file(&path, "hosted session")?;
+    let doc = load_json(&path)?;
+    validate_hosted_session_doc(&doc)?;
+    Ok(Some(doc))
+}
+
+fn load_hosted_session_doc() -> Result<Value> {
+    load_hosted_session_doc_if_exists()?
+        .ok_or_else(|| anyhow!("no hosted session found; run `x07lp login`"))
+}
+
+fn store_hosted_session_doc(doc: &Value) -> Result<PathBuf> {
+    validate_hosted_session_doc(doc)?;
+    let path = x07lp_session_path()?;
+    let _ = write_json_600(&path, doc)?;
+    Ok(path)
+}
+
+fn delete_hosted_session_doc() -> Result<bool> {
+    let path = x07lp_session_path()?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
+    Ok(true)
+}
+
+fn session_needs_refresh(session: &Value, now_unix_ms: u64) -> bool {
+    get_u64(session, &["tokens", "access_token_expires_unix_ms"])
+        .unwrap_or_default()
+        <= now_unix_ms.saturating_add(HOSTED_SESSION_REFRESH_SKEW_MS)
+}
+
+fn session_refresh_token(session: &Value) -> Result<String> {
+    get_str(session, &["tokens", "refresh_token"])
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("hosted session does not contain a refresh token"))
+}
+
+fn session_access_token(session: &Value) -> Result<String> {
+    get_str(session, &["tokens", "access_token"])
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("hosted session does not contain an access token"))
+}
+
+fn derive_slug(name: &str) -> String {
+    let mut slug = String::new();
+    let mut last_dash = false;
+    for ch in name.chars() {
+        let lower = ch.to_ascii_lowercase();
+        if lower.is_ascii_alphanumeric() {
+            slug.push(lower);
+            last_dash = false;
+        } else if !last_dash && !slug.is_empty() {
+            slug.push('-');
+            last_dash = true;
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
+
+fn chosen_slug(name: &str, explicit: Option<&str>) -> Result<String> {
+    let slug = explicit
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| derive_slug(name));
+    if slug.is_empty() {
+        bail!("unable to derive slug from --name; pass --slug explicitly");
+    }
+    Ok(slug)
+}
+
+fn redacted_session_summary(session: &Value) -> Value {
+    json!({
+        "issuer": get_str(session, &["issuer"]).unwrap_or_default(),
+        "target": session.get("target").cloned().unwrap_or_else(|| json!({})),
+        "account": session.get("account").cloned().unwrap_or_else(|| json!({})),
+        "default_context": session.get("default_context").cloned().unwrap_or_else(|| json!({})),
+        "updated_unix_ms": get_u64(session, &["updated_unix_ms"]).unwrap_or_default()
+    })
+}
+
+fn build_hosted_session_doc(
+    metadata: &HostedAuthMetadata,
+    token_response: &Value,
+    whoami: &Value,
+    current: Option<&Value>,
+) -> Result<Value> {
+    validate_hosted_token_response(token_response)?;
+    validate_hosted_whoami_result(whoami)?;
+    let now_unix_ms = now_ms();
+    let access_token = get_str(token_response, &["access_token"]).unwrap();
+    let refresh_token = get_str(token_response, &["refresh_token"])
+        .or_else(|| current.and_then(|value| get_str(value, &["tokens", "refresh_token"])));
+    let refresh_token_ref = current.and_then(|value| get_str(value, &["tokens", "refresh_token_ref"]));
+    if refresh_token.is_none() && refresh_token_ref.is_none() {
+        bail!("hosted login did not return a refresh token");
+    }
+    let mut tokens = json!({
+        "token_type": "Bearer",
+        "access_token": access_token,
+        "access_token_expires_unix_ms": now_unix_ms
+            .saturating_add(get_u64(token_response, &["expires_in"]).unwrap_or_default().saturating_mul(1000)),
+        "scope": if !scope_array(whoami.get("scope").unwrap_or(&Value::Null)).is_empty() {
+            Value::Array(scope_array(whoami.get("scope").unwrap_or(&Value::Null)).into_iter().map(Value::String).collect())
+        } else {
+            Value::Array(split_scope_string(&get_str(token_response, &["scope"]).unwrap_or_default()).into_iter().map(Value::String).collect())
+        },
+        "refresh_token": refresh_token.clone().map(Value::String).unwrap_or(Value::Null),
+        "refresh_token_ref": refresh_token_ref.map(Value::String).unwrap_or(Value::Null),
+        "refresh_token_expires_unix_ms": get_u64(token_response, &["refresh_expires_in"])
+            .map(|value| now_unix_ms.saturating_add(value.saturating_mul(1000)))
+            .or_else(|| current.and_then(|value| get_u64(value, &["tokens", "refresh_token_expires_unix_ms"])))
+    });
+    if let Some(kid) = access_token_kid(tokens["access_token"].as_str().unwrap_or_default()) {
+        ensure_object(&mut tokens).insert("kid".to_string(), Value::String(kid));
+    }
+    let mut session = json!({
+        "schema_version": "lp.auth.session@0.1.0",
+        "issuer": get_str(token_response, &["issuer"]).unwrap_or_else(|| metadata.issuer.clone()),
+        "auth_metadata_url": metadata.metadata_url,
+        "jwks_uri": metadata.jwks_uri,
+        "target": whoami.get("target").cloned().unwrap_or_else(|| {
+            json!({
+                "name": "cloud",
+                "api_base": metadata.api_base,
+                "audience": get_str(token_response, &["audience"]).unwrap_or_default()
+            })
+        }),
+        "account": whoami.get("account").cloned().unwrap_or_else(|| json!({})),
+        "default_context": whoami
+            .get("default_context")
+            .cloned()
+            .or_else(|| token_response.get("default_context").cloned())
+            .unwrap_or_else(|| json!({})),
+        "tokens": tokens,
+        "created_unix_ms": current
+            .and_then(|value| get_u64(value, &["created_unix_ms"]))
+            .unwrap_or(now_unix_ms),
+        "updated_unix_ms": now_unix_ms
+    });
+    ensure_object(&mut session)
+        .entry("target".to_string())
+        .or_insert_with(|| json!({}));
+    validate_hosted_session_doc(&session)?;
+    Ok(session)
 }
 
 fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -5615,6 +6238,839 @@ fn build_adapter_capabilities_doc(capabilities: &Value) -> Value {
 
 fn remote_agent() -> Agent {
     Agent::new()
+}
+
+fn hosted_request_json(
+    method: &str,
+    url: &str,
+    bearer: Option<&str>,
+    body: Option<&Value>,
+) -> Result<Value> {
+    let agent = remote_agent();
+    let request = agent.request(method, url).set("accept", "application/json");
+    let request = if let Some(token) = bearer {
+        request.set("authorization", &format!("Bearer {token}"))
+    } else {
+        request
+    };
+    let response = match body {
+        Some(doc) => request
+            .set("content-type", "application/json")
+            .send_json(doc.clone()),
+        None => request.call(),
+    };
+    match response {
+        Ok(response) => decode_http_json_response(response),
+        Err(UreqError::Status(_, response)) => decode_http_json_response(response),
+        Err(UreqError::Transport(err)) => bail!("hosted request failed: {method} {url}: {err}"),
+    }
+}
+
+fn hosted_form_body(params: &[(String, String)]) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in params {
+        serializer.append_pair(key, value);
+    }
+    serializer.finish()
+}
+
+fn hosted_request_form(
+    method: &str,
+    url: &str,
+    bearer: Option<&str>,
+    params: &[(String, String)],
+) -> Result<Value> {
+    let agent = remote_agent();
+    let request = agent
+        .request(method, url)
+        .set("accept", "application/json")
+        .set("content-type", "application/x-www-form-urlencoded");
+    let request = if let Some(token) = bearer {
+        request.set("authorization", &format!("Bearer {token}"))
+    } else {
+        request
+    };
+    let response = request.send_string(&hosted_form_body(params));
+    match response {
+        Ok(response) => decode_http_json_response(response),
+        Err(UreqError::Status(_, response)) => decode_http_json_response(response),
+        Err(UreqError::Transport(err)) => bail!("hosted request failed: {method} {url}: {err}"),
+    }
+}
+
+fn unwrap_hosted_cli_report(response: Value) -> Result<Value> {
+    if get_str(&response, &["schema_version"]).as_deref() != Some("lp.cli.report@0.1.0") {
+        return Ok(response);
+    }
+    if response.get("ok").and_then(Value::as_bool) == Some(true) {
+        return Ok(response.get("result").cloned().unwrap_or_else(|| json!({})));
+    }
+    bail!("{}", first_diag_message(&response))
+}
+
+fn oauth_error_message(response: &Value) -> Option<String> {
+    let error = response.get("error").and_then(Value::as_str)?;
+    let description = response
+        .get("error_description")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty());
+    Some(match description {
+        Some(description) => format!("{error}: {description}"),
+        None => error.to_string(),
+    })
+}
+
+fn parse_hosted_auth_metadata(api_base: &str, metadata_url: &str, response: Value) -> Result<HostedAuthMetadata> {
+    let doc = unwrap_hosted_cli_report(response)?;
+    let issuer = get_str(&doc, &["issuer"]).ok_or_else(|| anyhow!("missing OIDC issuer"))?;
+    let jwks_uri = get_str(&doc, &["jwks_uri"]).ok_or_else(|| anyhow!("missing OIDC jwks_uri"))?;
+    Ok(HostedAuthMetadata {
+        api_base: api_base.to_string(),
+        metadata_url: metadata_url.to_string(),
+        issuer,
+        authorization_endpoint: get_str(&doc, &["authorization_endpoint"])
+            .unwrap_or_else(|| format!("{api_base}/oauth/authorize")),
+        token_endpoint: get_str(&doc, &["token_endpoint"])
+            .unwrap_or_else(|| format!("{api_base}/oauth/token")),
+        device_authorization_endpoint: get_str(&doc, &["device_authorization_endpoint"])
+            .or_else(|| get_str(&doc, &["device_endpoint"]))
+            .unwrap_or_else(|| format!("{api_base}/oauth/device/code")),
+        revocation_endpoint: get_str(&doc, &["revocation_endpoint"])
+            .unwrap_or_else(|| format!("{api_base}/oauth/revoke")),
+        jwks_uri,
+        client_id: get_str(&doc, &["x07lp_client_id"])
+            .or_else(|| get_str(&doc, &["client_id"]))
+            .unwrap_or_else(|| DEFAULT_HOSTED_CLIENT_ID.to_string()),
+        scope: get_str(&doc, &["x07lp_scope"]).unwrap_or_else(|| DEFAULT_HOSTED_SCOPE.to_string()),
+    })
+}
+
+fn load_hosted_auth_metadata(api_base: &str) -> Result<HostedAuthMetadata> {
+    let metadata_url = format!("{}/.well-known/openid-configuration", api_base.trim_end_matches('/'));
+    let response = hosted_request_json("GET", &metadata_url, None, None)?;
+    parse_hosted_auth_metadata(api_base, &metadata_url, response)
+}
+
+fn load_hosted_auth_metadata_from_session(session: &Value) -> Result<HostedAuthMetadata> {
+    let api_base = session_api_base(session)?;
+    let metadata_url = get_str(session, &["auth_metadata_url"])
+        .unwrap_or_else(|| format!("{api_base}/.well-known/openid-configuration"));
+    let response = hosted_request_json("GET", &metadata_url, None, None)?;
+    parse_hosted_auth_metadata(&api_base, &metadata_url, response)
+}
+
+fn random_urlsafe_token(byte_len: usize) -> String {
+    let mut bytes = vec![0_u8; byte_len];
+    OsRng.fill_bytes(&mut bytes);
+    BASE64_URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn pkce_code_challenge(verifier: &str) -> String {
+    let digest = Sha256::digest(verifier.as_bytes());
+    BASE64_URL_SAFE_NO_PAD.encode(digest)
+}
+
+fn open_browser_best_effort(url: &str) -> bool {
+    for argv in [["open", url], ["xdg-open", url]] {
+        if Command::new(argv[0]).arg(argv[1]).status().is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
+fn wait_for_browser_login_code(listener: TcpListener, expected_state: &str) -> Result<String> {
+    listener
+        .set_nonblocking(true)
+        .context("configure loopback callback listener")?;
+    let deadline = Instant::now() + Duration::from_secs(HOSTED_LOGIN_TIMEOUT_SECS);
+    loop {
+        match listener.accept() {
+            Ok((mut stream, _)) => {
+                let request = read_http_request(&mut stream)?;
+                if let Some(error) = request.query.get("error") {
+                    let description = request
+                        .query
+                        .get("error_description")
+                        .map(String::as_str)
+                        .unwrap_or(error);
+                    let body = format!(
+                        "<html><body><h1>x07lp login failed</h1><p>{description}</p></body></html>"
+                    );
+                    let _ = write_http_response(
+                        &mut stream,
+                        400,
+                        "text/html; charset=utf-8",
+                        body.as_bytes(),
+                    );
+                    bail!("login failed: {description}");
+                }
+                if request.query.get("state").map(String::as_str) != Some(expected_state) {
+                    let body =
+                        "<html><body><h1>x07lp login failed</h1><p>state mismatch</p></body></html>";
+                    let _ =
+                        write_http_response(&mut stream, 400, "text/html; charset=utf-8", body.as_bytes());
+                    bail!("login failed: state mismatch");
+                }
+                let code = request
+                    .query
+                    .get("code")
+                    .filter(|value| !value.is_empty())
+                    .cloned()
+                    .ok_or_else(|| anyhow!("login failed: missing authorization code"))?;
+                let body =
+                    "<html><body><h1>x07lp login complete</h1><p>You can return to the terminal.</p></body></html>";
+                let _ = write_http_response(
+                    &mut stream,
+                    200,
+                    "text/html; charset=utf-8",
+                    body.as_bytes(),
+                );
+                return Ok(code);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    bail!("timed out waiting for browser login callback");
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) => return Err(err).context("accept browser login callback"),
+        }
+    }
+}
+
+fn exchange_authorization_code(
+    metadata: &HostedAuthMetadata,
+    code: &str,
+    code_verifier: &str,
+    redirect_uri: &str,
+) -> Result<Value> {
+    let response = hosted_request_form(
+        "POST",
+        &metadata.token_endpoint,
+        None,
+        &[
+            ("grant_type".to_string(), "authorization_code".to_string()),
+            ("client_id".to_string(), metadata.client_id.clone()),
+            ("code".to_string(), code.to_string()),
+            ("code_verifier".to_string(), code_verifier.to_string()),
+            ("redirect_uri".to_string(), redirect_uri.to_string()),
+        ],
+    )?;
+    if let Some(message) = oauth_error_message(&response) {
+        bail!("login failed: {message}");
+    }
+    let doc = unwrap_hosted_cli_report(response)?;
+    validate_hosted_token_response(&doc)?;
+    Ok(doc)
+}
+
+fn device_flow_token(metadata: &HostedAuthMetadata) -> Result<Value> {
+    let device_start = hosted_request_form(
+        "POST",
+        &metadata.device_authorization_endpoint,
+        None,
+        &[
+            ("client_id".to_string(), metadata.client_id.clone()),
+            ("scope".to_string(), metadata.scope.clone()),
+        ],
+    )?;
+    let start = unwrap_hosted_cli_report(device_start)?;
+    let device_code = get_str(&start, &["device_code"])
+        .ok_or_else(|| anyhow!("device login failed: missing device_code"))?;
+    let user_code =
+        get_str(&start, &["user_code"]).ok_or_else(|| anyhow!("device login failed: missing user_code"))?;
+    let verification_uri = get_str(&start, &["verification_uri"])
+        .ok_or_else(|| anyhow!("device login failed: missing verification_uri"))?;
+    let verification_uri_complete = get_str(&start, &["verification_uri_complete"]);
+    let expires_in = get_u64(&start, &["expires_in"]).unwrap_or(HOSTED_LOGIN_TIMEOUT_SECS);
+    let mut interval = get_u64(&start, &["interval"]).unwrap_or(5);
+    eprintln!(
+        "x07lp device login: visit {} and enter code {}",
+        verification_uri, user_code
+    );
+    if let Some(url) = verification_uri_complete.as_deref() {
+        let _ = open_browser_best_effort(url);
+    }
+    let deadline = Instant::now() + Duration::from_secs(expires_in);
+    loop {
+        if Instant::now() >= deadline {
+            bail!("device login timed out before authorization completed");
+        }
+        thread::sleep(Duration::from_secs(interval.max(1)));
+        let response = hosted_request_form(
+            "POST",
+            &metadata.token_endpoint,
+            None,
+            &[
+                (
+                    "grant_type".to_string(),
+                    "urn:ietf:params:oauth:grant-type:device_code".to_string(),
+                ),
+                ("client_id".to_string(), metadata.client_id.clone()),
+                ("device_code".to_string(), device_code.clone()),
+            ],
+        )?;
+        if let Some(error) = response.get("error").and_then(Value::as_str) {
+            match error {
+                "authorization_pending" => continue,
+                "slow_down" => {
+                    interval = interval.saturating_add(5);
+                    continue;
+                }
+                "access_denied" | "expired_token" => {
+                    bail!("{}", oauth_error_message(&response).unwrap_or_else(|| error.to_string()))
+                }
+                _ => bail!(
+                    "{}",
+                    oauth_error_message(&response).unwrap_or_else(|| error.to_string())
+                ),
+            }
+        }
+        let doc = unwrap_hosted_cli_report(response)?;
+        validate_hosted_token_response(&doc)?;
+        return Ok(doc);
+    }
+}
+
+fn browser_flow_token(metadata: &HostedAuthMetadata) -> Result<Value> {
+    let listener = TcpListener::bind("127.0.0.1:0").context("bind loopback callback listener")?;
+    let redirect_uri = format!(
+        "http://127.0.0.1:{}/callback",
+        listener
+            .local_addr()
+            .context("inspect loopback callback listener")?
+            .port()
+    );
+    let state = random_urlsafe_token(16);
+    let verifier = random_urlsafe_token(32);
+    let challenge = pkce_code_challenge(&verifier);
+    let mut url = Url::parse(&metadata.authorization_endpoint)
+        .with_context(|| format!("parse authorization endpoint {}", metadata.authorization_endpoint))?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("response_type", "code");
+        query.append_pair("client_id", &metadata.client_id);
+        query.append_pair("redirect_uri", &redirect_uri);
+        query.append_pair("scope", &metadata.scope);
+        query.append_pair("state", &state);
+        query.append_pair("code_challenge", &challenge);
+        query.append_pair("code_challenge_method", "S256");
+    }
+    if !open_browser_best_effort(url.as_str()) {
+        eprintln!("x07lp login: open this URL in a browser: {}", url.as_str());
+    }
+    let code = wait_for_browser_login_code(listener, &state)?;
+    exchange_authorization_code(metadata, &code, &verifier, &redirect_uri)
+}
+
+fn fetch_hosted_whoami(api_base: &str, access_token: &str) -> Result<Value> {
+    let response = hosted_request_json("GET", &format!("{api_base}/v1/whoami"), Some(access_token), None)?;
+    if let Some(message) = oauth_error_message(&response) {
+        bail!("whoami failed: {message}");
+    }
+    let doc = unwrap_hosted_cli_report(response)?;
+    validate_hosted_whoami_result(&doc)?;
+    Ok(doc)
+}
+
+fn rewrite_session_from_whoami(session: &Value, whoami: &Value) -> Result<Value> {
+    validate_hosted_session_doc(session)?;
+    validate_hosted_whoami_result(whoami)?;
+    let mut updated = session.clone();
+    let map = ensure_object(&mut updated);
+    map.insert(
+        "account".to_string(),
+        whoami.get("account").cloned().unwrap_or_else(|| json!({})),
+    );
+    map.insert(
+        "target".to_string(),
+        whoami.get("target").cloned().unwrap_or_else(|| json!({})),
+    );
+    map.insert(
+        "default_context".to_string(),
+        whoami
+            .get("default_context")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+    );
+    map.insert("updated_unix_ms".to_string(), json!(now_ms()));
+    let tokens = ensure_object_field(&mut updated, "tokens");
+    tokens.insert(
+        "scope".to_string(),
+        Value::Array(
+            scope_array(whoami.get("scope").unwrap_or(&Value::Null))
+                .into_iter()
+                .map(Value::String)
+                .collect(),
+        ),
+    );
+    validate_hosted_session_doc(&updated)?;
+    Ok(updated)
+}
+
+fn refresh_hosted_session(session: &Value) -> Result<Value> {
+    let metadata = load_hosted_auth_metadata_from_session(session)?;
+    let refresh_token = session_refresh_token(session)?;
+    let response = hosted_request_form(
+        "POST",
+        &metadata.token_endpoint,
+        None,
+        &[
+            ("grant_type".to_string(), "refresh_token".to_string()),
+            ("client_id".to_string(), metadata.client_id.clone()),
+            ("refresh_token".to_string(), refresh_token),
+        ],
+    )?;
+    if let Some(message) = oauth_error_message(&response) {
+        bail!("session refresh failed: {message}");
+    }
+    let token_response = unwrap_hosted_cli_report(response)?;
+    validate_hosted_token_response(&token_response)?;
+    let whoami = fetch_hosted_whoami(&metadata.api_base, &get_str(&token_response, &["access_token"]).unwrap())?;
+    let updated = build_hosted_session_doc(&metadata, &token_response, &whoami, Some(session))?;
+    let _ = store_hosted_session_doc(&updated)?;
+    Ok(updated)
+}
+
+fn ensure_hosted_session_ready(explicit_api_base: Option<&str>) -> Result<Value> {
+    let expected_api_base = requested_hosted_api_base(explicit_api_base)?;
+    let session = load_hosted_session_doc()?;
+    let actual_api_base = session_api_base(&session)?;
+    if let Some(expected) = expected_api_base
+        && expected != actual_api_base
+    {
+        bail!(
+            "saved hosted session belongs to {actual_api_base}; run `x07lp login --api-base {expected}` to replace it"
+        );
+    }
+    if session_needs_refresh(&session, now_ms()) {
+        return refresh_hosted_session(&session);
+    }
+    Ok(session)
+}
+
+fn revoke_hosted_token(metadata: &HostedAuthMetadata, token: &str) -> Result<()> {
+    let response = hosted_request_form(
+        "POST",
+        &metadata.revocation_endpoint,
+        None,
+        &[
+            ("client_id".to_string(), metadata.client_id.clone()),
+            ("token".to_string(), token.to_string()),
+        ],
+    )?;
+    if let Some(message) = oauth_error_message(&response) {
+        bail!("token revoke failed: {message}");
+    }
+    let _ = unwrap_hosted_cli_report(response)?;
+    Ok(())
+}
+
+fn report_ok(report: &Value) -> bool {
+    report.get("ok").and_then(Value::as_bool) == Some(true)
+}
+
+fn hosted_error_report(command: &str, code: &str, exit_code: i64, message: &str) -> Value {
+    cli_report(
+        command,
+        false,
+        exit_code,
+        json!({}),
+        None,
+        vec![result_diag(code, "run", message, "error")],
+    )
+}
+
+fn hosted_command_result(
+    command: &str,
+    code: &str,
+    exit_code: i64,
+    result: Result<Value>,
+) -> Result<Value> {
+    Ok(match result {
+        Ok(report) => report,
+        Err(err) => hosted_error_report(command, code, exit_code, &err.to_string()),
+    })
+}
+
+fn hosted_v1_request_report(
+    session: &Value,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+) -> Result<Value> {
+    let api_base = session_api_base(session)?;
+    let access_token = session_access_token(session)?;
+    let response = hosted_request_json(
+        method,
+        &format!("{}{}", api_base.trim_end_matches('/'), path),
+        Some(&access_token),
+        body,
+    )?;
+    if let Some(message) = oauth_error_message(&response) {
+        bail!("{message}");
+    }
+    Ok(response)
+}
+
+fn hosted_v1_result(
+    session: &Value,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+) -> Result<Value> {
+    let report = hosted_v1_request_report(session, method, path, body)?;
+    if get_str(&report, &["schema_version"]).as_deref() != Some("lp.cli.report@0.1.0") {
+        bail!("unexpected hosted response envelope");
+    }
+    unwrap_hosted_cli_report(report)
+}
+
+fn result_items<'a>(doc: &'a Value, schema_version: &str) -> Result<&'a [Value]> {
+    if get_str(doc, &["schema_version"]).as_deref() != Some(schema_version) {
+        bail!("unexpected hosted result schema_version");
+    }
+    doc.get("items")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .ok_or_else(|| anyhow!("hosted result does not contain items"))
+}
+
+fn find_item_by_identifier<'a>(
+    items: &'a [Value],
+    identifier: &str,
+    id_key: &str,
+    slug_key: &str,
+) -> Option<&'a Value> {
+    items.iter().find(|item| {
+        get_str(item, &[id_key]).as_deref() == Some(identifier)
+            || get_str(item, &[slug_key]).as_deref() == Some(identifier)
+    })
+}
+
+fn session_default_org_id(session: &Value) -> Result<String> {
+    get_str(session, &["default_context", "org_id"])
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("hosted session is missing default_context.org_id"))
+}
+
+fn session_default_project_id(session: &Value) -> Result<String> {
+    get_str(session, &["default_context", "project_id"])
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow!("hosted session is missing default_context.project_id"))
+}
+
+fn resolve_org_id(session: &Value, identifier: &str) -> Result<String> {
+    if get_str(session, &["default_context", "org_id"]).as_deref() == Some(identifier)
+        || get_str(session, &["default_context", "org_slug"]).as_deref() == Some(identifier)
+    {
+        return session_default_org_id(session);
+    }
+    let result = hosted_v1_result(session, "GET", "/v1/orgs", None)?;
+    let items = result_items(&result, "lp.org.list.result@0.1.0")?;
+    let item = find_item_by_identifier(items, identifier, "org_id", "org_slug")
+        .ok_or_else(|| anyhow!("unknown organization `{identifier}`"))?;
+    get_str(item, &["org_id"]).ok_or_else(|| anyhow!("organization is missing org_id"))
+}
+
+fn resolve_project_id_in_org(session: &Value, org_id: &str, identifier: &str) -> Result<String> {
+    if session_default_org_id(session).ok().as_deref() == Some(org_id)
+        && (get_str(session, &["default_context", "project_id"]).as_deref() == Some(identifier)
+            || get_str(session, &["default_context", "project_slug"]).as_deref()
+                == Some(identifier))
+    {
+        return session_default_project_id(session);
+    }
+    let result = hosted_v1_result(
+        session,
+        "GET",
+        &format!("/v1/projects?org_id={org_id}"),
+        None,
+    )?;
+    let items = result_items(&result, "lp.project.list.result@0.1.0")?;
+    let item = find_item_by_identifier(items, identifier, "project_id", "project_slug")
+        .ok_or_else(|| anyhow!("unknown project `{identifier}`"))?;
+    get_str(item, &["project_id"]).ok_or_else(|| anyhow!("project is missing project_id"))
+}
+
+fn resolve_project_id(session: &Value, identifier: &str) -> Result<String> {
+    let org_id = session_default_org_id(session)?;
+    resolve_project_id_in_org(session, &org_id, identifier)
+}
+
+fn resolve_environment_id(session: &Value, project_id: &str, identifier: &str) -> Result<String> {
+    let result = hosted_v1_result(
+        session,
+        "GET",
+        &format!("/v1/environments?project_id={project_id}"),
+        None,
+    )?;
+    let items = result_items(&result, "lp.environment.list.result@0.1.0")?;
+    let item = find_item_by_identifier(
+        items,
+        identifier,
+        "environment_id",
+        "environment_slug",
+    )
+    .ok_or_else(|| anyhow!("unknown environment `{identifier}`"))?;
+    get_str(item, &["environment_id"])
+        .ok_or_else(|| anyhow!("environment is missing environment_id"))
+}
+
+fn command_login(args: LoginArgs) -> Result<Value> {
+    hosted_command_result(
+        "login",
+        "LP_HOSTED_LOGIN_FAILED",
+        31,
+        (|| {
+            let api_base = resolve_hosted_api_base(args.api_base.as_deref())?;
+            let metadata = load_hosted_auth_metadata(&api_base)?;
+            let token_response = if args.device {
+                device_flow_token(&metadata)?
+            } else {
+                browser_flow_token(&metadata)?
+            };
+            let access_token = get_str(&token_response, &["access_token"])
+                .ok_or_else(|| anyhow!("login failed: missing access token"))?;
+            let whoami = fetch_hosted_whoami(&api_base, &access_token)?;
+            let existing = load_hosted_session_doc_if_exists()?;
+            let current = existing.as_ref().filter(|session| {
+                session_api_base(session)
+                    .map(|value| value == api_base)
+                    .unwrap_or(false)
+            });
+            let session = build_hosted_session_doc(&metadata, &token_response, &whoami, current)?;
+            let path = store_hosted_session_doc(&session)?;
+            Ok(cli_report(
+                "login",
+                true,
+                0,
+                json!({
+                    "mode": if args.device { "device" } else { "browser" },
+                    "session_path": path.to_string_lossy(),
+                    "session": redacted_session_summary(&session)
+                }),
+                None,
+                Vec::new(),
+            ))
+        })(),
+    )
+}
+
+fn command_whoami(args: HostedCommonArgs) -> Result<Value> {
+    hosted_command_result(
+        "whoami",
+        "LP_HOSTED_WHOAMI_FAILED",
+        31,
+        (|| {
+            let session = ensure_hosted_session_ready(args.api_base.as_deref())?;
+            let report = hosted_v1_request_report(&session, "GET", "/v1/whoami", None)?;
+            if !report_ok(&report) {
+                return Ok(report);
+            }
+            let whoami = report
+                .get("result")
+                .cloned()
+                .ok_or_else(|| anyhow!("hosted whoami report missing result"))?;
+            validate_hosted_whoami_result(&whoami)?;
+            let updated = rewrite_session_from_whoami(&session, &whoami)?;
+            let _ = store_hosted_session_doc(&updated)?;
+            Ok(report)
+        })(),
+    )
+}
+
+fn command_logout(args: HostedCommonArgs) -> Result<Value> {
+    hosted_command_result(
+        "logout",
+        "LP_HOSTED_LOGOUT_FAILED",
+        31,
+        (|| {
+            let Some(session) = load_hosted_session_doc_if_exists()? else {
+                return Ok(cli_report(
+                    "logout",
+                    true,
+                    0,
+                    json!({ "deleted": false, "revoked_tokens": 0 }),
+                    None,
+                    Vec::new(),
+                ));
+            };
+            if let Some(expected) = requested_hosted_api_base(args.api_base.as_deref())? {
+                let actual = session_api_base(&session)?;
+                if actual != expected {
+                    bail!(
+                        "saved hosted session belongs to {actual}; run `x07lp login --api-base {expected}` to replace it"
+                    );
+                }
+            }
+            let metadata = load_hosted_auth_metadata_from_session(&session)?;
+            let mut revoked_tokens = 0;
+            if let Ok(access_token) = session_access_token(&session) {
+                revoke_hosted_token(&metadata, &access_token)?;
+                revoked_tokens += 1;
+            }
+            if let Some(refresh_token) =
+                get_str(&session, &["tokens", "refresh_token"]).filter(|value| !value.is_empty())
+            {
+                let _ = revoke_hosted_token(&metadata, &refresh_token);
+                revoked_tokens += 1;
+            }
+            let deleted = delete_hosted_session_doc()?;
+            Ok(cli_report(
+                "logout",
+                true,
+                0,
+                json!({ "deleted": deleted, "revoked_tokens": revoked_tokens }),
+                None,
+                Vec::new(),
+            ))
+        })(),
+    )
+}
+
+fn command_org(args: HostedOrgArgs) -> Result<Value> {
+    match args.command {
+        HostedOrgCommand::List(common) => hosted_command_result(
+            "org list",
+            "LP_HOSTED_API_FAILED",
+            32,
+            (|| {
+                let session = ensure_hosted_session_ready(common.api_base.as_deref())?;
+                hosted_v1_request_report(&session, "GET", "/v1/orgs", None)
+            })(),
+        ),
+        HostedOrgCommand::Create(args) => hosted_command_result(
+            "org create",
+            "LP_HOSTED_API_FAILED",
+            32,
+            (|| {
+                let session = ensure_hosted_session_ready(args.common.api_base.as_deref())?;
+                let body = json!({
+                    "slug": chosen_slug(&args.name, args.slug.as_deref())?,
+                    "display_name": args.name,
+                });
+                hosted_v1_request_report(&session, "POST", "/v1/orgs", Some(&body))
+            })(),
+        ),
+    }
+}
+
+fn command_project(args: HostedProjectArgs) -> Result<Value> {
+    match args.command {
+        HostedProjectCommand::List(args) => hosted_command_result(
+            "project list",
+            "LP_HOSTED_API_FAILED",
+            32,
+            (|| {
+                let session = ensure_hosted_session_ready(args.common.api_base.as_deref())?;
+                let org_id = resolve_org_id(&session, &args.org)?;
+                hosted_v1_request_report(
+                    &session,
+                    "GET",
+                    &format!("/v1/projects?org_id={org_id}"),
+                    None,
+                )
+            })(),
+        ),
+        HostedProjectCommand::Create(args) => hosted_command_result(
+            "project create",
+            "LP_HOSTED_API_FAILED",
+            32,
+            (|| {
+                let session = ensure_hosted_session_ready(args.common.api_base.as_deref())?;
+                let org_id = resolve_org_id(&session, &args.org)?;
+                let body = json!({
+                    "org_id": org_id,
+                    "slug": chosen_slug(&args.name, args.slug.as_deref())?,
+                    "display_name": args.name,
+                });
+                hosted_v1_request_report(&session, "POST", "/v1/projects", Some(&body))
+            })(),
+        ),
+    }
+}
+
+fn command_environment(args: HostedEnvironmentArgs) -> Result<Value> {
+    match args.command {
+        HostedEnvironmentCommand::List(args) => hosted_command_result(
+            "env list",
+            "LP_HOSTED_API_FAILED",
+            32,
+            (|| {
+                let session = ensure_hosted_session_ready(args.common.api_base.as_deref())?;
+                let project_id = resolve_project_id(&session, &args.project)?;
+                hosted_v1_request_report(
+                    &session,
+                    "GET",
+                    &format!("/v1/environments?project_id={project_id}"),
+                    None,
+                )
+            })(),
+        ),
+        HostedEnvironmentCommand::Create(args) => hosted_command_result(
+            "env create",
+            "LP_HOSTED_API_FAILED",
+            32,
+            (|| {
+                let session = ensure_hosted_session_ready(args.common.api_base.as_deref())?;
+                let project_id = resolve_project_id(&session, &args.project)?;
+                let body = json!({
+                    "project_id": project_id,
+                    "key": chosen_slug(&args.name, args.slug.as_deref())?,
+                    "display_name": args.name,
+                });
+                hosted_v1_request_report(&session, "POST", "/v1/environments", Some(&body))
+            })(),
+        ),
+    }
+}
+
+fn command_context(args: HostedContextArgs) -> Result<Value> {
+    match args.command {
+        HostedContextCommand::Use(args) => hosted_command_result(
+            "context use",
+            "LP_HOSTED_API_FAILED",
+            32,
+            (|| {
+                let session = ensure_hosted_session_ready(args.common.api_base.as_deref())?;
+                let org_id = resolve_org_id(&session, &args.org)?;
+                let project_id = resolve_project_id_in_org(&session, &org_id, &args.project)?;
+                let environment_id = match args.environment.as_deref() {
+                    Some(identifier) => Some(resolve_environment_id(&session, &project_id, identifier)?),
+                    None => None,
+                };
+                let body = json!({
+                    "org_id": org_id,
+                    "project_id": project_id,
+                    "environment_id": environment_id,
+                });
+                let report =
+                    hosted_v1_request_report(&session, "POST", "/v1/context/select", Some(&body))?;
+                if !report_ok(&report) {
+                    return Ok(report);
+                }
+                let session_doc = report
+                    .get("result")
+                    .cloned()
+                    .ok_or_else(|| anyhow!("context use report missing result"))?;
+                validate_hosted_session_doc(&session_doc)?;
+                let path = store_hosted_session_doc(&session_doc)?;
+                Ok(cli_report(
+                    "context use",
+                    true,
+                    0,
+                    json!({
+                        "session_path": path.to_string_lossy(),
+                        "session": redacted_session_summary(&session_doc)
+                    }),
+                    None,
+                    Vec::new(),
+                ))
+            })(),
+        ),
+    }
 }
 
 fn agent_with_ca_bundle(ca_bundle_path: Option<&Path>) -> Result<Agent> {
@@ -15429,12 +16885,8 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
 
 fn parse_query_string(raw: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
-    for part in raw.split('&') {
-        if part.is_empty() {
-            continue;
-        }
-        let (key, value) = part.split_once('=').unwrap_or((part, ""));
-        out.insert(key.to_string(), value.to_string());
+    for (key, value) in url::form_urlencoded::parse(raw.as_bytes()) {
+        out.insert(key.into_owned(), value.into_owned());
     }
     out
 }
@@ -15530,4 +16982,637 @@ fn write_http_response(
     stream.write_all(body)?;
     stream.flush()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+
+    static TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    struct TempDir {
+        path: PathBuf,
+    }
+
+    impl TempDir {
+        fn new(label: &str) -> Result<Self> {
+            let path = std::env::temp_dir().join(format!(
+                "x07lp-driver-{label}-{}-{}",
+                std::process::id(),
+                now_ms()
+            ));
+            fs::create_dir_all(&path)?;
+            Ok(Self { path })
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    struct ScopedEnvVar {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ScopedEnvVar {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnvVar {
+        fn drop(&mut self) {
+            match self.previous.as_ref() {
+                Some(value) => unsafe {
+                    std::env::set_var(self.key, value);
+                },
+                None => unsafe {
+                    std::env::remove_var(self.key);
+                },
+            }
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct ObservedRequest {
+        method: String,
+        path: String,
+        query: BTreeMap<String, String>,
+        body: Vec<u8>,
+        authorization: Option<String>,
+    }
+
+    struct TestResponse {
+        status: u16,
+        content_type: String,
+        body: Vec<u8>,
+    }
+
+    impl TestResponse {
+        fn json(status: u16, value: Value) -> Self {
+            Self {
+                status,
+                content_type: "application/json".to_string(),
+                body: canon_json_bytes(&value),
+            }
+        }
+    }
+
+    struct MockServer {
+        base_url: String,
+        shutdown: Option<mpsc::Sender<()>>,
+        handle: Option<thread::JoinHandle<()>>,
+    }
+
+    impl MockServer {
+        fn spawn<F, H>(builder: F) -> Result<Self>
+        where
+            F: FnOnce(String) -> H,
+            H: Fn(HttpRequest) -> TestResponse + Send + Sync + 'static,
+        {
+            let listener = TcpListener::bind("127.0.0.1:0")?;
+            let addr = listener.local_addr()?;
+            let base_url = format!("http://{}", addr);
+            listener.set_nonblocking(true)?;
+            let (tx, rx) = mpsc::channel::<()>();
+            let handler = Arc::new(builder(base_url.clone()));
+            let thread_handler = Arc::clone(&handler);
+            let handle = thread::spawn(move || {
+                loop {
+                    if rx.try_recv().is_ok() {
+                        break;
+                    }
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let request = match read_http_request(&mut stream) {
+                                Ok(request) => request,
+                                Err(_) => continue,
+                            };
+                            let response = thread_handler(request);
+                            let _ = write_http_response(
+                                &mut stream,
+                                response.status,
+                                &response.content_type,
+                                &response.body,
+                            );
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Ok(Self {
+                base_url,
+                shutdown: Some(tx),
+                handle: Some(handle),
+            })
+        }
+    }
+
+    impl Drop for MockServer {
+        fn drop(&mut self) {
+            if let Some(tx) = self.shutdown.take() {
+                let _ = tx.send(());
+            }
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    fn sample_token_response(api_base: &str, access_token: &str, refresh_token: &str) -> Value {
+        json!({
+            "schema_version": "lp.auth.token.response@0.1.0",
+            "token_type": "Bearer",
+            "access_token": access_token,
+            "expires_in": 3600,
+            "refresh_token": refresh_token,
+            "refresh_expires_in": 86400,
+            "scope": "cloud:all offline_access",
+            "issuer": format!("{api_base}/issuer"),
+            "audience": "x07-cloud",
+            "subject": {
+                "subject_id": "acct_demo",
+                "subject_kind": "human"
+            },
+            "session": {
+                "session_id": "sess_demo"
+            }
+        })
+    }
+
+    fn sample_whoami(api_base: &str, org_id: &str, project_id: &str) -> Value {
+        json!({
+            "schema_version": "lp.auth.whoami.result@0.1.0",
+            "account": {
+                "account_id": "acct_demo",
+                "subject_kind": "human",
+                "email": "user@example.com",
+                "display_name": "Demo User",
+                "plan": "trial"
+            },
+            "target": {
+                "name": "cloud",
+                "api_base": api_base,
+                "audience": "x07-cloud"
+            },
+            "default_context": {
+                "org_id": org_id,
+                "org_slug": "demo-org",
+                "project_id": project_id,
+                "project_slug": "demo-project"
+            },
+            "scope": ["cloud:all", "offline_access"],
+            "session_expires_unix_ms": now_ms().saturating_add(86_400_000)
+        })
+    }
+
+    fn sample_session(api_base: &str, access_token: &str, refresh_token: &str, expires_at: u64) -> Value {
+        json!({
+            "schema_version": "lp.auth.session@0.1.0",
+            "issuer": format!("{api_base}/issuer"),
+            "auth_metadata_url": format!("{api_base}/.well-known/openid-configuration"),
+            "jwks_uri": format!("{api_base}/jwks"),
+            "target": {
+                "name": "cloud",
+                "api_base": api_base,
+                "audience": "x07-cloud"
+            },
+            "account": {
+                "account_id": "acct_demo",
+                "subject_kind": "human",
+                "email": "user@example.com",
+                "display_name": "Demo User",
+                "plan": "trial"
+            },
+            "default_context": {
+                "org_id": "org_demo",
+                "org_slug": "demo-org",
+                "project_id": "prj_demo",
+                "project_slug": "demo-project"
+            },
+            "tokens": {
+                "token_type": "Bearer",
+                "access_token": access_token,
+                "access_token_expires_unix_ms": expires_at,
+                "scope": ["cloud:all", "offline_access"],
+                "refresh_token": refresh_token,
+                "refresh_token_ref": null,
+                "refresh_token_expires_unix_ms": now_ms().saturating_add(86_400_000)
+            },
+            "created_unix_ms": now_ms().saturating_sub(1_000),
+            "updated_unix_ms": now_ms().saturating_sub(1_000)
+        })
+    }
+
+    fn sample_metadata(api_base: &str) -> Value {
+        json!({
+            "issuer": format!("{api_base}/issuer"),
+            "authorization_endpoint": format!("{api_base}/oauth/authorize"),
+            "token_endpoint": format!("{api_base}/oauth/token"),
+            "device_authorization_endpoint": format!("{api_base}/oauth/device/code"),
+            "revocation_endpoint": format!("{api_base}/oauth/revoke"),
+            "jwks_uri": format!("{api_base}/jwks"),
+            "x07lp_client_id": DEFAULT_HOSTED_CLIENT_ID,
+            "x07lp_scope": DEFAULT_HOSTED_SCOPE
+        })
+    }
+
+    fn wrapped_cli_report(command: &str, result: Value) -> Value {
+        cli_report(command, true, 0, result, None, Vec::new())
+    }
+
+    fn form_map(body: &[u8]) -> BTreeMap<String, String> {
+        url::form_urlencoded::parse(body)
+            .into_owned()
+            .collect::<BTreeMap<_, _>>()
+    }
+
+    #[test]
+    fn hosted_session_round_trip_stays_separate_from_oss_targets() -> Result<()> {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = TempDir::new("session-roundtrip")?;
+        let _config = ScopedEnvVar::set("X07LP_CONFIG_DIR", &tmp.path.to_string_lossy());
+        let session = sample_session("http://127.0.0.1:39001", "access.initial", "refresh.initial", now_ms().saturating_add(60_000));
+        let path = store_hosted_session_doc(&session)?;
+        assert_eq!(path, tmp.path.join("session.json"));
+        assert_eq!(load_hosted_session_doc()?, session);
+        assert!(!x07lp_targets_dir()?.exists());
+        assert!(!x07lp_current_target_path()?.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn whoami_refreshes_expired_session_and_persists_new_tokens() -> Result<()> {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = TempDir::new("whoami-refresh")?;
+        let _config = ScopedEnvVar::set("X07LP_CONFIG_DIR", &tmp.path.to_string_lossy());
+        let observed = Arc::new(Mutex::new(Vec::<ObservedRequest>::new()));
+        let observed_requests = Arc::clone(&observed);
+        let server = MockServer::spawn(move |base_url| move |request| {
+            observed_requests.lock().unwrap().push(ObservedRequest {
+                method: request.method.clone(),
+                path: request.path.clone(),
+                query: request.query.clone(),
+                body: request.body.clone(),
+                authorization: request.headers.get("authorization").cloned(),
+            });
+            match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/.well-known/openid-configuration") => {
+                    TestResponse::json(200, sample_metadata(&base_url))
+                }
+                ("POST", "/oauth/token") => {
+                    let form = form_map(&request.body);
+                    assert_eq!(form.get("grant_type").map(String::as_str), Some("refresh_token"));
+                    assert_eq!(form.get("client_id").map(String::as_str), Some(DEFAULT_HOSTED_CLIENT_ID));
+                    assert_eq!(form.get("refresh_token").map(String::as_str), Some("refresh.old"));
+                    TestResponse::json(
+                        200,
+                        sample_token_response(&base_url, "access.new", "refresh.new"),
+                    )
+                }
+                ("GET", "/v1/whoami") => {
+                    assert_eq!(
+                        request.headers.get("authorization").map(String::as_str),
+                        Some("Bearer access.new")
+                    );
+                    TestResponse::json(
+                        200,
+                        wrapped_cli_report(
+                            "whoami",
+                            sample_whoami(&base_url, "org_demo", "prj_demo"),
+                        ),
+                    )
+                }
+                _ => TestResponse::json(404, json!({"error":"not_found"})),
+            }
+        })?;
+        let expired = sample_session(&server.base_url, "access.old", "refresh.old", now_ms().saturating_sub(1));
+        let _ = store_hosted_session_doc(&expired)?;
+        let report = command_whoami(HostedCommonArgs {
+            api_base: None,
+            json: true,
+        })?;
+        assert_eq!(report.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            get_str(&report, &["result", "account", "account_id"]).as_deref(),
+            Some("acct_demo")
+        );
+        let updated = load_hosted_session_doc()?;
+        assert_eq!(
+            get_str(&updated, &["tokens", "access_token"]).as_deref(),
+            Some("access.new")
+        );
+        assert_eq!(
+            get_str(&updated, &["tokens", "refresh_token"]).as_deref(),
+            Some("refresh.new")
+        );
+        let requests = observed.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].path, "/.well-known/openid-configuration");
+        assert_eq!(requests[1].method, "POST");
+        assert_eq!(requests[1].path, "/oauth/token");
+        assert_eq!(requests[2].authorization.as_deref(), Some("Bearer access.new"));
+        assert_eq!(requests[2].path, "/v1/whoami");
+        assert_eq!(requests[3].authorization.as_deref(), Some("Bearer access.new"));
+        assert_eq!(requests[3].path, "/v1/whoami");
+        Ok(())
+    }
+
+    #[test]
+    fn hosted_org_project_env_and_context_commands_shape_requests() -> Result<()> {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = TempDir::new("hosted-crud")?;
+        let _config = ScopedEnvVar::set("X07LP_CONFIG_DIR", &tmp.path.to_string_lossy());
+        let observed = Arc::new(Mutex::new(Vec::<ObservedRequest>::new()));
+        let observed_requests = Arc::clone(&observed);
+        let server = MockServer::spawn(move |base_url| move |request| {
+            observed_requests.lock().unwrap().push(ObservedRequest {
+                method: request.method.clone(),
+                path: request.path.clone(),
+                query: request.query.clone(),
+                body: request.body.clone(),
+                authorization: request.headers.get("authorization").cloned(),
+            });
+            match (request.method.as_str(), request.path.as_str()) {
+                ("GET", "/v1/orgs") => TestResponse::json(
+                    200,
+                    wrapped_cli_report(
+                        "org list",
+                        json!({
+                            "schema_version": "lp.org.list.result@0.1.0",
+                            "items": [{
+                                "org_id": "org_demo",
+                                "org_slug": "demo-org",
+                                "display_name": "Demo Org",
+                                "role": "owner",
+                                "selected": true,
+                                "created_unix_ms": now_ms(),
+                                "updated_unix_ms": now_ms()
+                            }, {
+                                "org_id": "org_next",
+                                "org_slug": "next-org",
+                                "display_name": "Next Org",
+                                "role": "owner",
+                                "selected": false,
+                                "created_unix_ms": now_ms(),
+                                "updated_unix_ms": now_ms()
+                            }]
+                        }),
+                    ),
+                ),
+                ("POST", "/v1/orgs") => TestResponse::json(
+                    200,
+                    wrapped_cli_report(
+                        "org create",
+                        json!({
+                            "schema_version": "lp.org.list.result@0.1.0",
+                            "items": []
+                        }),
+                    ),
+                ),
+                ("GET", "/v1/projects") => {
+                    let result = match request.query.get("org_id").map(String::as_str) {
+                        Some("org_next") => json!({
+                            "schema_version": "lp.project.list.result@0.1.0",
+                            "items": [{
+                                "project_id": "prj_next",
+                                "org_id": "org_next",
+                                "project_slug": "next-project",
+                                "display_name": "Next Project",
+                                "selected": false,
+                                "created_unix_ms": now_ms(),
+                                "updated_unix_ms": now_ms()
+                            }]
+                        }),
+                        _ => json!({
+                            "schema_version": "lp.project.list.result@0.1.0",
+                            "items": []
+                        }),
+                    };
+                    TestResponse::json(200, wrapped_cli_report("project list", result))
+                }
+                ("POST", "/v1/projects") => TestResponse::json(
+                    200,
+                    wrapped_cli_report(
+                        "project create",
+                        json!({
+                            "schema_version": "lp.project.list.result@0.1.0",
+                            "items": []
+                        }),
+                    ),
+                ),
+                ("GET", "/v1/environments") => {
+                    let result = match request.query.get("project_id").map(String::as_str) {
+                        Some("prj_next") => json!({
+                            "schema_version": "lp.environment.list.result@0.1.0",
+                            "items": [{
+                                "environment_id": "env_next",
+                                "project_id": "prj_next",
+                                "environment_slug": "next-env",
+                                "display_name": "Next Env",
+                                "selected": false,
+                                "created_unix_ms": now_ms(),
+                                "updated_unix_ms": now_ms()
+                            }]
+                        }),
+                        _ => json!({
+                            "schema_version": "lp.environment.list.result@0.1.0",
+                            "items": []
+                        }),
+                    };
+                    TestResponse::json(200, wrapped_cli_report("env list", result))
+                }
+                ("POST", "/v1/environments") => TestResponse::json(
+                    200,
+                    wrapped_cli_report(
+                        "env create",
+                        json!({
+                            "schema_version": "lp.environment.list.result@0.1.0",
+                            "items": []
+                        }),
+                    ),
+                ),
+                ("POST", "/v1/context/select") => {
+                    let mut next_session = sample_session(
+                        &base_url,
+                        "access.live",
+                        "refresh.live",
+                        now_ms().saturating_add(60_000),
+                    );
+                    next_session["default_context"] = json!({
+                        "org_id": "org_next",
+                        "org_slug": "demo-org",
+                        "project_id": "prj_next",
+                        "project_slug": "demo-project"
+                    });
+                    TestResponse::json(
+                        200,
+                        wrapped_cli_report("context use", next_session),
+                    )
+                }
+                _ => TestResponse::json(404, json!({"error":"not_found"})),
+            }
+        })?;
+        let session = sample_session(
+            &server.base_url,
+            "access.live",
+            "refresh.live",
+            now_ms().saturating_add(60_000),
+        );
+        let _ = store_hosted_session_doc(&session)?;
+        let _ = command_org(HostedOrgArgs {
+            command: HostedOrgCommand::List(HostedCommonArgs {
+                api_base: None,
+                json: true,
+            }),
+        })?;
+        let _ = command_org(HostedOrgArgs {
+            command: HostedOrgCommand::Create(HostedCreateArgs {
+                name: "Demo Org".to_string(),
+                slug: Some("demo-org".to_string()),
+                common: HostedCommonArgs {
+                    api_base: None,
+                    json: true,
+                },
+            }),
+        })?;
+        let _ = command_project(HostedProjectArgs {
+            command: HostedProjectCommand::List(HostedProjectListArgs {
+                org: "org_demo".to_string(),
+                common: HostedCommonArgs {
+                    api_base: None,
+                    json: true,
+                },
+            }),
+        })?;
+        let _ = command_project(HostedProjectArgs {
+            command: HostedProjectCommand::Create(HostedProjectCreateArgs {
+                org: "org_demo".to_string(),
+                name: "Demo Project".to_string(),
+                slug: Some("demo-project".to_string()),
+                common: HostedCommonArgs {
+                    api_base: None,
+                    json: true,
+                },
+            }),
+        })?;
+        let _ = command_environment(HostedEnvironmentArgs {
+            command: HostedEnvironmentCommand::List(HostedEnvironmentListArgs {
+                project: "prj_demo".to_string(),
+                common: HostedCommonArgs {
+                    api_base: None,
+                    json: true,
+                },
+            }),
+        })?;
+        let _ = command_environment(HostedEnvironmentArgs {
+            command: HostedEnvironmentCommand::Create(HostedEnvironmentCreateArgs {
+                project: "prj_demo".to_string(),
+                name: "Production".to_string(),
+                slug: Some("production".to_string()),
+                common: HostedCommonArgs {
+                    api_base: None,
+                    json: true,
+                },
+            }),
+        })?;
+        let _ = command_context(HostedContextArgs {
+            command: HostedContextCommand::Use(HostedContextUseArgs {
+                org: "org_next".to_string(),
+                project: "prj_next".to_string(),
+                environment: Some("env_next".to_string()),
+                common: HostedCommonArgs {
+                    api_base: None,
+                    json: true,
+                },
+            }),
+        })?;
+        let requests = observed.lock().unwrap();
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[0].path, "/v1/orgs");
+        let org_create: Value = serde_json::from_slice(&requests[1].body)?;
+        assert_eq!(
+            org_create.get("slug").and_then(Value::as_str),
+            Some("demo-org")
+        );
+        assert_eq!(
+            org_create.get("display_name").and_then(Value::as_str),
+            Some("Demo Org")
+        );
+        assert_eq!(
+            requests[2].query.get("org_id").map(String::as_str),
+            Some("org_demo")
+        );
+        let project_create: Value = serde_json::from_slice(&requests[3].body)?;
+        assert_eq!(project_create.get("org_id").and_then(Value::as_str), Some("org_demo"));
+        assert_eq!(
+            project_create.get("slug").and_then(Value::as_str),
+            Some("demo-project")
+        );
+        assert_eq!(
+            requests[4].query.get("project_id").map(String::as_str),
+            Some("prj_demo")
+        );
+        let environment_create: Value = serde_json::from_slice(&requests[5].body)?;
+        assert_eq!(
+            environment_create.get("project_id").and_then(Value::as_str),
+            Some("prj_demo")
+        );
+        assert_eq!(
+            environment_create.get("key").and_then(Value::as_str),
+            Some("production")
+        );
+        assert_eq!(requests[6].path, "/v1/orgs");
+        assert_eq!(
+            requests[7].query.get("org_id").map(String::as_str),
+            Some("org_next")
+        );
+        assert_eq!(
+            requests[8].query.get("project_id").map(String::as_str),
+            Some("prj_next")
+        );
+        let context_select: Value = serde_json::from_slice(&requests[9].body)?;
+        assert_eq!(context_select.get("org_id").and_then(Value::as_str), Some("org_next"));
+        assert_eq!(
+            context_select.get("project_id").and_then(Value::as_str),
+            Some("prj_next")
+        );
+        assert_eq!(
+            context_select.get("environment_id").and_then(Value::as_str),
+            Some("env_next")
+        );
+        assert_eq!(requests[9].authorization.as_deref(), Some("Bearer access.live"));
+        let updated = load_hosted_session_doc()?;
+        assert_eq!(
+            get_str(&updated, &["default_context", "org_id"]).as_deref(),
+            Some("org_next")
+        );
+        assert_eq!(
+            get_str(&updated, &["default_context", "project_id"]).as_deref(),
+            Some("prj_next")
+        );
+        Ok(())
+    }
 }

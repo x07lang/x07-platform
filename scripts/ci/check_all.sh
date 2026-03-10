@@ -12,6 +12,9 @@ source "$ROOT_DIR/scripts/ci/use_workspace_x07_bins.sh"
 x07 pkg lock --project x07.json --check
 echo "ok: lockfile"
 
+cargo test --manifest-path tools/x07lp-driver/Cargo.toml
+echo "ok: x07lp-driver tests"
+
 ./scripts/ci/check_phaseA_golden.sh
 ./scripts/ci/phaseB.sh
 ./scripts/ci/phaseC.sh

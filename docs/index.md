@@ -22,8 +22,9 @@
 Current surface:
 
 - public `lp.*` JSON Schemas consumed from `contracts/spec/schemas/` with `x07-platform-contracts` as the authority
-- `x07lp` CLI for local and remote `change`, `deploy`, `target`, `adapter`, `incident`, `regress`, `app`, `platform`, `ui`, and `schema` flows
+- `x07lp` CLI for local and remote `change`, `deploy`, `target`, `adapter`, `incident`, `regress`, `app`, `platform`, `ui`, and `schema` flows plus hosted `login`, `whoami`, `logout`, `org`, `project`, `env`, and `context`
 - Local filesystem content-addressed store (`--state-dir`, default `.x07lp/`)
+- Hosted session document under `~/.config/x07lp/session.json` (or `X07LP_CONFIG_DIR` / `XDG_CONFIG_HOME`)
 - Local runtime and routing for `x07.app.pack@0.1.0`
 - Remote target selection, CAS push, remote query/control parity, and adapter conformance for self-hosted targets
 - MCP router/worker surface under `gateway/mcp/`

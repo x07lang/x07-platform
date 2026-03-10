@@ -44,10 +44,23 @@ x07 run -- regress from-incident \
 
 All commands emit `lp.cli.report@0.1.0`.
 
+Hosted auth/context examples against a local cloud stack:
+
+```bash
+x07 run -- login --api-base http://127.0.0.1:18081 --json
+x07 run -- login --device --api-base http://127.0.0.1:18081 --json
+x07 run -- whoami --json
+x07 run -- org list --json
+x07 run -- project list --org org_demo --json
+x07 run -- env list --project prj_demo --json
+x07 run -- context use --org org_demo --project prj_demo --env env_demo --json
+```
+
 Implementation note:
 
 - `x07 run -- ...` and the MCP tools delegate to the shared Rust driver in `tools/x07lp-driver/`.
-- That driver implements the local deploy executor, incident pipeline, signed control actions, regression runner bridge, SQLite index, and the `x07lpd` HTTP daemon.
+- That driver implements the local deploy executor, hosted auth/session commands, incident pipeline, signed control actions, regression runner bridge, SQLite index, and the `x07lpd` HTTP daemon.
+- Hosted login state persists separately from OSS target profiles in `~/.config/x07lp/session.json` unless `X07LP_CONFIG_DIR` or `XDG_CONFIG_HOME` overrides it.
 
 Generate or check the schema index:
 
