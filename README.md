@@ -46,11 +46,13 @@ Developer commands:
 
 Device distribution note:
 - `x07lp device release-create`, `release-validate`, `release-run`, `release-query`, `release-observe`, `release-pause`, `release-resume`, `release-halt`, `release-stop`, `release-complete`, `release-rerun`, and `release-rollback` drive the shared device-release engine.
+- `x07lp device release-create` requires both the sealed `--package-manifest` and the machine-readable `--package-report` from `x07-wasm device package --json`; it freezes the report-derived `native_summary` and `release_readiness` into the release plan.
 - `x07lp device release-create` also accepts `--slo-profile`, `--metrics-window-seconds`, and `--metrics-on-fail` to seed a release metrics gate, and `x07lp device release-rerun` accepts `--from-step` to restart from a later step boundary.
 - Default CI and local fixture validation stay on the `mock_v1` lane. `appstoreconnect_v1` and `googleplay_v1` execute only when `X07LP_DEVICE_PROVIDER_LIVE=1` is set.
 - Store credentials resolve from the encrypted secret store through `secrets://device/<id>` entries and `X07LP_REMOTE_SECRET_MASTER_KEY_FILE`.
 - `device release-run` stages a private package copy under state for each execution and patches only the staged telemetry profile with release correlation fields.
-- `metrics.eval` derives `x07.metrics.snapshot@0.1.0` from correlated OTLP log exports and captures blocking telemetry incidents before applying the plan `on_fail` action.
+- `release-query`, `incident get/list`, and the local Command Center now expose the same normalized native fields: `native_summary`, `release_readiness`, `latest_native_health_rollup`, `native_classification`, `native_context`, and regression linkage.
+- `metrics.eval` derives `x07.metrics.snapshot@0.1.0` from correlated OTLP log exports and captures blocking native incidents before applying the plan `on_fail` action.
 - Manual live-provider validation lives in `scripts/ci/device-release-live-smoke.sh`.
 
 CI note:

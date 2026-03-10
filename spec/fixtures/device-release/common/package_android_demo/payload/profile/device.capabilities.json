@@ -1,14 +1,28 @@
 {
-  "schema_version": "x07.device.capabilities@0.1.0",
+  "schema_version": "x07.device.capabilities@0.2.0",
   "network": {
     "mode": "deny_by_default",
-    "allow_hosts": [
-      "api.x07.io"
-    ]
+    "allow_hosts": []
   },
   "device": {
-    "clipboard": false,
-    "local_kv": true,
-    "notifications": true
+    "camera": {
+      "photo": true
+    },
+    "files": {
+      "pick": true,
+      "accept_defaults": ["image/*", "application/pdf"]
+    },
+    "blob_store": {
+      "enabled": true,
+      "max_total_bytes": 67108864,
+      "max_item_bytes": 16777216
+    },
+    "location": {
+      "foreground": true
+    },
+    "notifications": {
+      "local": true,
+      "push": false
+    }
   }
 }

@@ -1,0 +1,94 @@
+{
+  "schema_version": "x07.wasm.device.package.report@0.2.0",
+  "command": "x07-wasm.device.package",
+  "ok": true,
+  "exit_code": 0,
+  "diagnostics": [],
+  "meta": {
+    "tool": {
+      "name": "x07-wasm",
+      "version": "0.2.1"
+    },
+    "elapsed_ms": 12,
+    "cwd": "/fixture",
+    "argv": [
+      "x07-wasm",
+      "device",
+      "package",
+      "--bundle",
+      "dist/device_ios_dev_bundle",
+      "--target",
+      "ios",
+      "--out-dir",
+      "dist/device_ios_dev_package",
+      "--json"
+    ],
+    "inputs": [],
+    "outputs": [],
+    "nondeterminism": {
+      "uses_os_time": false,
+      "uses_network": false,
+      "uses_process": false
+    }
+  },
+  "result": {
+    "profile": {
+      "id": "demo_ios_release",
+      "v": 1
+    },
+    "target": "ios",
+    "bundle_dir": "dist/device_ios_dev_bundle",
+    "out_dir": "dist/device_ios_dev_package",
+    "package_manifest": {
+      "path": "spec/fixtures/device-release/common/package_ios_demo/device.package.manifest.json",
+      "sha256": "6601516c0619a5aa4b74ac7c02cb69c2e216471b6330659dcd491bcbfd77a539",
+      "bytes_len": 884
+    },
+    "package": {
+      "kind": "dir",
+      "path": "payload"
+    },
+    "native_summary": {
+      "target_kind": "ios",
+      "provider_kind": "mock_v1",
+      "package_manifest_sha256": "sha256:6601516c0619a5aa4b74ac7c02cb69c2e216471b6330659dcd491bcbfd77a539",
+      "capabilities": {
+        "camera_photo": true,
+        "files_pick": true,
+        "blob_store": {
+          "enabled": true,
+          "max_total_bytes": 67108864,
+          "max_item_bytes": 16777216
+        },
+        "location_foreground": true,
+        "notifications_local": true,
+        "notifications_push": false
+      },
+      "permission_declarations": [
+        "camera",
+        "files_pick",
+        "location_foreground",
+        "notifications"
+      ],
+      "telemetry_classes": [
+        "app.lifecycle",
+        "app.http",
+        "runtime.error",
+        "bridge.timing",
+        "reducer.timing",
+        "policy.violation",
+        "host.webview_crash"
+      ],
+      "release_readiness": {
+        "status": "ok",
+        "warnings": [],
+        "errors": []
+      }
+    },
+    "release_readiness": {
+      "status": "ok",
+      "warnings": [],
+      "errors": []
+    }
+  }
+}

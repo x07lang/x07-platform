@@ -257,6 +257,8 @@ pack_device_secret_store
 
 IOS_PACKAGE="spec/fixtures/device-release/common/package_ios_demo/device.package.manifest.json"
 ANDROID_PACKAGE="spec/fixtures/device-release/common/package_android_demo/device.package.manifest.json"
+IOS_PACKAGE_REPORT="spec/fixtures/device-release/common/package_ios_demo/device.package.report.json"
+ANDROID_PACKAGE_REPORT="spec/fixtures/device-release/common/package_android_demo/device.package.report.json"
 MOCK_BETA_PROVIDER="spec/fixtures/device-release/common/providers/mock_beta_ios.json"
 MOCK_PROD_PROVIDER="spec/fixtures/device-release/common/providers/mock_production_ios.json"
 MOCK_PROD_ANDROID_PROVIDER="spec/fixtures/device-release/common/providers/mock_production_android.json"
@@ -265,6 +267,22 @@ APPSTORE_PROVIDER="spec/fixtures/device-release/common/providers/appstoreconnect
 INVALID_PLAN="spec/fixtures/device-release/provider_validation_ios_invalid_percent/invalid.plan.json"
 SLO_PROFILE="spec/fixtures/device-release/common/slo_min.json"
 TRACE_FIXTURE="spec/fixtures/device-release/common/device.trace.json"
+
+package_report_for_manifest() {
+  local package_manifest="$1"
+  case "$package_manifest" in
+    "$IOS_PACKAGE")
+      printf '%s\n' "$IOS_PACKAGE_REPORT"
+      ;;
+    "$ANDROID_PACKAGE")
+      printf '%s\n' "$ANDROID_PACKAGE_REPORT"
+      ;;
+    *)
+      echo "unsupported fixture package manifest for package report: $package_manifest" >&2
+      return 1
+      ;;
+  esac
+}
 
 run_create() {
   local report_path="$1"
@@ -277,15 +295,20 @@ run_create() {
   local metrics_on_fail="${8:-}"
   local provider_arg
   local package_arg
+  local package_report
+  local package_report_arg
   local plan_arg
   local argv=()
   provider_arg="$(repo_path_arg "$provider")"
   package_arg="$(repo_path_arg "$package_manifest")"
+  package_report="$(package_report_for_manifest "$package_manifest")"
+  package_report_arg="$(repo_path_arg "$package_report")"
   plan_arg="$(repo_path_arg "$plan_path")"
   argv=(
     device release-create
     --provider-profile "$provider_arg"
     --package-manifest "$package_arg"
+    --package-report "$package_report_arg"
     --out "$plan_arg"
   )
   if [ -n "$slo_profile" ]; then
@@ -520,6 +543,30 @@ elif scenario == "bridge_error":
             "bridge payload invalid",
         ),
     ]
+elif scenario == "policy_violation":
+    records = [
+        log_record(
+            "app.http",
+            "app.http",
+            [
+                {"key": "status", "value": {"intValue": "500"}},
+                {"key": "duration_ms", "value": {"doubleValue": 420.0}},
+            ],
+            "app.http",
+        ),
+        log_record(
+            "policy.violation",
+            "policy.violation",
+            [
+                {"key": "message", "value": {"stringValue": "location permission denied by policy"}},
+                {"key": "permission", "value": {"stringValue": "location_foreground"}},
+                {"key": "status", "value": {"stringValue": "denied"}},
+                {"key": "op", "value": {"stringValue": "location.get_current"}},
+                {"key": "request_id", "value": {"stringValue": "req_policy_1"}},
+            ],
+            "location permission denied by policy",
+        ),
+    ]
 elif scenario == "webview_crash":
     records = [
         log_record(
@@ -560,6 +607,7 @@ BETA_DIR="${TMP_DIR}/mock_beta_release"
 mkdir -p "$BETA_DIR"
 BETA_PLAN="${BETA_DIR}/plan.json"
 run_create "${BETA_DIR}/create.run.json" "${BETA_DIR}/create.cli.json" "$MOCK_BETA_PROVIDER" "$IOS_PACKAGE" "$BETA_PLAN"
+assert_json_expr "${BETA_DIR}/create.cli.json" 'doc["ok"] is True and doc["result"]["native_summary"]["target_kind"] == "ios" and doc["result"]["release_readiness"]["status"] == "ok"' "mock beta create did not emit the expected native summary"
 run_release "${BETA_DIR}/run.run.json" "${BETA_DIR}/run.cli.json" "$BETA_PLAN" "$IOS_PACKAGE"
 BETA_EXEC_ID="$(extract_json_value "${BETA_DIR}/run.cli.json" "result.exec_id")"
 run_query "${BETA_DIR}/query.run.json" "${BETA_DIR}/query.cli.json" "$BETA_EXEC_ID" full
@@ -571,7 +619,7 @@ mkdir -p "$PROMOTE_DIR"
 PROMOTE_PLAN="${PROMOTE_DIR}/plan.json"
 run_create "${PROMOTE_DIR}/create.run.json" "${PROMOTE_DIR}/create.cli.json" "$MOCK_PROD_PROVIDER" "$IOS_PACKAGE" "$PROMOTE_PLAN"
 run_validate "${PROMOTE_DIR}/validate.run.json" "${PROMOTE_DIR}/validate.cli.json" "$PROMOTE_PLAN"
-assert_json_expr "${PROMOTE_DIR}/validate.cli.json" 'doc["ok"] is True and doc["result"]["provider_kind"] == "mock_v1"' "mock production plan validate failed"
+assert_json_expr "${PROMOTE_DIR}/validate.cli.json" 'doc["ok"] is True and doc["result"]["provider_kind"] == "mock_v1" and doc["result"]["release_readiness"]["status"] == "ok" and len(doc["result"]["native_summary"]["permission_declarations"]) >= 1' "mock production plan validate failed"
 run_release "${PROMOTE_DIR}/run.run.json" "${PROMOTE_DIR}/run.cli.json" "$PROMOTE_PLAN" "$IOS_PACKAGE"
 PROMOTE_EXEC_ID="$(extract_json_value "${PROMOTE_DIR}/run.cli.json" "result.exec_id")"
 assert_json_expr "${PROMOTE_DIR}/run.cli.json" 'doc["ok"] is True and doc["result"]["status"] == "completed" and doc["result"]["decision_count"] == 2' "mock production run did not finish with two decisions"
@@ -636,7 +684,7 @@ curl -fsS -X POST -H 'content-type: application/json' -d '{"reason":"ui_resume"}
 curl -fsS -X POST -H 'content-type: application/json' -d '{"reason":"ui_complete"}' "${UI_BASE_URL}/api/device-releases/${UI_EXEC_ID}/complete" >"${UI_DIR}/api.device-release.complete.json"
 curl -fsS "${UI_BASE_URL}/api/device-releases/${UI_EXEC_ID}" >"${UI_DIR}/api.device-release.after.json"
 assert_json_expr "${UI_DIR}/api.device-releases.json" 'doc["ok"] is True and any(item["exec_id"] == "'"${UI_EXEC_ID}"'" for item in doc["result"]["items"])' "device release list did not include the UI execution"
-assert_json_expr "${UI_DIR}/api.device-release.get.json" 'doc["ok"] is True and doc["result"]["exec_id"] == "'"${UI_EXEC_ID}"'" and doc["result"]["current_state"] == "in_progress"' "device release detail did not show the expected in-progress state"
+assert_json_expr "${UI_DIR}/api.device-release.get.json" 'doc["ok"] is True and doc["result"]["exec_id"] == "'"${UI_EXEC_ID}"'" and doc["result"]["current_state"] == "in_progress" and doc["result"]["native_summary"]["target_kind"] == "ios" and doc["result"]["release_readiness"]["status"] == "ok"' "device release detail did not show the expected native-aware in-progress state"
 assert_json_expr "${UI_DIR}/api.device-release.complete.json" 'doc["ok"] is True and doc["result"]["kind"] == "device.release.complete.manual" and doc["result"]["state_after"]["current_state"] == "completed"' "device release complete control did not produce the expected state transition"
 assert_json_expr "${UI_DIR}/api.device-release.after.json" 'doc["ok"] is True and doc["result"]["current_state"] == "completed" and doc["result"]["current_rollout_percent"] == 100' "device release detail did not show a completed rollout after UI actions"
 stop_pid "$UI_SERVER_PID"
@@ -663,10 +711,10 @@ OBSERVE_BAD_PLAN="${OBSERVE_BAD_DIR}/plan.json"
 run_create "${OBSERVE_BAD_DIR}/create.run.json" "${OBSERVE_BAD_DIR}/create.cli.json" "$MOCK_PROD_PROVIDER" "$IOS_PACKAGE" "$OBSERVE_BAD_PLAN" "$SLO_PROFILE" "300" "release.pause"
 run_release "${OBSERVE_BAD_DIR}/run.run.json" "${OBSERVE_BAD_DIR}/run.cli.json" "$OBSERVE_BAD_PLAN" "$IOS_PACKAGE"
 OBSERVE_BAD_EXEC_ID="$(extract_json_value "${OBSERVE_BAD_DIR}/run.cli.json" "result.exec_id")"
-seed_otlp_export "$OBSERVE_BAD_EXEC_ID" bridge_error
+seed_otlp_export "$OBSERVE_BAD_EXEC_ID" policy_violation
 run_control "${OBSERVE_BAD_DIR}/observe.run.json" "${OBSERVE_BAD_DIR}/observe.cli.json" observe "$OBSERVE_BAD_EXEC_ID" cli_observe_bad
 run_query "${OBSERVE_BAD_DIR}/query.after.run.json" "${OBSERVE_BAD_DIR}/query.after.cli.json" "$OBSERVE_BAD_EXEC_ID" full
-assert_json_expr "${OBSERVE_BAD_DIR}/query.after.cli.json" 'doc["ok"] is True and doc["result"]["current_state"] == "paused" and doc["result"]["automation_state"] == "paused" and doc["result"]["latest_eval_outcome"] == "fail" and any(item["classification"] == "device_bridge_parse" for item in doc["result"]["linked_incidents"])' "bad OTLP telemetry did not pause the release and capture the bridge incident"
+assert_json_expr "${OBSERVE_BAD_DIR}/query.after.cli.json" 'doc["ok"] is True and doc["result"]["current_state"] == "paused" and doc["result"]["automation_state"] == "paused" and doc["result"]["latest_eval_outcome"] == "fail" and doc["result"]["latest_native_health_rollup"]["native_permission_blocked_count"] >= 1 and any(item["native_classification"] == "native_permission_blocked" for item in doc["result"]["linked_incidents"])' "bad OTLP telemetry did not pause the release and capture the native policy incident"
 run_control "${OBSERVE_BAD_DIR}/stop.run.json" "${OBSERVE_BAD_DIR}/stop.cli.json" stop "$OBSERVE_BAD_EXEC_ID" cli_stop
 run_query "${OBSERVE_BAD_DIR}/query.stopped.run.json" "${OBSERVE_BAD_DIR}/query.stopped.cli.json" "$OBSERVE_BAD_EXEC_ID" full
 assert_json_expr "${OBSERVE_BAD_DIR}/stop.cli.json" 'doc["ok"] is True and doc["result"]["kind"] == "device.release.stop.manual"' "stop did not emit the expected control action result"
@@ -686,7 +734,7 @@ HALT_EXEC_ID="$(extract_json_value "${HALT_DIR}/run.cli.json" "result.exec_id")"
 seed_otlp_export "$HALT_EXEC_ID" webview_crash
 run_control "${HALT_DIR}/observe.run.json" "${HALT_DIR}/observe.cli.json" observe "$HALT_EXEC_ID" cli_observe_halt
 run_query "${HALT_DIR}/query.after.run.json" "${HALT_DIR}/query.after.cli.json" "$HALT_EXEC_ID" full
-assert_json_expr "${HALT_DIR}/query.after.cli.json" 'doc["ok"] is True and doc["result"]["status"] == "aborted" and doc["result"]["current_state"] == "halted" and doc["result"]["automation_state"] == "stopped" and doc["result"]["latest_eval_outcome"] == "fail" and any(item["classification"] == "device_webview_crash" for item in doc["result"]["linked_incidents"])' "bad OTLP telemetry did not halt the release on a webview crash"
+assert_json_expr "${HALT_DIR}/query.after.cli.json" 'doc["ok"] is True and doc["result"]["status"] == "aborted" and doc["result"]["current_state"] == "halted" and doc["result"]["automation_state"] == "stopped" and doc["result"]["latest_eval_outcome"] == "fail" and doc["result"]["latest_native_health_rollup"]["native_host_crash_count"] >= 1 and any(item["native_classification"] == "native_host_crash" for item in doc["result"]["linked_incidents"])' "bad OTLP telemetry did not halt the release on a native host crash"
 
 INCIDENT_DIR="${TMP_DIR}/device_incident_to_regression"
 mkdir -p "$INCIDENT_DIR" "${INCIDENT_DIR}/regress"
@@ -699,9 +747,9 @@ INCIDENT_ID="$(extract_json_value "${INCIDENT_DIR}/capture.cli.json" "result.inc
 run_incident_list "${INCIDENT_DIR}/list.run.json" "${INCIDENT_DIR}/list.cli.json" "$INCIDENT_EXEC_ID"
 run_regress "${INCIDENT_DIR}/regress.run.json" "${INCIDENT_DIR}/regress.cli.json" "$INCIDENT_ID" "${INCIDENT_DIR}/regress" device_incident
 run_query "${INCIDENT_DIR}/query.run.json" "${INCIDENT_DIR}/query.cli.json" "$INCIDENT_EXEC_ID" full
-assert_json_expr "${INCIDENT_DIR}/capture.cli.json" 'doc["ok"] is True and doc["result"]["release_exec_id"] == "'"${INCIDENT_EXEC_ID}"'" and doc["result"]["device_release"]["release_exec_id"] == "'"${INCIDENT_EXEC_ID}"'"' "device incident capture did not bind to the release execution"
+assert_json_expr "${INCIDENT_DIR}/capture.cli.json" 'doc["ok"] is True and doc["result"]["release_exec_id"] == "'"${INCIDENT_EXEC_ID}"'" and doc["result"]["device_release"]["release_exec_id"] == "'"${INCIDENT_EXEC_ID}"'" and doc["result"]["native_context"]["kind"] == "device_native"' "device incident capture did not bind to the release execution"
 assert_json_expr "${INCIDENT_DIR}/list.cli.json" 'doc["ok"] is True and any(item["incident_id"] == "'"${INCIDENT_ID}"'" for item in doc["result"]["items"])' "device incident list did not include the captured incident"
-assert_json_expr "${INCIDENT_DIR}/regress.cli.json" 'doc["ok"] is True and doc["result"]["tool"]["command"] == "device regress from-incident" and doc["result"]["incident_status_after"] == "generated" and len(doc["result"]["generated"]) >= 1' "device incident regression did not complete through the device regression path"
-assert_json_expr "${INCIDENT_DIR}/query.cli.json" 'doc["ok"] is True and any(item["incident_id"] == "'"${INCIDENT_ID}"'" and item["regression_status"] == "generated" for item in doc["result"]["linked_incidents"])' "device release query did not reflect the linked incident regression state"
+assert_json_expr "${INCIDENT_DIR}/regress.cli.json" 'doc["ok"] is True and doc["result"]["tool"]["command"] == "device regress from-incident" and doc["result"]["replay_target_kind"] == "ios" and doc["result"]["incident_status_after"] == "generated" and len(doc["result"]["generated"]) >= 1 and len(doc["result"]["generated_report_artifact_refs"]) >= 1' "device incident regression did not complete through the native device regression path"
+assert_json_expr "${INCIDENT_DIR}/query.cli.json" 'doc["ok"] is True and doc["result"]["latest_regression_status"] == "generated" and any(item["incident_id"] == "'"${INCIDENT_ID}"'" and item["regression_status"] == "generated" for item in doc["result"]["linked_incidents"])' "device release query did not reflect the linked incident regression state"
 
 echo "ok: device release"

@@ -2,7 +2,7 @@
   "kind": "x07.web_ui.trace",
   "meta": {
     "name": "command_center",
-    "steps": 4
+    "steps": 6
   },
   "steps": [
     {
@@ -39,11 +39,11 @@
           "__x07_http": {
             "response": {
               "body": {
-                "bytes_len": 20,
-                "text": "[{\"app_id\":\"app_min\"}]"
+                "bytes_len": 617,
+                "text": "{\"ok\":true,\"result\":{\"generated_unix_ms\":1762800000000,\"items\":[{\"exec_id\":\"rel-ios-001\",\"provider_kind\":\"mock_v1\",\"distribution_lane\":\"beta\",\"target\":\"ios\",\"status\":\"running\",\"current_state\":\"in_progress\",\"current_rollout_percent\":25,\"release_readiness_status\":\"ok\",\"latest_eval_outcome\":\"pass\",\"native_summary\":{\"target_kind\":\"ios\",\"provider_kind\":\"mock_v1\",\"package_manifest_sha256\":\"sha256:6601516c0619a5aa4b74ac7c02cb69c2e216471b6330659dcd491bcbfd77a539\"},\"latest_native_health_rollup\":{\"native_incident_count\":1,\"native_host_crash_count\":1,\"latest_native_incident_id\":\"inc-native-001\",\"latest_regression_status\":\"generated\"},\"latest_native_incident_id\":\"inc-native-001\",\"latest_regression_status\":\"generated\",\"app\":{\"app_id\":\"crewops\",\"version\":\"1.4.0\",\"build\":\"140\"}}]}}"
               },
               "headers": [],
-              "request_id": "apps.list",
+              "request_id": "device.release.list",
               "schema_version": "x07.http.response.envelope@0.1.0",
               "status": 200
             }
@@ -55,11 +55,9 @@
               "ok": true
             }
           },
-          "apps_body": "Waiting for /api/apps",
-          "incident_body": "Open an incident to inspect details",
           "last_status": 0,
-          "route": "/apps",
-          "status_label": "loading apps"
+          "route": "/device-releases",
+          "status_label": "loading device releases"
         },
         "v": 1
       },
@@ -80,16 +78,15 @@
     {
       "env": {
         "event": {
-          "target": "btn_incident",
+          "target": "release_rel-ios-001",
           "type": "click"
         },
         "kind": "x07.web_ui.dispatch",
         "state": {
-          "apps_body": "[{\"app_id\":\"app_min\"}]",
-          "incident_body": "Open an incident to inspect details",
+          "device_releases_body": "{\"ok\":true,\"result\":{\"generated_unix_ms\":1762800000000,\"items\":[{\"exec_id\":\"rel-ios-001\",\"provider_kind\":\"mock_v1\",\"distribution_lane\":\"beta\",\"target\":\"ios\",\"status\":\"running\",\"current_state\":\"in_progress\",\"current_rollout_percent\":25,\"release_readiness_status\":\"ok\",\"latest_eval_outcome\":\"pass\",\"native_summary\":{\"target_kind\":\"ios\",\"provider_kind\":\"mock_v1\",\"package_manifest_sha256\":\"sha256:6601516c0619a5aa4b74ac7c02cb69c2e216471b6330659dcd491bcbfd77a539\"},\"latest_native_health_rollup\":{\"native_incident_count\":1,\"native_host_crash_count\":1,\"latest_native_incident_id\":\"inc-native-001\",\"latest_regression_status\":\"generated\"},\"latest_native_incident_id\":\"inc-native-001\",\"latest_regression_status\":\"generated\",\"app\":{\"app_id\":\"crewops\",\"version\":\"1.4.0\",\"build\":\"140\"}}]}}",
           "last_status": 200,
-          "route": "/apps",
-          "status_label": "apps ready"
+          "route": "/device-releases",
+          "status_label": "device releases ready"
         },
         "v": 1
       },
@@ -118,17 +115,17 @@
           "__x07_http": {
             "response": {
               "body": {
-                "bytes_len": 25,
-                "text": "{\"incident_id\":\"inc-001\"}"
+                "bytes_len": 1453,
+                "text": "{\"ok\":true,\"result\":{\"exec_id\":\"rel-ios-001\",\"plan_id\":\"plan-ios-001\",\"provider_kind\":\"mock_v1\",\"distribution_lane\":\"beta\",\"target\":\"ios\",\"status\":\"running\",\"current_state\":\"in_progress\",\"automation_state\":\"active\",\"current_rollout_percent\":25,\"release_readiness_status\":\"ok\",\"latest_eval_outcome\":\"pass\",\"native_summary\":{\"target_kind\":\"ios\",\"provider_kind\":\"mock_v1\",\"package_manifest_sha256\":\"sha256:6601516c0619a5aa4b74ac7c02cb69c2e216471b6330659dcd491bcbfd77a539\",\"permission_declarations\":[\"camera\",\"files_pick\",\"location_foreground\"],\"telemetry_classes\":[\"runtime.error\",\"policy.violation\",\"host.webview_crash\"],\"capabilities\":{\"camera_photo\":true,\"location_foreground\":true}},\"release_readiness\":{\"status\":\"ok\",\"warnings\":[\"staged rollout pending wider soak\"],\"errors\":[]},\"native_validation_warnings\":[\"telemetry coverage is limited to beta devices\"],\"native_validation_errors\":[],\"latest_native_health_rollup\":{\"native_incident_count\":1,\"native_host_crash_count\":1,\"latest_native_incident_id\":\"inc-native-001\",\"latest_regression_id\":\"reg-001\",\"latest_regression_status\":\"generated\"},\"latest_native_incident_id\":\"inc-native-001\",\"latest_regression_id\":\"reg-001\",\"latest_regression_status\":\"generated\",\"linked_incidents\":[{\"incident_id\":\"inc-native-001\",\"classification\":\"device_crash_spike\",\"native_classification\":\"native_host_crash\",\"incident_status\":\"open\",\"captured_unix_ms\":1762800001000,\"regression_status\":\"generated\",\"regression_id\":\"reg-001\",\"release_plan_id\":\"plan-ios-001\",\"target_kind\":\"ios\",\"provider_kind\":\"mock_v1\",\"package_manifest_sha256\":\"sha256:6601516c0619a5aa4b74ac7c02cb69c2e216471b6330659dcd491bcbfd77a539\"}],\"app\":{\"app_id\":\"crewops\",\"version\":\"1.4.0\",\"build\":\"140\"}}}"
               },
               "headers": [],
-              "request_id": "incident.detail",
+              "request_id": "device.release.detail",
               "schema_version": "x07.http.response.envelope@0.1.0",
               "status": 200
             }
           },
           "__x07_nav": {
-            "href": "/incidents/inc-001",
+            "href": "/device-releases/rel-ios-001",
             "op": "push"
           },
           "__x07_timer": {
@@ -138,10 +135,90 @@
               "ok": true
             }
           },
-          "apps_body": "[{\"app_id\":\"app_min\"}]",
-          "incident_body": "Open an incident to inspect details",
+          "device_releases_body": "{\"ok\":true,\"result\":{\"generated_unix_ms\":1762800000000,\"items\":[{\"exec_id\":\"rel-ios-001\",\"provider_kind\":\"mock_v1\",\"distribution_lane\":\"beta\",\"target\":\"ios\",\"status\":\"running\",\"current_state\":\"in_progress\",\"current_rollout_percent\":25,\"release_readiness_status\":\"ok\",\"latest_eval_outcome\":\"pass\",\"native_summary\":{\"target_kind\":\"ios\",\"provider_kind\":\"mock_v1\",\"package_manifest_sha256\":\"sha256:6601516c0619a5aa4b74ac7c02cb69c2e216471b6330659dcd491bcbfd77a539\"},\"latest_native_health_rollup\":{\"native_incident_count\":1,\"native_host_crash_count\":1,\"latest_native_incident_id\":\"inc-native-001\",\"latest_regression_status\":\"generated\"},\"latest_native_incident_id\":\"inc-native-001\",\"latest_regression_status\":\"generated\",\"app\":{\"app_id\":\"crewops\",\"version\":\"1.4.0\",\"build\":\"140\"}}]}}",
           "last_status": 200,
-          "route": "/incidents/inc-001",
+          "route": "/device-releases/rel-ios-001",
+          "status_label": "loading device release"
+        },
+        "v": 1
+      },
+      "frame": {
+        "effects": [],
+        "kind": "x07.web_ui.frame",
+        "patches": [],
+        "state": {},
+        "telemetry": {},
+        "ui": {
+          "kind": "x07.web_ui.tree",
+          "root": null,
+          "v": 1
+        },
+        "v": 1
+      }
+    },
+    {
+      "env": {
+        "event": {
+          "target": "incident_inc-native-001",
+          "type": "click"
+        },
+        "kind": "x07.web_ui.dispatch",
+        "state": {
+          "device_release_body": "{\"ok\":true,\"result\":{\"exec_id\":\"rel-ios-001\",\"plan_id\":\"plan-ios-001\",\"provider_kind\":\"mock_v1\",\"distribution_lane\":\"beta\",\"target\":\"ios\",\"status\":\"running\",\"current_state\":\"in_progress\",\"automation_state\":\"active\",\"current_rollout_percent\":25,\"release_readiness_status\":\"ok\",\"latest_eval_outcome\":\"pass\",\"native_summary\":{\"target_kind\":\"ios\",\"provider_kind\":\"mock_v1\",\"package_manifest_sha256\":\"sha256:6601516c0619a5aa4b74ac7c02cb69c2e216471b6330659dcd491bcbfd77a539\",\"permission_declarations\":[\"camera\",\"files_pick\",\"location_foreground\"],\"telemetry_classes\":[\"runtime.error\",\"policy.violation\",\"host.webview_crash\"],\"capabilities\":{\"camera_photo\":true,\"location_foreground\":true}},\"release_readiness\":{\"status\":\"ok\",\"warnings\":[\"staged rollout pending wider soak\"],\"errors\":[]},\"native_validation_warnings\":[\"telemetry coverage is limited to beta devices\"],\"native_validation_errors\":[],\"latest_native_health_rollup\":{\"native_incident_count\":1,\"native_host_crash_count\":1,\"latest_native_incident_id\":\"inc-native-001\",\"latest_regression_id\":\"reg-001\",\"latest_regression_status\":\"generated\"},\"latest_native_incident_id\":\"inc-native-001\",\"latest_regression_id\":\"reg-001\",\"latest_regression_status\":\"generated\",\"linked_incidents\":[{\"incident_id\":\"inc-native-001\",\"classification\":\"device_crash_spike\",\"native_classification\":\"native_host_crash\",\"incident_status\":\"open\",\"captured_unix_ms\":1762800001000,\"regression_status\":\"generated\",\"regression_id\":\"reg-001\",\"release_plan_id\":\"plan-ios-001\",\"target_kind\":\"ios\",\"provider_kind\":\"mock_v1\",\"package_manifest_sha256\":\"sha256:6601516c0619a5aa4b74ac7c02cb69c2e216471b6330659dcd491bcbfd77a539\"}],\"app\":{\"app_id\":\"crewops\",\"version\":\"1.4.0\",\"build\":\"140\"}}}",
+          "last_status": 200,
+          "route": "/device-releases/rel-ios-001",
+          "status_label": "device release ready"
+        },
+        "v": 1
+      },
+      "frame": {
+        "effects": [],
+        "kind": "x07.web_ui.frame",
+        "patches": [],
+        "state": {},
+        "telemetry": {},
+        "ui": {
+          "kind": "x07.web_ui.tree",
+          "root": null,
+          "v": 1
+        },
+        "v": 1
+      }
+    },
+    {
+      "env": {
+        "event": {
+          "target": "poll",
+          "type": "timer"
+        },
+        "kind": "x07.web_ui.dispatch",
+        "state": {
+          "__x07_http": {
+            "response": {
+              "body": {
+                "bytes_len": 1766,
+                "text": "{\"ok\":true,\"result\":{\"incident_id\":\"inc-native-001\",\"classification\":\"device_crash_spike\",\"native_classification\":\"native_host_crash\",\"incident_status\":\"open\",\"deployment_id\":null,\"release_plan_id\":\"plan-ios-001\",\"release_exec_id\":\"rel-ios-001\",\"target_kind\":\"ios\",\"provider_kind\":\"mock_v1\",\"package_manifest_sha256\":\"sha256:6601516c0619a5aa4b74ac7c02cb69c2e216471b6330659dcd491bcbfd77a539\",\"regression_status\":\"generated\",\"regression_id\":\"reg-001\",\"captured_unix_ms\":1762800001000,\"target\":{\"app_id\":\"crewops\",\"environment\":\"prod\"},\"native_context\":{\"kind\":\"device_native\",\"release_plan_id\":\"plan-ios-001\",\"release_exec_id\":\"rel-ios-001\",\"platform\":\"ios\",\"package_manifest_sha256\":\"sha256:6601516c0619a5aa4b74ac7c02cb69c2e216471b6330659dcd491bcbfd77a539\",\"capabilities_summary\":{\"camera_photo\":true,\"location_foreground\":true},\"permission_snapshot\":{\"camera\":\"granted\",\"location_foreground\":\"granted\"},\"lifecycle_state\":\"foreground\",\"connectivity_state\":\"wifi\",\"breadcrumbs\":[\"launch\",\"bridge.ready\",\"webview_crash\"]},\"device_release\":{\"release_plan_id\":\"plan-ios-001\",\"release_exec_id\":\"rel-ios-001\",\"target_kind\":\"ios\",\"provider_kind\":\"mock_v1\",\"package_manifest_sha256\":\"sha256:6601516c0619a5aa4b74ac7c02cb69c2e216471b6330659dcd491bcbfd77a539\"},\"refs\":[{\"role\":\"diag\",\"logical_name\":\"diag.json\",\"store_uri\":\"file:incidents/prod/crewops/inc-native-001/diag.json\",\"media_type\":\"application/json\",\"digest\":{\"sha256\":\"1111\"}}],\"regression\":{\"regression_id\":\"reg-001\",\"replay_mode\":\"native_device\",\"replay_target_kind\":\"ios\",\"replay_synthesis_status\":\"generated\",\"request\":{\"role\":\"request\",\"store_uri\":\"file:incidents/prod/crewops/inc-native-001/regression.request.json\",\"digest\":{\"sha256\":\"2222\"}},\"report\":{\"role\":\"report\",\"store_uri\":\"file:incidents/prod/crewops/inc-native-001/regression.report.json\",\"digest\":{\"sha256\":\"3333\"}},\"generated_trace_artifact_refs\":[{\"role\":\"native.trace\",\"store_uri\":\"file:regressions/reg-001/device.trace.json\",\"digest\":{\"sha256\":\"4444\"}}],\"generated_report_artifact_refs\":[{\"role\":\"native.report\",\"store_uri\":\"file:regressions/reg-001/report.json\",\"digest\":{\"sha256\":\"5555\"}}],\"generated\":[{\"role\":\"fixtures/replay/device.trace.json\",\"store_uri\":\"file:regressions/reg-001/device.trace.json\",\"digest\":{\"sha256\":\"4444\"}}]}}}"
+              },
+              "headers": [],
+              "request_id": "incident.detail",
+              "schema_version": "x07.http.response.envelope@0.1.0",
+              "status": 200
+            }
+          },
+          "__x07_nav": {
+            "href": "/incidents/inc-native-001",
+            "op": "push"
+          },
+          "__x07_timer": {
+            "set": {
+              "delay_ms": 5000,
+              "id": "poll",
+              "ok": true
+            }
+          },
+          "device_release_body": "{\"ok\":true,\"result\":{\"exec_id\":\"rel-ios-001\",\"plan_id\":\"plan-ios-001\",\"provider_kind\":\"mock_v1\",\"distribution_lane\":\"beta\",\"target\":\"ios\",\"status\":\"running\",\"current_state\":\"in_progress\",\"automation_state\":\"active\",\"current_rollout_percent\":25,\"release_readiness_status\":\"ok\",\"latest_eval_outcome\":\"pass\",\"native_summary\":{\"target_kind\":\"ios\",\"provider_kind\":\"mock_v1\",\"package_manifest_sha256\":\"sha256:6601516c0619a5aa4b74ac7c02cb69c2e216471b6330659dcd491bcbfd77a539\",\"permission_declarations\":[\"camera\",\"files_pick\",\"location_foreground\"],\"telemetry_classes\":[\"runtime.error\",\"policy.violation\",\"host.webview_crash\"],\"capabilities\":{\"camera_photo\":true,\"location_foreground\":true}},\"release_readiness\":{\"status\":\"ok\",\"warnings\":[\"staged rollout pending wider soak\"],\"errors\":[]},\"native_validation_warnings\":[\"telemetry coverage is limited to beta devices\"],\"native_validation_errors\":[],\"latest_native_health_rollup\":{\"native_incident_count\":1,\"native_host_crash_count\":1,\"latest_native_incident_id\":\"inc-native-001\",\"latest_regression_id\":\"reg-001\",\"latest_regression_status\":\"generated\"},\"latest_native_incident_id\":\"inc-native-001\",\"latest_regression_id\":\"reg-001\",\"latest_regression_status\":\"generated\",\"linked_incidents\":[{\"incident_id\":\"inc-native-001\",\"classification\":\"device_crash_spike\",\"native_classification\":\"native_host_crash\",\"incident_status\":\"open\",\"captured_unix_ms\":1762800001000,\"regression_status\":\"generated\",\"regression_id\":\"reg-001\",\"release_plan_id\":\"plan-ios-001\",\"target_kind\":\"ios\",\"provider_kind\":\"mock_v1\",\"package_manifest_sha256\":\"sha256:6601516c0619a5aa4b74ac7c02cb69c2e216471b6330659dcd491bcbfd77a539\"}],\"app\":{\"app_id\":\"crewops\",\"version\":\"1.4.0\",\"build\":\"140\"}}}",
+          "last_status": 200,
+          "route": "/incidents/inc-native-001",
           "status_label": "loading incident"
         },
         "v": 1

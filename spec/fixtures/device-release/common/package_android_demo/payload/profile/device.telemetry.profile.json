@@ -5,7 +5,12 @@
     "endpoint": "https://telemetry.x07.io/v1/otlp"
   },
   "event_classes": [
-    "release.lifecycle",
-    "release.error"
+    "app.lifecycle",
+    "app.http",
+    "runtime.error",
+    "bridge.timing",
+    "reducer.timing",
+    "policy.violation",
+    "host.webview_crash"
   ]
 }

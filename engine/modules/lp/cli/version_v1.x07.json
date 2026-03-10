@@ -1,1 +1,1 @@
-{"decls":[{"kind":"export","names":["lp.cli.version_v1.str_v1"]},{"body":["bytes.lit","0.2.4"],"kind":"defn","name":"lp.cli.version_v1.str_v1","params":[],"result":"bytes"}],"imports":[],"kind":"module","module_id":"lp.cli.version_v1","schema_version":"x07.x07ast@0.5.0"}
+{"decls":[{"kind":"export","names":["lp.cli.version_v1.str_v1"]},{"body":["bytes.lit","0.2.5"],"kind":"defn","name":"lp.cli.version_v1.str_v1","params":[],"result":"bytes"}],"imports":[],"kind":"module","module_id":"lp.cli.version_v1","schema_version":"x07.x07ast@0.5.0"}

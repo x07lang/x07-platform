@@ -540,13 +540,14 @@
     },
     {
       "name": "lp.device.release.create",
-      "description": "Create a deterministic device release plan from a store provider profile and a sealed device package manifest, with optional metrics-gate bootstrap inputs.",
+      "description": "Create a deterministic device release plan from a store provider profile, a sealed device package manifest, and the machine-readable x07-wasm package report, with optional metrics-gate bootstrap inputs.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "required": [
           "provider_profile",
           "package_manifest",
+          "package_report",
           "out"
         ],
         "properties": {
@@ -556,6 +557,11 @@
             "maxLength": 1024
           },
           "package_manifest": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "package_report": {
             "type": "string",
             "minLength": 1,
             "maxLength": 1024

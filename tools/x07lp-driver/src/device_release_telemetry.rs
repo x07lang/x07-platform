@@ -16,6 +16,7 @@ pub(super) struct DeviceTelemetryIncident {
     pub classification: String,
     pub reason: String,
     pub source: String,
+    pub native_context_patch: Value,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +135,7 @@ pub(super) fn analyze_device_release_otlp_export(
     let mut http_failures = 0u64;
     let mut http_successes = 0u64;
     let mut incident_map = BTreeMap::<String, DeviceTelemetryIncident>::new();
+    let native_context_patch = build_native_context_patch(&records);
 
     for record in &records {
         match record.class_name.as_str() {
@@ -156,24 +158,32 @@ pub(super) fn analyze_device_release_otlp_export(
                         classification,
                         reason: incident_reason(record),
                         source: "device_host".to_string(),
+                        native_context_patch: native_context_patch.clone(),
                     });
             }
             "policy.violation" => {
+                let classification = if is_permission_block(record) {
+                    "native_permission_blocked".to_string()
+                } else {
+                    "native_policy_violation".to_string()
+                };
                 incident_map
-                    .entry("device_policy_violation".to_string())
+                    .entry(classification.clone())
                     .or_insert_with(|| DeviceTelemetryIncident {
-                        classification: "device_policy_violation".to_string(),
+                        classification,
                         reason: incident_reason(record),
                         source: "device_host".to_string(),
+                        native_context_patch: native_context_patch.clone(),
                     });
             }
             "host.webview_crash" => {
                 incident_map
-                    .entry("device_webview_crash".to_string())
+                    .entry("native_host_crash".to_string())
                     .or_insert_with(|| DeviceTelemetryIncident {
-                        classification: "device_webview_crash".to_string(),
+                        classification: "native_host_crash".to_string(),
                         reason: incident_reason(record),
                         source: "device_host".to_string(),
+                        native_context_patch: native_context_patch.clone(),
                     });
             }
             _ => {}
@@ -341,10 +351,16 @@ fn runtime_error_classification(record: &DeviceTelemetryRecord) -> String {
         .unwrap_or_default()
         .to_ascii_lowercase();
     let body = record.body.clone().unwrap_or_default().to_ascii_lowercase();
-    if stage.contains("bridge") || body.contains("bridge") {
-        "device_bridge_parse".to_string()
+    if is_permission_block(record) {
+        "native_permission_blocked".to_string()
+    } else if stage.contains("bridge")
+        || body.contains("bridge")
+        || stage.contains("timeout")
+        || body.contains("timeout")
+    {
+        "native_bridge_timeout".to_string()
     } else {
-        "device_js_unhandled".to_string()
+        "native_runtime_error".to_string()
     }
 }
 
@@ -352,6 +368,62 @@ fn incident_reason(record: &DeviceTelemetryRecord) -> String {
     attr_string(&record.attrs, "message")
         .or_else(|| record.body.clone())
         .unwrap_or_else(|| format!("device telemetry incident: {}", record.event_name))
+}
+
+fn is_permission_block(record: &DeviceTelemetryRecord) -> bool {
+    let status = attr_string(&record.attrs, "status")
+        .or_else(|| attr_string(&record.attrs, "result"))
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let permission = attr_string(&record.attrs, "permission").unwrap_or_default();
+    let body = record.body.clone().unwrap_or_default().to_ascii_lowercase();
+    !permission.is_empty() && (status == "denied" || body.contains("permission") && body.contains("denied"))
+}
+
+fn build_native_context_patch(records: &[DeviceTelemetryRecord]) -> Value {
+    let mut permission_state_snapshot = serde_json::Map::new();
+    let mut lifecycle_state = Value::Null;
+    let mut connectivity_state = Value::Null;
+    let mut breadcrumbs = Vec::new();
+    for record in records.iter().rev().take(8).collect::<Vec<_>>().into_iter().rev() {
+        if let Some(permission) = attr_string(&record.attrs, "permission") {
+            if let Some(status) = attr_string(&record.attrs, "status")
+                .or_else(|| attr_string(&record.attrs, "result"))
+            {
+                permission_state_snapshot.insert(permission, json!(status));
+            }
+        }
+        if record.class_name == "app.lifecycle" && lifecycle_state.is_null() {
+            lifecycle_state = attr_string(&record.attrs, "state")
+                .map(Value::String)
+                .unwrap_or_else(|| json!(record.event_name.clone()));
+        }
+        if connectivity_state.is_null() {
+            if let Some(state) = attr_string(&record.attrs, "connectivity_state")
+                .or_else(|| attr_string(&record.attrs, "network_state"))
+            {
+                connectivity_state = json!(state);
+            }
+        }
+        let mut breadcrumb = json!({
+            "ord": breadcrumbs.len() as u64,
+            "event_class": record.class_name,
+            "op": attr_string(&record.attrs, "op").or_else(|| attr_string(&record.attrs, "operation")).unwrap_or_else(|| record.event_name.clone()),
+            "status": attr_string(&record.attrs, "status").or_else(|| attr_string(&record.attrs, "result")).unwrap_or_default(),
+            "request_id": attr_string(&record.attrs, "request_id"),
+            "unix_ms": attr_u64(&record.attrs, "unix_ms").or_else(|| attr_u64(&record.attrs, "timestamp_unix_ms")),
+        });
+        if let Some(duration_ms) = attr_f64(&record.attrs, "duration_ms") {
+            ensure_object(&mut breadcrumb).insert("duration_ms".to_string(), json!(duration_ms));
+        }
+        breadcrumbs.push(breadcrumb);
+    }
+    json!({
+        "permission_state_snapshot": if permission_state_snapshot.is_empty() { Value::Null } else { Value::Object(permission_state_snapshot) },
+        "lifecycle_state": lifecycle_state,
+        "connectivity_state": connectivity_state,
+        "breadcrumbs": breadcrumbs,
+    })
 }
 
 fn attr_string(attrs: &BTreeMap<String, Value>, key: &str) -> Option<String> {
@@ -489,8 +561,12 @@ mod tests {
             .map(|incident| incident.classification.as_str())
             .collect::<BTreeSet<_>>();
         assert_eq!(classes.len(), 3);
-        assert!(classes.contains("device_bridge_parse"));
-        assert!(classes.contains("device_policy_violation"));
-        assert!(classes.contains("device_webview_crash"));
+        assert!(classes.contains("native_bridge_timeout"));
+        assert!(classes.contains("native_policy_violation"));
+        assert!(classes.contains("native_host_crash"));
+        assert!(analysis
+            .incidents
+            .iter()
+            .all(|incident| incident.native_context_patch.is_object()));
     }
 }

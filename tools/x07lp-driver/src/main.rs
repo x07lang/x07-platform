@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 use aes_gcm_siv::{Aes256GcmSiv, KeyInit, Nonce, aead::Aead};
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
@@ -75,12 +77,21 @@ const LOCAL_TARGET_SENTINEL: &str = "__local__";
 const VALID_QUERY_VIEWS: &[&str] = &["summary", "timeline", "decisions", "artifacts", "full"];
 const VALID_DEVICE_RELEASE_QUERY_VIEWS: &[&str] = &["summary", "timeline", "decisions", "full"];
 const DEVICE_PROVIDER_LIVE_ENV: &str = "X07LP_DEVICE_PROVIDER_LIVE";
-const DEVICE_RELEASE_PLAN_KIND: &str = "lp.device.release.plan@0.1.0";
-const DEVICE_RELEASE_EXECUTION_KIND: &str = "lp.device.release.execution@0.1.0";
-const DEVICE_RELEASE_QUERY_RESULT_KIND: &str = "lp.device.release.query.result@0.1.0";
-const DEVICE_RELEASE_RUN_RESULT_KIND: &str = "lp.device.release.run.result@0.1.0";
+const DEVICE_RELEASE_PLAN_KIND: &str = "lp.device.release.plan@0.2.0";
+const DEVICE_RELEASE_EXECUTION_KIND: &str = "lp.device.release.execution@0.2.0";
+const DEVICE_RELEASE_QUERY_RESULT_KIND: &str = "lp.device.release.query.result@0.2.0";
+const DEVICE_RELEASE_RUN_RESULT_KIND: &str = "lp.device.release.run.result@0.2.0";
 const DEVICE_STORE_PROVIDER_PROFILE_KIND: &str = "lp.device.store.provider.profile@0.1.0";
 const DEVICE_PACKAGE_MANIFEST_KIND: &str = "x07.device.package.manifest@0.1.0";
+const DEVICE_INCIDENT_BUNDLE_KIND: &str = "lp.incident.bundle@0.2.0";
+const DEVICE_INCIDENT_META_LOCAL_KIND: &str = "lp.incident.bundle.meta.local@0.2.0";
+const DEVICE_INCIDENT_QUERY_RESULT_KIND: &str = "lp.incident.query.result@0.2.0";
+const REGRESSION_REQUEST_KIND: &str = "lp.regression.request@0.2.0";
+const REGRESSION_RUN_RESULT_KIND: &str = "lp.regression.run.result@0.2.0";
+const X07_WASM_DEVICE_PACKAGE_REPORT_KIND: &str = "x07.wasm.device.package.report@0.2.0";
+const X07_WASM_DEVICE_PACKAGE_REPORT_KIND_LEGACY: &str = "x07.wasm.device.package.report@0.1.0";
+const X07_WASM_DEVICE_REGRESS_REPORT_KIND: &str =
+    "x07.wasm.device.regress.from_incident.report@0.2.0";
 const REDACTED_HTTP_HEADER_NAMES: &[&str] = &[
     "authorization",
     "proxy-authorization",
@@ -345,7 +356,13 @@ struct IncidentListArgs {
     #[arg(long)]
     classification: Option<String>,
     #[arg(long)]
+    native_classification: Option<String>,
+    #[arg(long)]
     status: Option<String>,
+    #[arg(long)]
+    target_kind: Option<String>,
+    #[arg(long, default_value_t = false)]
+    native_only: bool,
     #[arg(long)]
     app_id: Option<String>,
     #[arg(long)]
@@ -482,6 +499,8 @@ struct DeviceReleaseCreateArgs {
     provider_profile: String,
     #[arg(long)]
     package_manifest: String,
+    #[arg(long)]
+    package_report: String,
     #[arg(long)]
     out: String,
     #[arg(long)]
@@ -5455,8 +5474,8 @@ fn supported_schema_ids() -> Vec<String> {
             "lp.cli.report@0.1.0".to_string(),
             "lp.deploy.execution@0.1.0".to_string(),
             "lp.deploy.query.result@0.1.0".to_string(),
-            "lp.incident.query.result@0.1.0".to_string(),
-            "lp.regression.run.result@0.1.0".to_string(),
+            DEVICE_INCIDENT_QUERY_RESULT_KIND.to_string(),
+            REGRESSION_RUN_RESULT_KIND.to_string(),
             "lp.remote.capabilities.response@0.1.0".to_string(),
         ];
     }
@@ -7387,7 +7406,7 @@ fn incident_target_artifact(meta: &Value) -> Value {
     {
         if package_digest.is_object() {
             let package_store_uri = get_str(&package_digest, &["sha256"])
-                .map(|sha| format!("file:device_release/packages/{sha}.json"))
+                .map(|sha| format!("file:device_release/package_sources/{sha}/package.manifest.json"))
                 .unwrap_or_else(|| "sha256:unknown".to_string());
             return json!({
                 "kind": DEVICE_PACKAGE_MANIFEST_KIND,
@@ -7454,6 +7473,7 @@ fn trace_trace_id(trace_doc: &Value) -> Option<String> {
 #[derive(Clone)]
 struct IncidentContext {
     deployment_id: Option<String>,
+    release_plan_id: Option<String>,
     release_exec_id: Option<String>,
     run_id: String,
     target_app_id: String,
@@ -7461,9 +7481,13 @@ struct IncidentContext {
     bundle_environment: Value,
     pack_digest: Value,
     package_digest: Value,
+    package_manifest_sha256: Option<String>,
     slot: Option<String>,
     candidate_weight_pct: Option<u64>,
+    target_kind: Option<String>,
+    provider_kind: Option<String>,
     device_release: Value,
+    native_context: Value,
 }
 
 fn incident_scope_matches(
@@ -7492,15 +7516,105 @@ fn incident_target_store_base(meta: &Value, bundle: &Value) -> (String, String, 
     (app_id, environment, incident_id)
 }
 
+fn canonical_native_classification(classification: &str, reason: &str) -> Option<String> {
+    match classification {
+        "native_runtime_error"
+        | "native_policy_violation"
+        | "native_bridge_timeout"
+        | "native_host_crash"
+        | "native_permission_blocked" => Some(classification.to_string()),
+        "device_policy_violation" => Some("native_policy_violation".to_string()),
+        "device_webview_crash" => Some("native_host_crash".to_string()),
+        "device_bridge_parse" => Some("native_bridge_timeout".to_string()),
+        "device_js_unhandled" | "device_crash_spike" => Some("native_runtime_error".to_string()),
+        _ if reason.to_ascii_lowercase().contains("permission")
+            && reason.to_ascii_lowercase().contains("denied") =>
+        {
+            Some("native_permission_blocked".to_string())
+        }
+        _ => None,
+    }
+}
+
+fn device_release_native_health_rollup_from_items(linked_incidents: &[Value]) -> Value {
+    let mut runtime_error_count = 0_u64;
+    let mut policy_violation_count = 0_u64;
+    let mut bridge_timeout_count = 0_u64;
+    let mut host_crash_count = 0_u64;
+    let mut permission_blocked_count = 0_u64;
+    let mut latest_native_incident_id = Value::Null;
+    let mut latest_regression_id = Value::Null;
+    let mut latest_regression_status = json!("not_requested");
+    let mut latest_captured_unix_ms = 0_u64;
+    for item in linked_incidents {
+        let Some(native_classification) = get_str(item, &["native_classification"]) else {
+            continue;
+        };
+        match native_classification.as_str() {
+            "native_runtime_error" => runtime_error_count += 1,
+            "native_policy_violation" => policy_violation_count += 1,
+            "native_bridge_timeout" => bridge_timeout_count += 1,
+            "native_host_crash" => host_crash_count += 1,
+            "native_permission_blocked" => permission_blocked_count += 1,
+            _ => {}
+        }
+        let captured_unix_ms = get_u64(item, &["captured_unix_ms"]).unwrap_or(0);
+        if captured_unix_ms >= latest_captured_unix_ms {
+            latest_captured_unix_ms = captured_unix_ms;
+            latest_native_incident_id =
+                get_path(item, &["incident_id"]).cloned().unwrap_or(Value::Null);
+            latest_regression_id =
+                get_path(item, &["regression_id"]).cloned().unwrap_or(Value::Null);
+            latest_regression_status = json!(
+                get_str(item, &["regression_status"])
+                    .unwrap_or_else(|| "not_requested".to_string())
+            );
+        }
+    }
+    let native_incident_count = runtime_error_count
+        + policy_violation_count
+        + bridge_timeout_count
+        + host_crash_count
+        + permission_blocked_count;
+    json!({
+        "native_incident_count": native_incident_count,
+        "native_runtime_error_count": runtime_error_count,
+        "native_policy_violation_count": policy_violation_count,
+        "native_bridge_timeout_count": bridge_timeout_count,
+        "native_host_crash_count": host_crash_count,
+        "native_permission_blocked_count": permission_blocked_count,
+        "latest_native_incident_id": latest_native_incident_id,
+        "latest_regression_id": latest_regression_id,
+        "latest_regression_status": latest_regression_status,
+    })
+}
+
+fn refresh_device_release_native_health(exec_doc: &mut Value) {
+    let linked_incidents = get_path(exec_doc, &["meta", "linked_incidents"])
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    ensure_object_field(exec_doc, "meta").insert(
+        "latest_native_health_rollup".to_string(),
+        device_release_native_health_rollup_from_items(&linked_incidents),
+    );
+}
+
 fn incident_query_item(meta: &Value, bundle: &Value) -> Value {
     json!({
         "incident_id": get_str(bundle, &["incident_id"]).unwrap_or_default(),
         "classification": get_str(meta, &["classification"]).unwrap_or_default(),
+        "native_classification": get_path(meta, &["native_classification"]).cloned().unwrap_or(Value::Null),
+        "reason": get_path(bundle, &["notes"]).cloned().unwrap_or(Value::Null),
         "source": get_str(meta, &["source"]).unwrap_or_default(),
         "incident_status": get_str(meta, &["incident_status"]).unwrap_or_default(),
         "target": get_path(meta, &["target"]).cloned().unwrap_or_else(|| json!({"app_id":"unknown","environment":"unknown"})),
         "deployment_id": get_path(meta, &["deployment_id"]).cloned().unwrap_or(Value::Null),
+        "release_plan_id": get_path(meta, &["release_plan_id"]).cloned().unwrap_or(Value::Null),
         "release_exec_id": get_path(meta, &["release_exec_id"]).cloned().unwrap_or(Value::Null),
+        "target_kind": get_path(meta, &["target_kind"]).cloned().unwrap_or(Value::Null),
+        "provider_kind": get_path(meta, &["provider_kind"]).cloned().unwrap_or(Value::Null),
+        "package_manifest_sha256": get_path(meta, &["package_manifest_sha256"]).cloned().unwrap_or(Value::Null),
         "run_id": get_str(meta, &["run_id"]).unwrap_or_default(),
         "captured_unix_ms": get_u64(meta, &["captured_unix_ms"]).unwrap_or(0),
         "request_id": get_path(meta, &["request_id"]).cloned().unwrap_or(Value::Null),
@@ -7510,6 +7624,7 @@ fn incident_query_item(meta: &Value, bundle: &Value) -> Value {
         "regression_status": get_str(meta, &["regression_status"]).unwrap_or_else(|| "not_requested".to_string()),
         "regression_id": get_path(meta, &["regression_id"]).cloned().unwrap_or(Value::Null),
         "signature_status": get_str(meta, &["signature_status"]).unwrap_or_else(|| "not_applicable".to_string()),
+        "native_context": get_path(meta, &["native_context"]).cloned().unwrap_or(Value::Null),
         "device_release": incident_release_ref(meta),
     })
 }
@@ -7518,35 +7633,44 @@ fn device_release_linked_incident_item(meta: &Value, bundle: &Value) -> Value {
     json!({
         "incident_id": get_str(bundle, &["incident_id"]).unwrap_or_default(),
         "classification": get_str(meta, &["classification"]).unwrap_or_default(),
+        "native_classification": get_path(meta, &["native_classification"]).cloned().unwrap_or(Value::Null),
+        "reason": get_path(bundle, &["notes"]).cloned().unwrap_or(Value::Null),
         "source": get_str(meta, &["source"]).unwrap_or_default(),
         "incident_status": get_str(meta, &["incident_status"]).unwrap_or_default(),
         "captured_unix_ms": get_u64(meta, &["captured_unix_ms"]).unwrap_or(0),
         "regression_status": get_str(meta, &["regression_status"]).unwrap_or_else(|| "not_requested".to_string()),
         "regression_id": get_path(meta, &["regression_id"]).cloned().unwrap_or(Value::Null),
+        "release_plan_id": get_path(meta, &["release_plan_id"]).cloned().unwrap_or(Value::Null),
+        "target_kind": get_path(meta, &["target_kind"]).cloned().unwrap_or(Value::Null),
+        "provider_kind": get_path(meta, &["provider_kind"]).cloned().unwrap_or(Value::Null),
+        "package_manifest_sha256": get_path(meta, &["package_manifest_sha256"]).cloned().unwrap_or(Value::Null),
     })
 }
 
 fn upsert_device_release_linked_incident(exec_doc: &mut Value, meta: &Value, bundle: &Value) {
     let item = device_release_linked_incident_item(meta, bundle);
     let incident_id = get_str(&item, &["incident_id"]).unwrap_or_default();
-    let meta_map = ensure_object_field(exec_doc, "meta");
-    let linked_value = meta_map
-        .entry("linked_incidents".to_string())
-        .or_insert_with(|| json!([]));
-    if !linked_value.is_array() {
-        *linked_value = json!([]);
-    }
-    let linked = linked_value
-        .as_array_mut()
-        .expect("linked_incidents must be an array");
-    if let Some(existing) = linked
-        .iter_mut()
-        .find(|entry| get_str(entry, &["incident_id"]).as_deref() == Some(incident_id.as_str()))
     {
-        *existing = item;
-    } else {
-        linked.push(item);
+        let meta_map = ensure_object_field(exec_doc, "meta");
+        let linked_value = meta_map
+            .entry("linked_incidents".to_string())
+            .or_insert_with(|| json!([]));
+        if !linked_value.is_array() {
+            *linked_value = json!([]);
+        }
+        let linked = linked_value
+            .as_array_mut()
+            .expect("linked_incidents must be an array");
+        if let Some(existing) = linked
+            .iter_mut()
+            .find(|entry| get_str(entry, &["incident_id"]).as_deref() == Some(incident_id.as_str()))
+        {
+            *existing = item;
+        } else {
+            linked.push(item);
+        }
     }
+    refresh_device_release_native_health(exec_doc);
 }
 
 fn build_deployment_incident_context(
@@ -7560,6 +7684,7 @@ fn build_deployment_incident_context(
         .unwrap_or_else(|| json!({}));
     Ok(IncidentContext {
         deployment_id: get_str(exec_doc, &["exec_id"]),
+        release_plan_id: None,
         release_exec_id: None,
         run_id: get_str(exec_doc, &["run_id"]).unwrap_or_default(),
         target_app_id: get_str(&meta, &["target", "app_id"]).unwrap_or_default(),
@@ -7571,9 +7696,13 @@ fn build_deployment_incident_context(
             .cloned()
             .unwrap_or(Value::Null),
         package_digest: Value::Null,
+        package_manifest_sha256: None,
         slot: Some("candidate".to_string()),
         candidate_weight_pct: get_u64(&meta, &["routing", "candidate_weight_pct"]),
+        target_kind: None,
+        provider_kind: None,
         device_release: Value::Null,
+        native_context: Value::Null,
     })
 }
 
@@ -7591,9 +7720,29 @@ fn build_device_release_incident_context(exec_doc: &Value) -> Result<IncidentCon
         .unwrap_or_else(|| json!({}));
     let release_exec_id =
         get_str(exec_doc, &["exec_id"]).ok_or_else(|| anyhow!("missing device release exec_id"))?;
+    let release_plan_id = get_str(exec_doc, &["plan_id"]);
     let (slot, rollout_percent) = device_release_rollout_slot(exec_doc);
+    let target_kind = get_str(&meta, &["target"]);
+    let provider_kind = get_str(&meta, &["provider_kind"]);
+    let package_manifest_sha256 = get_str(&meta, &["native_summary", "package_manifest_sha256"])
+        .or_else(|| {
+            get_str(&meta, &["package_digest", "sha256"]).map(|sha| format!("sha256:{sha}"))
+        });
+    let native_context = json!({
+        "kind": "device_native",
+        "release_plan_id": release_plan_id.clone(),
+        "release_exec_id": release_exec_id.clone(),
+        "platform": target_kind.clone().unwrap_or_else(|| "unknown".to_string()),
+        "package_manifest_sha256": package_manifest_sha256.clone(),
+        "capabilities_summary": get_path(&meta, &["native_summary", "capabilities"]).cloned().unwrap_or_else(|| json!({})),
+        "permission_state_snapshot": Value::Null,
+        "lifecycle_state": Value::Null,
+        "connectivity_state": Value::Null,
+        "breadcrumbs": [],
+    });
     Ok(IncidentContext {
         deployment_id: None,
+        release_plan_id: release_plan_id.clone(),
         release_exec_id: Some(release_exec_id.clone()),
         run_id: get_str(exec_doc, &["run_id"]).unwrap_or_default(),
         target_app_id: get_str(&meta, &["app", "app_id"]).unwrap_or_default(),
@@ -7603,16 +7752,21 @@ fn build_device_release_incident_context(exec_doc: &Value) -> Result<IncidentCon
         package_digest: get_path(&meta, &["package_digest"])
             .cloned()
             .unwrap_or(Value::Null),
+        package_manifest_sha256,
         slot: Some(slot.to_string()),
         candidate_weight_pct: rollout_percent,
+        target_kind: target_kind.clone(),
+        provider_kind: provider_kind.clone(),
         device_release: json!({
             "release_exec_id": release_exec_id,
-            "plan_id": get_path(exec_doc, &["plan_id"]).cloned().unwrap_or(Value::Null),
-            "provider_kind": get_str(&meta, &["provider_kind"]).unwrap_or_else(|| "mock_v1".to_string()),
+            "release_plan_id": release_plan_id,
+            "provider_kind": provider_kind.unwrap_or_else(|| "mock_v1".to_string()),
             "distribution_lane": get_str(&meta, &["distribution_lane"]).unwrap_or_else(|| "beta".to_string()),
-            "target": get_str(&meta, &["target"]).unwrap_or_else(|| "ios".to_string()),
+            "target_kind": target_kind.unwrap_or_else(|| "ios".to_string()),
             "package_digest": get_path(&meta, &["package_digest"]).cloned().unwrap_or(Value::Null),
+            "package_manifest_sha256": get_path(&meta, &["native_summary", "package_manifest_sha256"]).cloned().unwrap_or(Value::Null),
         }),
+        native_context,
     })
 }
 
@@ -7657,7 +7811,7 @@ fn find_existing_incident_for_key(
 }
 
 fn build_incident_result(
-    _state_dir: &Path,
+    state_dir: &Path,
     meta: &Value,
     bundle: &Value,
     incident_dir: &Path,
@@ -7670,7 +7824,7 @@ fn build_incident_result(
     let (_, _, incident_id) = incident_target_store_base(meta, bundle);
     let store_prefix = incident_store_prefix(meta, &incident_id);
     let bundle_artifact = json!({
-        "kind": "lp.incident.bundle@0.1.0",
+        "kind": DEVICE_INCIDENT_BUNDLE_KIND,
         "digest": digest_value(&bundle_bytes),
         "store_uri": format!("file:{store_prefix}/incident.bundle.json"),
     });
@@ -7678,7 +7832,7 @@ fn build_incident_result(
     ensure_object(&mut result).extend(Map::from_iter([
         (
             "schema_version".to_string(),
-            json!("lp.incident.query.result@0.1.0"),
+            json!(DEVICE_INCIDENT_QUERY_RESULT_KIND),
         ),
         ("view".to_string(), json!(view)),
         ("resolution".to_string(), resolution),
@@ -7738,8 +7892,32 @@ fn build_incident_result(
             ("refs".to_string(), json!(refs)),
             ("meta".to_string(), meta.clone()),
         ]));
+        if let Some(regression_id) = get_str(meta, &["regression_id"]) {
+            let regression_path = state_dir.join("regressions").join(format!("{regression_id}.json"));
+            if regression_path.is_file() {
+                let regression_summary = load_json(&regression_path)?;
+                ensure_object(&mut result).insert(
+                    "regression".to_string(),
+                    regression_summary,
+                );
+            }
+        }
     }
     Ok(result)
+}
+
+fn merge_object_values(base: &Value, patch: &Value) -> Value {
+    match (base.as_object(), patch.as_object()) {
+        (Some(base_map), Some(patch_map)) => {
+            let mut merged = base_map.clone();
+            for (key, value) in patch_map {
+                merged.insert(key.clone(), value.clone());
+            }
+            Value::Object(merged)
+        }
+        _ if patch.is_null() => base.clone(),
+        _ => patch.clone(),
+    }
 }
 
 fn capture_incident_with_context(
@@ -7748,6 +7926,7 @@ fn capture_incident_with_context(
     reason: &str,
     classification: &str,
     source: &str,
+    native_context_patch: Option<&Value>,
     request_path: Option<&Path>,
     response_path: Option<&Path>,
     trace_path: Option<&Path>,
@@ -7797,6 +7976,10 @@ fn capture_incident_with_context(
         .join(&context.target_environment)
         .join(&incident_id);
     fs::create_dir_all(&incident_dir)?;
+    let native_context = native_context_patch
+        .map(|patch| merge_object_values(&context.native_context, patch))
+        .unwrap_or_else(|| context.native_context.clone());
+    let native_classification = canonical_native_classification(classification, reason);
 
     let mut refs = Vec::new();
     let mut request_ref = Value::Null;
@@ -7862,21 +8045,32 @@ fn capture_incident_with_context(
         "manual_capture" => vec![json!("LP_MANUAL_CAPTURE")],
         "app_kill" => vec![json!("LP_APP_KILL")],
         "platform_kill" => vec![json!("LP_PLATFORM_KILL")],
-        "device_js_unhandled" => vec![json!("LP_DEVICE_JS_UNHANDLED")],
-        "device_bridge_parse" => vec![json!("LP_DEVICE_BRIDGE_PARSE")],
-        "device_policy_violation" => vec![json!("LP_DEVICE_POLICY_VIOLATION")],
-        "device_webview_crash" => vec![json!("LP_DEVICE_WEBVIEW_CRASH")],
-        "device_crash_spike" => vec![json!("LP_DEVICE_CRASH_SPIKE")],
+        "native_runtime_error" | "device_js_unhandled" | "device_crash_spike" => {
+            vec![json!("LP_NATIVE_RUNTIME_ERROR")]
+        }
+        "native_bridge_timeout" | "device_bridge_parse" => {
+            vec![json!("LP_NATIVE_BRIDGE_TIMEOUT")]
+        }
+        "native_policy_violation" | "device_policy_violation" => {
+            vec![json!("LP_NATIVE_POLICY_VIOLATION")]
+        }
+        "native_host_crash" | "device_webview_crash" => vec![json!("LP_NATIVE_HOST_CRASH")],
+        "native_permission_blocked" => vec![json!("LP_NATIVE_PERMISSION_BLOCKED")],
         "device_release_gate_failed" => vec![json!("LP_DEVICE_RELEASE_GATE_FAILED")],
         "device_release_provider_failed" => vec![json!("LP_DEVICE_RELEASE_PROVIDER_FAILED")],
         _ => Vec::new(),
     };
     let bundle = json!({
-        "schema_version": "lp.incident.bundle@0.1.0",
+        "schema_version": DEVICE_INCIDENT_BUNDLE_KIND,
         "incident_id": incident_id,
         "created_unix_ms": now_unix_ms,
         "app_id": context.target_app_id.clone(),
         "environment": context.bundle_environment.clone(),
+        "release_plan_id": context.release_plan_id.clone(),
+        "release_exec_id": context.release_exec_id.clone(),
+        "target_kind": context.target_kind.clone(),
+        "provider_kind": context.provider_kind.clone(),
+        "package_manifest_sha256": context.package_manifest_sha256.clone(),
         "window": {
             "start_unix_ms": now_unix_ms,
             "end_unix_ms": now_unix_ms,
@@ -7892,6 +8086,8 @@ fn capture_incident_with_context(
         "diag_codes": diag_codes,
         "refs": refs,
         "notes": reason,
+        "native_classification": native_classification.clone(),
+        "native_context": native_context.clone(),
         "meta": {
             "classification": classification,
             "source": source,
@@ -7899,12 +8095,16 @@ fn capture_incident_with_context(
     });
     let _ = write_json(&incident_dir.join("incident.bundle.json"), &bundle)?;
     let meta_doc = json!({
-        "schema_version": "lp.incident.bundle.meta.local@0.1.0",
+        "schema_version": DEVICE_INCIDENT_META_LOCAL_KIND,
         "classification": classification,
+        "native_classification": native_classification,
         "source": source,
         "incident_status": "open",
         "deployment_id": context.deployment_id.clone(),
+        "release_plan_id": context.release_plan_id.clone(),
         "release_exec_id": context.release_exec_id.clone(),
+        "target_kind": context.target_kind.clone(),
+        "provider_kind": context.provider_kind.clone(),
         "run_id": context.run_id.clone(),
         "target": {
             "app_id": context.target_app_id.clone(),
@@ -7915,6 +8115,7 @@ fn capture_incident_with_context(
         "trace_id": trace_id.map(Value::from).unwrap_or(Value::Null),
         "pack_digest": context.pack_digest.clone(),
         "package_digest": context.package_digest.clone(),
+        "package_manifest_sha256": context.package_manifest_sha256.clone(),
         "slot": context.slot.clone().unwrap_or_else(|| "none".to_string()),
         "candidate_weight_pct": context.candidate_weight_pct,
         "status_code": status_code,
@@ -7924,6 +8125,7 @@ fn capture_incident_with_context(
         "regression_status": "not_requested",
         "signature_status": signature_status,
         "device_release": context.device_release.clone(),
+        "native_context": native_context,
     });
     let _ = write_json(&incident_dir.join("incident.meta.local.json"), &meta_doc)?;
     Ok((meta_doc, bundle, incident_dir))
@@ -7950,6 +8152,7 @@ fn capture_incident_impl(
         reason,
         classification,
         source,
+        None,
         request_path,
         response_path,
         trace_path,
@@ -7987,6 +8190,7 @@ fn capture_device_release_incident_impl(
     reason: &str,
     classification: &str,
     source: &str,
+    native_context_patch: Option<&Value>,
     request_path: Option<&Path>,
     response_path: Option<&Path>,
     trace_path: Option<&Path>,
@@ -8002,6 +8206,7 @@ fn capture_device_release_incident_impl(
         reason,
         classification,
         source,
+        native_context_patch,
         request_path,
         response_path,
         trace_path,
@@ -8178,6 +8383,11 @@ fn ensure_device_release_meta_defaults(exec_doc: &mut Value) {
     upsert_default(meta, "latest_slo_eval_report", Value::Null);
     upsert_default(meta, "latest_eval_outcome", json!("none"));
     upsert_default(meta, "linked_incidents", json!([]));
+    upsert_default(
+        meta,
+        "latest_native_health_rollup",
+        default_device_release_native_health_rollup(),
+    );
     upsert_default(meta, "last_incident_id", Value::Null);
     upsert_default(meta, "incident_count_total", json!(0));
     upsert_default(meta, "incident_count_open", json!(0));
@@ -8187,6 +8397,15 @@ fn ensure_device_release_meta_defaults(exec_doc: &mut Value) {
     upsert_default(meta, "latest_decision_id", Value::Null);
     upsert_default(meta, "latest_signed_control_decision_id", Value::Null);
     upsert_default(meta, "signature_status", json!("not_applicable"));
+    upsert_default(meta, "package_report", Value::Null);
+    upsert_default(meta, "native_summary", json!({}));
+    upsert_default(
+        meta,
+        "release_readiness",
+        json!({"status":"ok","warnings":[],"errors":[]}),
+    );
+    upsert_default(meta, "native_validation_warnings", json!([]));
+    upsert_default(meta, "native_validation_errors", json!([]));
 }
 
 fn device_release_eval_outcome(decision_value: &str) -> &'static str {
@@ -8436,6 +8655,312 @@ fn load_device_profile_from_package_manifest(
     Ok((profile_path.clone(), load_json(&profile_path)?))
 }
 
+fn native_readiness_item(code: &str, message: impl Into<String>) -> Value {
+    json!({
+        "code": code,
+        "message": message.into(),
+    })
+}
+
+fn native_readiness_status(warnings: &[Value], errors: &[Value]) -> &'static str {
+    if !errors.is_empty() {
+        "error"
+    } else if !warnings.is_empty() {
+        "warn"
+    } else {
+        "ok"
+    }
+}
+
+fn normalize_sha256_text(raw: Option<String>, fallback_bytes: Option<&[u8]>) -> String {
+    if let Some(raw) = raw {
+        if raw.starts_with("sha256:") {
+            return raw;
+        }
+        if raw.len() == 64 && raw.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return format!("sha256:{raw}");
+        }
+    }
+    fallback_bytes
+        .map(|bytes| format!("sha256:{}", sha256_hex(bytes)))
+        .unwrap_or_else(|| "sha256:unknown".to_string())
+}
+
+fn device_package_manifest_entry_path(
+    package_manifest_path: &Path,
+    package_doc: &Value,
+    path: &[&str],
+) -> Result<PathBuf> {
+    let rel = get_str(package_doc, path)
+        .ok_or_else(|| anyhow!("package manifest missing {}", path.join(".")))?;
+    let candidate = PathBuf::from(&rel);
+    let base = package_manifest_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(root_dir);
+    Ok(if candidate.is_absolute() {
+        candidate
+    } else {
+        base.join(candidate)
+    })
+}
+
+fn load_device_package_sidecar(
+    package_manifest_path: &Path,
+    package_doc: &Value,
+    path: &[&str],
+) -> Result<Value> {
+    let full_path = device_package_manifest_entry_path(package_manifest_path, package_doc, path)?;
+    load_json(&full_path)
+}
+
+fn device_native_capabilities_summary(capabilities_doc: &Value) -> Value {
+    let mut summary = Map::new();
+    summary.insert(
+        "camera_photo".to_string(),
+        json!(get_bool(capabilities_doc, &["device", "camera", "photo"]).unwrap_or(false)),
+    );
+    summary.insert(
+        "files_pick".to_string(),
+        json!(get_bool(capabilities_doc, &["device", "files", "pick"]).unwrap_or(false)),
+    );
+    summary.insert(
+        "location_foreground".to_string(),
+        json!(get_bool(capabilities_doc, &["device", "location", "foreground"]).unwrap_or(false)),
+    );
+    summary.insert(
+        "notifications_local".to_string(),
+        json!(get_bool(capabilities_doc, &["device", "notifications", "local"]).unwrap_or(false)),
+    );
+    summary.insert(
+        "notifications_push".to_string(),
+        json!(get_bool(capabilities_doc, &["device", "notifications", "push"]).unwrap_or(false)),
+    );
+    if let Some(blob_store) = get_path(capabilities_doc, &["device", "blob_store"]).cloned() {
+        summary.insert("blob_store".to_string(), blob_store);
+    }
+    Value::Object(summary)
+}
+
+fn device_permission_declarations(capabilities_doc: &Value) -> Vec<Value> {
+    let mut permissions = Vec::new();
+    if get_bool(capabilities_doc, &["device", "camera", "photo"]).unwrap_or(false) {
+        permissions.push(json!("camera"));
+    }
+    if get_bool(capabilities_doc, &["device", "files", "pick"]).unwrap_or(false) {
+        permissions.push(json!("files_pick"));
+    }
+    if get_bool(capabilities_doc, &["device", "location", "foreground"]).unwrap_or(false) {
+        permissions.push(json!("location_foreground"));
+    }
+    if get_bool(capabilities_doc, &["device", "notifications", "local"]).unwrap_or(false)
+        || get_bool(capabilities_doc, &["device", "notifications", "push"]).unwrap_or(false)
+    {
+        permissions.push(json!("notifications"));
+    }
+    permissions
+}
+
+fn value_array_of_strings(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn report_readiness_items(report_doc: &Value, severity: &str) -> Vec<Value> {
+    report_doc
+        .get("diagnostics")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|diag| get_str(diag, &["severity"]).as_deref() == Some(severity))
+        .map(|diag| {
+            native_readiness_item(
+                &get_str(diag, &["code"]).unwrap_or_else(|| "X07WASM_DEVICE_REPORT".to_string()),
+                get_str(diag, &["message"])
+                    .unwrap_or_else(|| "device package report diagnostic".to_string()),
+            )
+        })
+        .collect()
+}
+
+fn device_native_release_metadata(
+    package_manifest_path: &Path,
+    package_doc: &Value,
+    provider_doc: &Value,
+    package_report_doc: &Value,
+) -> Result<(Value, Value, Vec<Value>, Vec<Value>)> {
+    let package_manifest_bytes = canon_json_bytes(package_doc);
+    let manifest_sha256 = normalize_sha256_text(
+        get_str(package_report_doc, &["result", "package_manifest", "sha256"]),
+        Some(&package_manifest_bytes),
+    );
+    let capabilities_doc = load_device_package_sidecar(
+        package_manifest_path,
+        package_doc,
+        &["capabilities", "path"],
+    )?;
+    let telemetry_doc = load_device_package_sidecar(
+        package_manifest_path,
+        package_doc,
+        &["telemetry_profile", "path"],
+    )?;
+    let expected_classes = device_release_telemetry::standard_device_release_event_classes()
+        .into_iter()
+        .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+        .collect::<BTreeSet<_>>();
+    let telemetry_classes = value_array_of_strings(get_path(&telemetry_doc, &["event_classes"]));
+    let telemetry_class_values = telemetry_classes
+        .iter()
+        .cloned()
+        .map(Value::String)
+        .collect::<Vec<_>>();
+    let telemetry_class_set = telemetry_classes.iter().cloned().collect::<BTreeSet<_>>();
+    let mut warnings = report_readiness_items(package_report_doc, "warning");
+    let mut errors = report_readiness_items(package_report_doc, "error");
+    let target = get_str(package_doc, &["target"]).unwrap_or_default();
+    let provider_target = get_str(provider_doc, &["target"]).unwrap_or_default();
+    if target != provider_target {
+        errors.push(native_readiness_item(
+            "LP_DEVICE_RELEASE_TARGET_MISMATCH",
+            format!("package target {target} does not match provider target {provider_target}"),
+        ));
+    }
+    let missing_classes = expected_classes
+        .difference(&telemetry_class_set)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing_classes.is_empty() {
+        errors.push(native_readiness_item(
+            "LP_DEVICE_RELEASE_TELEMETRY_CLASSES_MISSING",
+            format!("missing required telemetry classes: {}", missing_classes.join(", ")),
+        ));
+    }
+    let permissions = device_permission_declarations(&capabilities_doc);
+    if permissions.is_empty() {
+        errors.push(native_readiness_item(
+            "LP_DEVICE_RELEASE_PERMISSION_DECLARATIONS_MISSING",
+            "package capabilities did not declare any releasable native permissions",
+        ));
+    }
+    let report_native_summary = get_path(package_report_doc, &["result", "native_summary"])
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let report_release_readiness = get_path(package_report_doc, &["result", "release_readiness"])
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let existing_capabilities = get_path(&report_native_summary, &["capabilities"]).cloned();
+    let existing_permissions =
+        get_path(&report_native_summary, &["permission_declarations"]).cloned();
+    let existing_telemetry_classes = get_path(&report_native_summary, &["telemetry_classes"]).cloned();
+    let mut native_summary = if report_native_summary.is_object() {
+        report_native_summary
+    } else {
+        json!({})
+    };
+    let native_summary_map = ensure_object(&mut native_summary);
+    native_summary_map.insert("target_kind".to_string(), json!(target));
+    native_summary_map.insert(
+        "provider_kind".to_string(),
+        json!(get_str(provider_doc, &["provider_kind"]).unwrap_or_default()),
+    );
+    native_summary_map.insert(
+        "package_manifest_sha256".to_string(),
+        json!(manifest_sha256.clone()),
+    );
+    native_summary_map.insert(
+        "capabilities".to_string(),
+        existing_capabilities
+            .unwrap_or_else(|| device_native_capabilities_summary(&capabilities_doc)),
+    );
+    native_summary_map.insert(
+        "permission_declarations".to_string(),
+        existing_permissions
+            .unwrap_or_else(|| Value::Array(permissions.clone())),
+    );
+    native_summary_map.insert(
+        "telemetry_classes".to_string(),
+        existing_telemetry_classes
+            .unwrap_or_else(|| Value::Array(telemetry_class_values.clone())),
+    );
+
+    let mut release_readiness = if report_release_readiness.is_object() {
+        report_release_readiness
+    } else {
+        json!({})
+    };
+    let report_warnings = get_path(&release_readiness, &["warnings"])
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let report_errors = get_path(&release_readiness, &["errors"])
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    warnings.extend(report_warnings);
+    errors.extend(report_errors);
+    let readiness_map = ensure_object(&mut release_readiness);
+    readiness_map.insert(
+        "status".to_string(),
+        json!(native_readiness_status(&warnings, &errors)),
+    );
+    readiness_map.insert("warnings".to_string(), Value::Array(warnings.clone()));
+    readiness_map.insert("errors".to_string(), Value::Array(errors.clone()));
+    native_summary_map.insert(
+        "release_readiness".to_string(),
+        release_readiness.clone(),
+    );
+    Ok((native_summary, release_readiness, warnings, errors))
+}
+
+fn device_release_readiness_status(plan_or_exec: &Value) -> String {
+    get_str(plan_or_exec, &["release_readiness", "status"])
+        .or_else(|| get_str(plan_or_exec, &["native_summary", "release_readiness", "status"]))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn default_device_release_native_health_rollup() -> Value {
+    json!({
+        "native_incident_count": 0,
+        "native_runtime_error_count": 0,
+        "native_policy_violation_count": 0,
+        "native_bridge_timeout_count": 0,
+        "native_host_crash_count": 0,
+        "native_permission_blocked_count": 0,
+        "latest_native_incident_id": Value::Null,
+        "latest_regression_id": Value::Null,
+        "latest_regression_status": "not_requested",
+    })
+}
+
+fn device_release_native_health_rollup(exec_doc: &Value) -> Value {
+    let linked = get_path(exec_doc, &["meta", "linked_incidents"])
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|mut item| {
+            if get_path(&item, &["native_classification"]).is_none() {
+                let reason = get_str(&item, &["reason"]).unwrap_or_default();
+                if let Some(classification) = get_str(&item, &["classification"])
+                    .and_then(|value| canonical_native_classification(&value, &reason))
+                {
+                    ensure_object(&mut item).insert(
+                        "native_classification".to_string(),
+                        json!(classification),
+                    );
+                }
+            }
+            item
+        })
+        .collect::<Vec<_>>();
+    device_release_native_health_rollup_from_items(&linked)
+}
+
 fn default_device_release_steps(provider_doc: &Value) -> Vec<Value> {
     let provider_kind =
         get_str(provider_doc, &["provider_kind"]).unwrap_or_else(|| "mock_v1".to_string());
@@ -8477,6 +9002,36 @@ fn validate_device_release_plan_doc(plan_doc: &Value, provider_doc: &Value) -> R
         .ok_or_else(|| anyhow!("plan missing package.kind"))?;
     if package_kind != DEVICE_PACKAGE_MANIFEST_KIND {
         bail!("plan package.kind must be {DEVICE_PACKAGE_MANIFEST_KIND}");
+    }
+    let native_summary = get_path(plan_doc, &["native_summary"])
+        .ok_or_else(|| anyhow!("plan missing native_summary"))?;
+    if get_str(native_summary, &["target_kind"]).as_deref() != Some(plan_target.as_str()) {
+        bail!("plan native_summary.target_kind does not match plan target");
+    }
+    if get_str(native_summary, &["provider_kind"]).as_deref()
+        != get_str(provider_doc, &["provider_kind"]).as_deref()
+    {
+        bail!("plan native_summary.provider_kind does not match provider profile");
+    }
+    if value_array_of_strings(get_path(native_summary, &["telemetry_classes"])).is_empty() {
+        bail!("plan native_summary.telemetry_classes must be non-empty");
+    }
+    let permission_declarations = get_path(native_summary, &["permission_declarations"])
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if permission_declarations.is_empty() {
+        bail!("plan native_summary.permission_declarations must be non-empty");
+    }
+    let release_readiness = get_path(plan_doc, &["release_readiness"])
+        .ok_or_else(|| anyhow!("plan missing release_readiness"))?;
+    if get_path(release_readiness, &["errors"])
+        .and_then(Value::as_array)
+        .map(|items| !items.is_empty())
+        .unwrap_or(false)
+        || get_str(release_readiness, &["status"]).as_deref() == Some("error")
+    {
+        bail!("plan release_readiness contains blocking errors");
     }
     let supported_ops = get_path(&capabilities, &["device_release", "supported_ops"])
         .and_then(Value::as_array)
@@ -8575,6 +9130,7 @@ fn device_release_store_release_id(exec_doc: &Value) -> Option<String> {
 }
 
 fn device_release_control_state_snapshot(exec_doc: &Value) -> Value {
+    let native_health_rollup = device_release_native_health_rollup(exec_doc);
     json!({
         "status": get_str(exec_doc, &["status"]).unwrap_or_else(|| "planned".to_string()),
         "current_state": device_release_state(exec_doc),
@@ -8582,6 +9138,8 @@ fn device_release_control_state_snapshot(exec_doc: &Value) -> Value {
         "current_rollout_percent": get_path(exec_doc, &["meta", "current_rollout_percent"]).cloned().unwrap_or(Value::Null),
         "latest_store_release_id": get_path(exec_doc, &["meta", "latest_store_release_id"]).cloned().unwrap_or(Value::Null),
         "latest_eval_outcome": get_path(exec_doc, &["meta", "latest_eval_outcome"]).cloned().unwrap_or_else(|| json!("none")),
+        "release_readiness_status": device_release_readiness_status(&get_path(exec_doc, &["meta"]).cloned().unwrap_or_else(|| json!({}))),
+        "latest_native_health_rollup": native_health_rollup,
     })
 }
 
@@ -8855,6 +9413,7 @@ fn advance_device_release_execution(
                     &incident.reason,
                     &incident.classification,
                     &incident.source,
+                    Some(&incident.native_context_patch),
                     None,
                     None,
                     None,
@@ -8909,6 +9468,7 @@ fn advance_device_release_execution(
                     &format!("device release metrics decision is {decision_value}"),
                     "device_release_gate_failed",
                     "device_release",
+                    None,
                     None,
                     None,
                     None,
@@ -9069,6 +9629,7 @@ fn advance_device_release_execution(
                     &err.to_string(),
                     "device_release_provider_failed",
                     "device_release",
+                    None,
                     None,
                     None,
                     None,
@@ -9328,6 +9889,9 @@ fn build_device_release_query_result(exec_doc: &Value, exec_bytes: &[u8], view: 
         .cloned()
         .unwrap_or_else(|| json!({}));
     let artifacts = device_release_collect_artifacts(exec_doc);
+    let latest_native_health_rollup = get_path(&meta, &["latest_native_health_rollup"])
+        .cloned()
+        .unwrap_or_else(|| device_release_native_health_rollup(exec_doc));
     let mut result = json!({
         "schema_version": DEVICE_RELEASE_QUERY_RESULT_KIND,
         "view": view,
@@ -9356,6 +9920,15 @@ fn build_device_release_query_result(exec_doc: &Value, exec_bytes: &[u8], view: 
         "latest_metrics_snapshot": get_path(&meta, &["latest_metrics_snapshot"]).cloned().unwrap_or_else(|| artifact_ref_min(latest_artifact_by_role(&artifacts, "metrics_snapshot").as_ref(), None)),
         "latest_slo_eval_report": get_path(&meta, &["latest_slo_eval_report"]).cloned().unwrap_or_else(|| artifact_ref_min(latest_artifact_by_role(&artifacts, "slo_eval_report").as_ref(), None)),
         "latest_eval_outcome": get_path(&meta, &["latest_eval_outcome"]).cloned().unwrap_or_else(|| json!("none")),
+        "native_summary": get_path(&meta, &["native_summary"]).cloned().unwrap_or_else(|| get_path(exec_doc, &["native_summary"]).cloned().unwrap_or_else(|| json!({}))),
+        "release_readiness": get_path(&meta, &["release_readiness"]).cloned().unwrap_or_else(|| get_path(exec_doc, &["release_readiness"]).cloned().unwrap_or_else(|| json!({}))),
+        "native_validation_warnings": get_path(&meta, &["native_validation_warnings"]).cloned().unwrap_or_else(|| get_path(exec_doc, &["native_validation_warnings"]).cloned().unwrap_or_else(|| json!([]))),
+        "native_validation_errors": get_path(&meta, &["native_validation_errors"]).cloned().unwrap_or_else(|| get_path(exec_doc, &["native_validation_errors"]).cloned().unwrap_or_else(|| json!([]))),
+        "release_readiness_status": device_release_readiness_status(&meta),
+        "latest_native_health_rollup": latest_native_health_rollup.clone(),
+        "latest_native_incident_id": get_path(&latest_native_health_rollup, &["latest_native_incident_id"]).cloned().unwrap_or(Value::Null),
+        "latest_regression_id": get_path(&latest_native_health_rollup, &["latest_regression_id"]).cloned().unwrap_or(Value::Null),
+        "latest_regression_status": get_path(&latest_native_health_rollup, &["latest_regression_status"]).cloned().unwrap_or_else(|| json!("not_requested")),
         "linked_incidents": get_path(&meta, &["linked_incidents"]).cloned().unwrap_or_else(|| json!([])),
         "execution": {
             "kind": DEVICE_RELEASE_EXECUTION_KIND,
@@ -9410,6 +9983,9 @@ fn device_release_list_item(exec_doc: &Value) -> Value {
     let meta = get_path(exec_doc, &["meta"])
         .cloned()
         .unwrap_or_else(|| json!({}));
+    let latest_native_health_rollup = get_path(&meta, &["latest_native_health_rollup"])
+        .cloned()
+        .unwrap_or_else(|| device_release_native_health_rollup(exec_doc));
     json!({
         "exec_id": get_str(exec_doc, &["exec_id"]).unwrap_or_default(),
         "plan_id": get_str(exec_doc, &["plan_id"]).unwrap_or_default(),
@@ -9422,6 +9998,11 @@ fn device_release_list_item(exec_doc: &Value) -> Value {
         "automation_state": get_str(&meta, &["automation_state"]).unwrap_or_else(|| "active".to_string()),
         "current_rollout_percent": get_path(&meta, &["current_rollout_percent"]).cloned().unwrap_or(Value::Null),
         "latest_eval_outcome": get_path(&meta, &["latest_eval_outcome"]).cloned().unwrap_or_else(|| json!("none")),
+        "release_readiness_status": device_release_readiness_status(&meta),
+        "native_summary": get_path(&meta, &["native_summary"]).cloned().unwrap_or_else(|| get_path(exec_doc, &["native_summary"]).cloned().unwrap_or_else(|| json!({}))),
+        "latest_native_health_rollup": latest_native_health_rollup.clone(),
+        "latest_native_incident_id": get_path(&latest_native_health_rollup, &["latest_native_incident_id"]).cloned().unwrap_or(Value::Null),
+        "latest_regression_status": get_path(&latest_native_health_rollup, &["latest_regression_status"]).cloned().unwrap_or_else(|| json!("not_requested")),
         "app": get_path(&meta, &["app"]).cloned().unwrap_or_else(|| json!({})),
         "updated_unix_ms": get_u64(&meta, &["updated_unix_ms"]).unwrap_or(0),
     })
@@ -9472,11 +10053,58 @@ fn command_device_release_create(args: DeviceReleaseCreateArgs) -> Result<Value>
     let now_unix_ms = device_release_now(&args.common);
     let provider_profile_path = repo_path(&args.provider_profile);
     let package_manifest_path = repo_path(&args.package_manifest);
+    let package_report_path = repo_path(&args.package_report);
     let out_path = repo_path(&args.out);
     let provider_doc = load_json(&provider_profile_path)?;
     let capabilities = validate_device_provider_profile_doc(&provider_doc)?;
     let package_doc = load_json(&package_manifest_path)?;
     validate_device_package_manifest_doc(&package_doc)?;
+    let package_report_doc = load_json(&package_report_path)?;
+    let package_report_kind = get_str(&package_report_doc, &["schema_version"]).unwrap_or_default();
+    if package_report_kind != X07_WASM_DEVICE_PACKAGE_REPORT_KIND
+        && package_report_kind != X07_WASM_DEVICE_PACKAGE_REPORT_KIND_LEGACY
+    {
+        bail!(
+            "device package report must have schema_version={} or {}",
+            X07_WASM_DEVICE_PACKAGE_REPORT_KIND,
+            X07_WASM_DEVICE_PACKAGE_REPORT_KIND_LEGACY
+        );
+    }
+    let (native_summary, release_readiness, native_validation_warnings, native_validation_errors) =
+        device_native_release_metadata(
+            &package_manifest_path,
+            &package_doc,
+            &provider_doc,
+            &package_report_doc,
+        )?;
+    if !native_validation_errors.is_empty() {
+        let diagnostics = native_validation_errors
+            .iter()
+            .map(|item| {
+                result_diag(
+                    &get_str(item, &["code"])
+                        .unwrap_or_else(|| "LP_DEVICE_RELEASE_NATIVE_SUMMARY_INVALID".to_string()),
+                    "run",
+                    &get_str(item, &["message"])
+                        .unwrap_or_else(|| "device release native readiness failed".to_string()),
+                    "error",
+                )
+            })
+            .collect::<Vec<_>>();
+        return Ok(cli_report(
+            "device release create",
+            false,
+            10,
+            json!({
+                "native_summary": native_summary,
+                "release_readiness": release_readiness,
+                "native_validation_warnings": native_validation_warnings,
+                "native_validation_errors": native_validation_errors,
+            }),
+            None,
+            diagnostics,
+        ));
+    }
     let slo_profile_ref = if let Some(slo_profile) = args.slo_profile.as_deref() {
         let slo_doc = load_json(&repo_path(slo_profile))?;
         let (_, slo_bytes) = write_device_release_slo_profile_copy(&state_dir, &slo_doc)?;
@@ -9495,6 +10123,13 @@ fn command_device_release_create(args: DeviceReleaseCreateArgs) -> Result<Value>
     let (_, package_bytes) =
         write_device_release_package_copy(&state_dir, &package_manifest_path, &package_doc)?;
     let (_, provider_bytes) = write_device_release_provider_copy(&state_dir, &provider_doc)?;
+    let package_report_bytes = canon_json_bytes(&package_report_doc);
+    let package_report_digest = digest_value(&package_report_bytes);
+    let package_report_sha = get_str(&package_report_digest, &["sha256"]).unwrap_or_default();
+    let package_report_store_path = device_release_root_dir(&state_dir)
+        .join("package_reports")
+        .join(format!("{package_report_sha}.json"));
+    let _ = write_json(&package_report_store_path, &package_report_doc)?;
     let (_, device_profile_doc) =
         load_device_profile_from_package_manifest(&package_manifest_path, &package_doc)?;
     let provider_id = get_str(&provider_doc, &["provider_id"]).unwrap_or_default();
@@ -9528,6 +10163,11 @@ fn command_device_release_create(args: DeviceReleaseCreateArgs) -> Result<Value>
         "target": provider_target,
         "app": app,
         "package_digest": package_digest,
+        "package_report_digest": package_report_digest,
+        "native_summary": native_summary,
+        "release_readiness": release_readiness,
+        "native_validation_warnings": native_validation_warnings,
+        "native_validation_errors": native_validation_errors,
         "slo_profile_ref": slo_profile_ref,
         "steps": steps,
     });
@@ -9551,6 +10191,16 @@ fn command_device_release_create(args: DeviceReleaseCreateArgs) -> Result<Value>
             "digest": digest_value(&package_bytes),
             "label": logical_name_from_path(&package_manifest_path),
         },
+        "package_report": {
+            "kind": package_report_kind,
+            "digest": package_report_digest,
+            "label": logical_name_from_path(&package_report_path),
+            "store_uri": format!("file:{}", package_report_store_path.display()),
+        },
+        "native_summary": native_summary,
+        "release_readiness": release_readiness,
+        "native_validation_warnings": native_validation_warnings,
+        "native_validation_errors": native_validation_errors,
         "strategy": {
             "max_auto_steps": 16,
             "max_total_wait_seconds": 3600,
@@ -9579,6 +10229,11 @@ fn command_device_release_create(args: DeviceReleaseCreateArgs) -> Result<Value>
             "target": get_str(&provider_doc, &["target"]).unwrap_or_default(),
             "app": get_path(&plan_doc, &["app"]).cloned().unwrap_or_else(|| json!({})),
             "capabilities": capabilities,
+            "package_report": get_path(&plan_doc, &["package_report"]).cloned().unwrap_or(Value::Null),
+            "native_summary": get_path(&plan_doc, &["native_summary"]).cloned().unwrap_or_else(|| json!({})),
+            "release_readiness": get_path(&plan_doc, &["release_readiness"]).cloned().unwrap_or_else(|| json!({})),
+            "native_validation_warnings": get_path(&plan_doc, &["native_validation_warnings"]).cloned().unwrap_or_else(|| json!([])),
+            "native_validation_errors": get_path(&plan_doc, &["native_validation_errors"]).cloned().unwrap_or_else(|| json!([])),
         }),
         None,
         Vec::new(),
@@ -9600,7 +10255,17 @@ fn command_device_release_validate(args: DeviceReleaseValidateArgs) -> Result<Va
                 "device release validate",
                 false,
                 10,
-                json!({}),
+                json!({
+                    "plan_id": get_str(&plan_doc, &["plan_id"]).unwrap_or_default(),
+                    "provider_kind": get_str(&provider_doc, &["provider_kind"]).unwrap_or_default(),
+                    "distribution_lane": get_str(&provider_doc, &["distribution_lane"]).unwrap_or_default(),
+                    "target": get_str(&provider_doc, &["target"]).unwrap_or_default(),
+                    "package_report": get_path(&plan_doc, &["package_report"]).cloned().unwrap_or(Value::Null),
+                    "native_summary": get_path(&plan_doc, &["native_summary"]).cloned().unwrap_or_else(|| json!({})),
+                    "release_readiness": get_path(&plan_doc, &["release_readiness"]).cloned().unwrap_or_else(|| json!({})),
+                    "native_validation_warnings": get_path(&plan_doc, &["native_validation_warnings"]).cloned().unwrap_or_else(|| json!([])),
+                    "native_validation_errors": get_path(&plan_doc, &["native_validation_errors"]).cloned().unwrap_or_else(|| json!([])),
+                }),
                 None,
                 vec![result_diag(
                     "LP_DEVICE_RELEASE_PLAN_INVALID",
@@ -9621,6 +10286,11 @@ fn command_device_release_validate(args: DeviceReleaseValidateArgs) -> Result<Va
             "distribution_lane": get_str(&provider_doc, &["distribution_lane"]).unwrap_or_default(),
             "target": get_str(&provider_doc, &["target"]).unwrap_or_default(),
             "capabilities": capabilities,
+            "package_report": get_path(&plan_doc, &["package_report"]).cloned().unwrap_or(Value::Null),
+            "native_summary": get_path(&plan_doc, &["native_summary"]).cloned().unwrap_or_else(|| json!({})),
+            "release_readiness": get_path(&plan_doc, &["release_readiness"]).cloned().unwrap_or_else(|| json!({})),
+            "native_validation_warnings": get_path(&plan_doc, &["native_validation_warnings"]).cloned().unwrap_or_else(|| json!([])),
+            "native_validation_errors": get_path(&plan_doc, &["native_validation_errors"]).cloned().unwrap_or_else(|| json!([])),
         }),
         None,
         Vec::new(),
@@ -9694,6 +10364,88 @@ fn command_device_release_run(args: DeviceReleaseRunArgs) -> Result<Value> {
         "application/json",
         &staged_package.manifest_bytes,
     );
+    let mut exec_meta = Map::new();
+    exec_meta.insert(
+        "provider_id".to_string(),
+        json!(get_str(&provider_doc, &["provider_id"]).unwrap_or_default()),
+    );
+    exec_meta.insert(
+        "provider_kind".to_string(),
+        json!(get_str(&provider_doc, &["provider_kind"]).unwrap_or_default()),
+    );
+    exec_meta.insert(
+        "distribution_lane".to_string(),
+        json!(get_str(&provider_doc, &["distribution_lane"]).unwrap_or_default()),
+    );
+    exec_meta.insert(
+        "target".to_string(),
+        json!(get_str(&provider_doc, &["target"]).unwrap_or_default()),
+    );
+    exec_meta.insert(
+        "package_digest".to_string(),
+        get_path(&plan_doc, &["package", "digest"])
+            .cloned()
+            .unwrap_or_else(|| json!({"sha256":"", "bytes_len":0})),
+    );
+    exec_meta.insert(
+        "package_report".to_string(),
+        get_path(&plan_doc, &["package_report"]).cloned().unwrap_or(Value::Null),
+    );
+    exec_meta.insert("current_state".to_string(), json!("draft"));
+    exec_meta.insert("current_rollout_percent".to_string(), Value::Null);
+    exec_meta.insert("latest_store_release_id".to_string(), Value::Null);
+    exec_meta.insert("updated_unix_ms".to_string(), json!(now_unix_ms));
+    exec_meta.insert("latest_decision_id".to_string(), Value::Null);
+    exec_meta.insert("latest_signed_control_decision_id".to_string(), Value::Null);
+    exec_meta.insert("decision_count".to_string(), json!(0));
+    exec_meta.insert("signature_status".to_string(), json!("not_applicable"));
+    exec_meta.insert("automation_state".to_string(), json!("active"));
+    exec_meta.insert("next_step_idx".to_string(), json!(0));
+    exec_meta.insert("parent_exec_id".to_string(), Value::Null);
+    exec_meta.insert("rerun_from_step_idx".to_string(), Value::Null);
+    exec_meta.insert("latest_metrics_snapshot".to_string(), Value::Null);
+    exec_meta.insert("latest_slo_eval_report".to_string(), Value::Null);
+    exec_meta.insert("latest_eval_outcome".to_string(), json!("none"));
+    exec_meta.insert("linked_incidents".to_string(), json!([]));
+    exec_meta.insert(
+        "latest_native_health_rollup".to_string(),
+        default_device_release_native_health_rollup(),
+    );
+    exec_meta.insert("artifacts".to_string(), json!([]));
+    exec_meta.insert("decisions".to_string(), json!([]));
+    exec_meta.insert(
+        "app".to_string(),
+        get_path(&plan_doc, &["app"]).cloned().unwrap_or_else(|| json!({})),
+    );
+    exec_meta.insert("capabilities".to_string(), capabilities);
+    exec_meta.insert(
+        "native_summary".to_string(),
+        get_path(&plan_doc, &["native_summary"]).cloned().unwrap_or_else(|| json!({})),
+    );
+    exec_meta.insert(
+        "release_readiness".to_string(),
+        get_path(&plan_doc, &["release_readiness"]).cloned().unwrap_or_else(|| json!({})),
+    );
+    exec_meta.insert(
+        "native_validation_warnings".to_string(),
+        get_path(&plan_doc, &["native_validation_warnings"]).cloned().unwrap_or_else(|| json!([])),
+    );
+    exec_meta.insert(
+        "native_validation_errors".to_string(),
+        get_path(&plan_doc, &["native_validation_errors"]).cloned().unwrap_or_else(|| json!([])),
+    );
+    exec_meta.insert(
+        "source_package_manifest_path".to_string(),
+        json!(source_package_manifest_path.to_string_lossy()),
+    );
+    exec_meta.insert(
+        "staged_package_manifest_path".to_string(),
+        json!(staged_package.manifest_path.to_string_lossy()),
+    );
+    exec_meta.insert(
+        "staged_package_root".to_string(),
+        json!(device_release_staged_package_dir(&state_dir, &exec_id).to_string_lossy()),
+    );
     let mut exec_doc = json!({
         "schema_version": DEVICE_RELEASE_EXECUTION_KIND,
         "exec_id": exec_id,
@@ -9706,36 +10458,7 @@ fn command_device_release_run(args: DeviceReleaseRunArgs) -> Result<Value> {
             "digest": digest_value(&plan_store_bytes),
         },
         "steps": [],
-        "meta": {
-            "provider_id": get_str(&provider_doc, &["provider_id"]).unwrap_or_default(),
-            "provider_kind": get_str(&provider_doc, &["provider_kind"]).unwrap_or_default(),
-            "distribution_lane": get_str(&provider_doc, &["distribution_lane"]).unwrap_or_default(),
-            "target": get_str(&provider_doc, &["target"]).unwrap_or_default(),
-            "package_digest": get_path(&plan_doc, &["package", "digest"]).cloned().unwrap_or_else(|| json!({"sha256":"", "bytes_len":0})),
-            "current_state": "draft",
-            "current_rollout_percent": Value::Null,
-            "latest_store_release_id": Value::Null,
-            "updated_unix_ms": now_unix_ms,
-            "latest_decision_id": Value::Null,
-            "latest_signed_control_decision_id": Value::Null,
-            "decision_count": 0,
-            "signature_status": "not_applicable",
-            "automation_state": "active",
-            "next_step_idx": 0,
-            "parent_exec_id": Value::Null,
-            "rerun_from_step_idx": Value::Null,
-            "latest_metrics_snapshot": Value::Null,
-            "latest_slo_eval_report": Value::Null,
-            "latest_eval_outcome": "none",
-            "linked_incidents": [],
-            "artifacts": [],
-            "decisions": [],
-            "app": get_path(&plan_doc, &["app"]).cloned().unwrap_or_else(|| json!({})),
-            "capabilities": capabilities,
-            "source_package_manifest_path": source_package_manifest_path.to_string_lossy(),
-            "staged_package_manifest_path": staged_package.manifest_path.to_string_lossy(),
-            "staged_package_root": device_release_staged_package_dir(&state_dir, &exec_id).to_string_lossy(),
-        }
+        "meta": Value::Object(exec_meta),
     });
     push_artifact(
         &mut exec_doc,
@@ -9768,6 +10491,10 @@ fn command_device_release_run(args: DeviceReleaseRunArgs) -> Result<Value> {
             "target": get_str(&provider_doc, &["target"]).unwrap_or_default(),
             "status": get_str(&exec_doc, &["status"]).unwrap_or_else(|| "planned".to_string()),
             "decision_count": get_u64(&exec_doc, &["meta", "decision_count"]).unwrap_or(0),
+            "package_report": get_path(&exec_doc, &["meta", "package_report"]).cloned().unwrap_or(Value::Null),
+            "native_summary": get_path(&exec_doc, &["meta", "native_summary"]).cloned().unwrap_or_else(|| json!({})),
+            "release_readiness": get_path(&exec_doc, &["meta", "release_readiness"]).cloned().unwrap_or_else(|| json!({})),
+            "latest_native_health_rollup": get_path(&exec_doc, &["meta", "latest_native_health_rollup"]).cloned().unwrap_or_else(|| json!({})),
             "execution": {
                 "kind": DEVICE_RELEASE_EXECUTION_KIND,
                 "digest": digest_value(&exec_bytes),
@@ -10130,6 +10857,108 @@ fn command_device_release_rerun(args: DeviceReleaseRerunArgs) -> Result<Value> {
         "application/json",
         &staged_package.manifest_bytes,
     );
+    let mut new_exec_meta = Map::new();
+    new_exec_meta.insert(
+        "provider_id".to_string(),
+        json!(get_str(&provider_doc, &["provider_id"]).unwrap_or_default()),
+    );
+    new_exec_meta.insert(
+        "provider_kind".to_string(),
+        json!(get_str(&provider_doc, &["provider_kind"]).unwrap_or_default()),
+    );
+    new_exec_meta.insert(
+        "distribution_lane".to_string(),
+        json!(get_str(&provider_doc, &["distribution_lane"]).unwrap_or_default()),
+    );
+    new_exec_meta.insert(
+        "target".to_string(),
+        json!(get_str(&provider_doc, &["target"]).unwrap_or_default()),
+    );
+    new_exec_meta.insert(
+        "package_digest".to_string(),
+        get_path(&plan_doc, &["package", "digest"])
+            .cloned()
+            .unwrap_or_else(|| json!({"sha256":"", "bytes_len":0})),
+    );
+    new_exec_meta.insert(
+        "current_state".to_string(),
+        get_path(&exec_doc, &["meta", "current_state"])
+            .cloned()
+            .unwrap_or_else(|| json!("draft")),
+    );
+    new_exec_meta.insert(
+        "current_rollout_percent".to_string(),
+        get_path(&exec_doc, &["meta", "current_rollout_percent"])
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
+    new_exec_meta.insert(
+        "latest_store_release_id".to_string(),
+        get_path(&exec_doc, &["meta", "latest_store_release_id"])
+            .cloned()
+            .unwrap_or(Value::Null),
+    );
+    new_exec_meta.insert("updated_unix_ms".to_string(), json!(now_unix_ms));
+    new_exec_meta.insert("latest_decision_id".to_string(), Value::Null);
+    new_exec_meta.insert("latest_signed_control_decision_id".to_string(), Value::Null);
+    new_exec_meta.insert("decision_count".to_string(), json!(0));
+    new_exec_meta.insert("signature_status".to_string(), json!("not_applicable"));
+    new_exec_meta.insert("automation_state".to_string(), json!("active"));
+    new_exec_meta.insert("next_step_idx".to_string(), json!(from_step));
+    new_exec_meta.insert("parent_exec_id".to_string(), json!(args.release_exec_id));
+    new_exec_meta.insert("rerun_from_step_idx".to_string(), json!(from_step));
+    new_exec_meta.insert("latest_metrics_snapshot".to_string(), Value::Null);
+    new_exec_meta.insert("latest_slo_eval_report".to_string(), Value::Null);
+    new_exec_meta.insert("latest_eval_outcome".to_string(), json!("none"));
+    new_exec_meta.insert("linked_incidents".to_string(), json!([]));
+    new_exec_meta.insert(
+        "latest_native_health_rollup".to_string(),
+        default_device_release_native_health_rollup(),
+    );
+    new_exec_meta.insert("artifacts".to_string(), json!([]));
+    new_exec_meta.insert("decisions".to_string(), json!([]));
+    new_exec_meta.insert(
+        "app".to_string(),
+        get_path(&plan_doc, &["app"]).cloned().unwrap_or_else(|| json!({})),
+    );
+    new_exec_meta.insert(
+        "capabilities".to_string(),
+        get_path(&exec_doc, &["meta", "capabilities"])
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+    );
+    new_exec_meta.insert(
+        "package_report".to_string(),
+        get_path(&plan_doc, &["package_report"]).cloned().unwrap_or(Value::Null),
+    );
+    new_exec_meta.insert(
+        "native_summary".to_string(),
+        get_path(&plan_doc, &["native_summary"]).cloned().unwrap_or_else(|| json!({})),
+    );
+    new_exec_meta.insert(
+        "release_readiness".to_string(),
+        get_path(&plan_doc, &["release_readiness"]).cloned().unwrap_or_else(|| json!({})),
+    );
+    new_exec_meta.insert(
+        "native_validation_warnings".to_string(),
+        get_path(&plan_doc, &["native_validation_warnings"]).cloned().unwrap_or_else(|| json!([])),
+    );
+    new_exec_meta.insert(
+        "native_validation_errors".to_string(),
+        get_path(&plan_doc, &["native_validation_errors"]).cloned().unwrap_or_else(|| json!([])),
+    );
+    new_exec_meta.insert(
+        "source_package_manifest_path".to_string(),
+        json!(source_package_manifest_path.to_string_lossy()),
+    );
+    new_exec_meta.insert(
+        "staged_package_manifest_path".to_string(),
+        json!(staged_package.manifest_path.to_string_lossy()),
+    );
+    new_exec_meta.insert(
+        "staged_package_root".to_string(),
+        json!(device_release_staged_package_dir(&state_dir, &new_exec_id).to_string_lossy()),
+    );
     let mut new_exec = json!({
         "schema_version": DEVICE_RELEASE_EXECUTION_KIND,
         "exec_id": new_exec_id,
@@ -10142,36 +10971,7 @@ fn command_device_release_rerun(args: DeviceReleaseRerunArgs) -> Result<Value> {
             "digest": digest_value(&plan_bytes),
         },
         "steps": [],
-        "meta": {
-            "provider_id": get_str(&provider_doc, &["provider_id"]).unwrap_or_default(),
-            "provider_kind": get_str(&provider_doc, &["provider_kind"]).unwrap_or_default(),
-            "distribution_lane": get_str(&provider_doc, &["distribution_lane"]).unwrap_or_default(),
-            "target": get_str(&provider_doc, &["target"]).unwrap_or_default(),
-            "package_digest": get_path(&plan_doc, &["package", "digest"]).cloned().unwrap_or_else(|| json!({"sha256":"", "bytes_len":0})),
-            "current_state": get_path(&exec_doc, &["meta", "current_state"]).cloned().unwrap_or_else(|| json!("draft")),
-            "current_rollout_percent": get_path(&exec_doc, &["meta", "current_rollout_percent"]).cloned().unwrap_or(Value::Null),
-            "latest_store_release_id": get_path(&exec_doc, &["meta", "latest_store_release_id"]).cloned().unwrap_or(Value::Null),
-            "updated_unix_ms": now_unix_ms,
-            "latest_decision_id": Value::Null,
-            "latest_signed_control_decision_id": Value::Null,
-            "decision_count": 0,
-            "signature_status": "not_applicable",
-            "automation_state": "active",
-            "next_step_idx": from_step,
-            "parent_exec_id": args.release_exec_id,
-            "rerun_from_step_idx": from_step,
-            "latest_metrics_snapshot": Value::Null,
-            "latest_slo_eval_report": Value::Null,
-            "latest_eval_outcome": "none",
-            "linked_incidents": [],
-            "artifacts": [],
-            "decisions": [],
-            "app": get_path(&plan_doc, &["app"]).cloned().unwrap_or_else(|| json!({})),
-            "capabilities": get_path(&exec_doc, &["meta", "capabilities"]).cloned().unwrap_or_else(|| json!({})),
-            "source_package_manifest_path": source_package_manifest_path.to_string_lossy(),
-            "staged_package_manifest_path": staged_package.manifest_path.to_string_lossy(),
-            "staged_package_root": device_release_staged_package_dir(&state_dir, &new_exec_id).to_string_lossy(),
-        }
+        "meta": Value::Object(new_exec_meta),
     });
     push_artifact(
         &mut new_exec,
@@ -11940,6 +12740,7 @@ fn command_incident_capture_execution(args: IncidentCaptureArgs) -> Result<Value
                 &args.reason,
                 &args.classification,
                 &args.source,
+                None,
                 request_path.as_deref(),
                 response_path.as_deref(),
                 trace_path.as_deref(),
@@ -12079,16 +12880,34 @@ fn command_incident_list_state(args: IncidentListArgs) -> Result<Value> {
             .as_ref()
             .map(|value| get_str(&meta, &["classification"]).as_deref() == Some(value.as_str()))
             .unwrap_or(true);
+        let matches_native_classification = args
+            .native_classification
+            .as_ref()
+            .map(|value| get_str(&meta, &["native_classification"]).as_deref() == Some(value.as_str()))
+            .unwrap_or(true);
         let matches_status = args
             .status
             .as_ref()
             .map(|value| get_str(&meta, &["incident_status"]).as_deref() == Some(value.as_str()))
             .unwrap_or(true);
+        let matches_target_kind = args
+            .target_kind
+            .as_ref()
+            .map(|value| get_str(&meta, &["target_kind"]).as_deref() == Some(value.as_str()))
+            .unwrap_or(true);
+        let matches_native_only = if args.native_only {
+            get_str(&meta, &["native_classification"]).is_some()
+        } else {
+            true
+        };
         if matches_target
             && matches_deployment
             && matches_release
             && matches_classification
+            && matches_native_classification
             && matches_status
+            && matches_target_kind
+            && matches_native_only
         {
             items.push(incident_query_item(&meta, &bundle));
         }
@@ -12112,7 +12931,7 @@ fn command_incident_list_state(args: IncidentListArgs) -> Result<Value> {
         true,
         0,
         json!({
-            "schema_version": "lp.incident.query.result@0.1.0",
+            "schema_version": DEVICE_INCIDENT_QUERY_RESULT_KIND,
             "view": "list",
             "resolution": resolution,
             "index": { "used": true, "rebuilt": rebuilt, "db_path": db_path.to_string_lossy() },
@@ -12138,47 +12957,58 @@ fn sync_device_release_incident_link(state_dir: &Path, meta: &Value, bundle: &Va
     Ok(())
 }
 
+fn incident_native_replay_hints(meta: &Value) -> Value {
+    let native_context = get_path(meta, &["native_context"])
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let mut prelude = Vec::new();
+    if let Some(state) = get_str(&native_context, &["lifecycle_state"]) {
+        prelude.push(json!({ "kind": format!("lifecycle.{state}") }));
+    }
+    if let Some(state) = get_str(&native_context, &["connectivity_state"]) {
+        prelude.push(json!({ "kind": format!("connectivity.{state}") }));
+    }
+    let native_sequence = get_path(&native_context, &["breadcrumbs"])
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|breadcrumb| {
+            json!({
+                "request_id": get_path(&breadcrumb, &["request_id"]).cloned().unwrap_or(Value::Null),
+                "op": get_path(&breadcrumb, &["op"]).cloned().unwrap_or(Value::Null),
+                "result": {
+                    "status": get_path(&breadcrumb, &["status"]).cloned().unwrap_or(Value::Null),
+                    "event_class": get_path(&breadcrumb, &["event_class"]).cloned().unwrap_or(Value::Null),
+                    "duration_ms": get_path(&breadcrumb, &["duration_ms"]).cloned().unwrap_or(Value::Null),
+                    "permission": get_path(&breadcrumb, &["permission"]).cloned().unwrap_or(Value::Null),
+                },
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut hints = serde_json::Map::new();
+    hints.insert(
+        "host_target".to_string(),
+        json!(
+            get_str(meta, &["target_kind"])
+                .or_else(|| get_str(&native_context, &["platform"]))
+                .unwrap_or_else(|| "unknown".to_string())
+        ),
+    );
+    if !prelude.is_empty() {
+        hints.insert("prelude".to_string(), Value::Array(prelude));
+    }
+    if !native_sequence.is_empty() {
+        hints.insert("native_sequence".to_string(), Value::Array(native_sequence));
+    }
+    Value::Object(hints)
+}
+
 fn command_regress_from_incident(args: RegressFromIncidentArgs) -> Result<Value> {
     if remote_mode_selected(args.target.as_deref())? {
         return remote_command_regress_from_incident(&args);
     }
     command_regress_from_incident_state(args)
-}
-
-fn materialize_device_regression_incident_input(
-    incident_dir: &Path,
-    meta: &Value,
-    bundle: &Value,
-) -> Result<()> {
-    let app_trace_path = incident_dir.join("trace.json");
-    let app_trace = if app_trace_path.is_file() {
-        let candidate = load_json(&app_trace_path).unwrap_or(Value::Null);
-        if get_str(&candidate, &["kind"]).as_deref() == Some("x07.app.trace") {
-            candidate
-        } else {
-            Value::Null
-        }
-    } else {
-        Value::Null
-    };
-    let error = get_str(bundle, &["notes"])
-        .or_else(|| get_str(meta, &["classification"]))
-        .unwrap_or_else(|| "device incident".to_string());
-    let incident_doc = json!({
-        "v": 1,
-        "kind": "x07.web_ui.incident",
-        "error": error,
-        "policySnapshotSha256": Value::Null,
-        "trace": {
-            "v": 1,
-            "kind": "x07.web_ui.trace",
-            "steps": [],
-        },
-        "effectExchanges": [],
-        "appTrace": app_trace,
-    });
-    let _ = write_json(&incident_dir.join("incident.json"), &incident_doc)?;
-    Ok(())
 }
 
 fn command_regress_from_incident_state(args: RegressFromIncidentArgs) -> Result<Value> {
@@ -12213,16 +13043,26 @@ fn command_regress_from_incident_state(args: RegressFromIncidentArgs) -> Result<
     );
     let target_artifact = incident_target_artifact(&meta);
     let incident_artifact = json!({
-        "kind": "lp.incident.bundle@0.1.0",
+        "kind": DEVICE_INCIDENT_BUNDLE_KIND,
         "digest": digest_value(&canon_json_bytes(&bundle)),
     });
+    let use_device_regression = incident_uses_device_regression(&meta);
+    let replay_target_kind = get_str(&meta, &["target_kind"])
+        .or_else(|| get_str(&meta, &["device_release", "target_kind"]))
+        .unwrap_or_else(|| "unknown".to_string());
     let request_doc = json!({
-        "schema_version": "lp.regression.request@0.1.0",
+        "schema_version": REGRESSION_REQUEST_KIND,
         "regression_id": regression_id,
         "created_unix_ms": now_unix_ms,
         "incident": incident_artifact,
         "target_artifact": target_artifact,
-        "invariants": if incident_uses_device_regression(&meta) {
+        "replay_target_kind": replay_target_kind,
+        "native_replay_hints": if use_device_regression {
+            incident_native_replay_hints(&meta)
+        } else {
+            Value::Null
+        },
+        "invariants": if use_device_regression {
             json!(["device.trace.replay"])
         } else {
             json!(["app.trace.replay"])
@@ -12241,14 +13081,10 @@ fn command_regress_from_incident_state(args: RegressFromIncidentArgs) -> Result<
             "{}/regression.request.json",
             incident_store_prefix(&meta, &args.incident_id)
         ),
-        "lp.regression.request@0.1.0",
+        REGRESSION_REQUEST_KIND,
         "application/json",
         &request_bytes,
     );
-    let use_device_regression = incident_uses_device_regression(&meta);
-    if use_device_regression {
-        materialize_device_regression_incident_input(&incident_dir, &meta, &bundle)?;
-    }
     let tool_command = if use_device_regression {
         "device regress from-incident"
     } else {
@@ -12302,16 +13138,22 @@ fn command_regress_from_incident_state(args: RegressFromIncidentArgs) -> Result<
                 false,
                 i64::from(code.max(1)),
                 json!({
-                    "schema_version": "lp.regression.run.result@0.1.0",
+                    "schema_version": REGRESSION_RUN_RESULT_KIND,
+                    "created_unix_ms": now_unix_ms,
                     "incident_id": args.incident_id,
                     "regression_id": regression_id,
                     "ok": false,
                     "tool": { "name": "x07 wasm", "command": tool_command },
+                    "replay_target_kind": replay_target_kind,
+                    "replay_mode": if use_device_regression { "native_device" } else { "app_trace" },
+                    "replay_synthesis_status": "failed",
                     "dry_run": args.dry_run,
                     "out_dir": out_dir.to_string_lossy(),
                     "incident_status_after": "failed",
                     "target_artifact": incident_target_artifact(&meta),
                     "request": regression_request_artifact.clone(),
+                    "generated_trace_artifact_refs": [],
+                    "generated_report_artifact_refs": [],
                     "generated": [],
                 }),
                 get_str(&meta, &["run_id"]).as_deref(),
@@ -12334,7 +13176,7 @@ fn command_regress_from_incident_state(args: RegressFromIncidentArgs) -> Result<
         get_str(&report, &["schema_version"])
             .as_deref()
             .unwrap_or(if use_device_regression {
-                "x07.wasm.device.regress.from_incident.report@0.1.0"
+                X07_WASM_DEVICE_REGRESS_REPORT_KIND
             } else {
                 "x07.wasm.app.regress.from_incident.report@0.1.0"
             }),
@@ -12357,6 +13199,20 @@ fn command_regress_from_incident_state(args: RegressFromIncidentArgs) -> Result<
             }));
         }
     }
+    let generated_trace_artifact_refs = generated
+        .iter()
+        .filter(|item| {
+            get_str(item, &["role"])
+                .map(|role| role.contains("trace"))
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let generated_report_artifact_refs = if args.dry_run {
+        Vec::new()
+    } else {
+        vec![report_artifact.clone()]
+    };
     let regression_status = if args.dry_run {
         "requested"
     } else {
@@ -12372,17 +13228,23 @@ fn command_regress_from_incident_state(args: RegressFromIncidentArgs) -> Result<
         sync_device_release_incident_link(&state_dir, &meta, &bundle)?;
     }
     let regression_summary = json!({
-        "schema_version": "lp.regression.run.result@0.1.0",
+        "schema_version": REGRESSION_RUN_RESULT_KIND,
+        "created_unix_ms": now_unix_ms,
         "incident_id": args.incident_id,
         "regression_id": regression_id,
         "ok": true,
         "tool": { "name": "x07 wasm", "command": tool_command },
+        "replay_target_kind": replay_target_kind,
+        "replay_mode": if use_device_regression { "native_device" } else { "app_trace" },
+        "replay_synthesis_status": regression_status,
         "dry_run": args.dry_run,
         "out_dir": out_dir.to_string_lossy(),
         "incident_status_after": regression_status,
         "target_artifact": incident_target_artifact(&meta),
         "request": regression_request_artifact,
         "report": report_artifact,
+        "generated_trace_artifact_refs": generated_trace_artifact_refs,
+        "generated_report_artifact_refs": generated_report_artifact_refs,
         "generated": generated,
     });
     let _ = write_json(
@@ -13941,7 +14803,10 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
                 deployment_id: request_query_string(&request, "deployment_id"),
                 release_exec_id: request_query_string(&request, "release_exec_id"),
                 classification: request_query_string(&request, "classification"),
+                native_classification: request_query_string(&request, "native_classification"),
                 status: request_query_string(&request, "status"),
+                target_kind: request_query_string(&request, "target_kind"),
+                native_only: request_query_bool(&request, "native_only", false),
                 app_id: request_query_string(&request, "app_id"),
                 env: request_query_string(&request, "env"),
                 limit: request_query_usize(&request, "limit"),
@@ -14107,7 +14972,10 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                 deployment_id: None,
                 release_exec_id: None,
                 classification: None,
+                native_classification: None,
                 status: None,
+                target_kind: None,
+                native_only: false,
                 app_id: None,
                 env: None,
                 limit: None,
@@ -14157,7 +15025,10 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         deployment_id: Some((*exec_id).to_string()),
                         release_exec_id: None,
                         classification: None,
+                        native_classification: None,
                         status: None,
+                        target_kind: None,
+                        native_only: false,
                         app_id: None,
                         env: None,
                         limit: None,
@@ -14172,7 +15043,10 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         deployment_id: None,
                         release_exec_id: Some((*exec_id).to_string()),
                         classification: None,
+                        native_classification: None,
                         status: None,
+                        target_kind: None,
+                        native_only: false,
                         app_id: None,
                         env: None,
                         limit: None,

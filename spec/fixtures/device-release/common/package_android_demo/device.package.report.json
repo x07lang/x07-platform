@@ -1,0 +1,94 @@
+{
+  "schema_version": "x07.wasm.device.package.report@0.2.0",
+  "command": "x07-wasm.device.package",
+  "ok": true,
+  "exit_code": 0,
+  "diagnostics": [],
+  "meta": {
+    "tool": {
+      "name": "x07-wasm",
+      "version": "0.2.1"
+    },
+    "elapsed_ms": 12,
+    "cwd": "/fixture",
+    "argv": [
+      "x07-wasm",
+      "device",
+      "package",
+      "--bundle",
+      "dist/device_android_dev_bundle",
+      "--target",
+      "android",
+      "--out-dir",
+      "dist/device_android_dev_package",
+      "--json"
+    ],
+    "inputs": [],
+    "outputs": [],
+    "nondeterminism": {
+      "uses_os_time": false,
+      "uses_network": false,
+      "uses_process": false
+    }
+  },
+  "result": {
+    "profile": {
+      "id": "demo_android_release",
+      "v": 1
+    },
+    "target": "android",
+    "bundle_dir": "dist/device_android_dev_bundle",
+    "out_dir": "dist/device_android_dev_package",
+    "package_manifest": {
+      "path": "spec/fixtures/device-release/common/package_android_demo/device.package.manifest.json",
+      "sha256": "665ac594a09e008297ed2ca5226782044bb4db42ae6a502235b0d21d95473bbd",
+      "bytes_len": 892
+    },
+    "package": {
+      "kind": "dir",
+      "path": "payload"
+    },
+    "native_summary": {
+      "target_kind": "android",
+      "provider_kind": "mock_v1",
+      "package_manifest_sha256": "sha256:665ac594a09e008297ed2ca5226782044bb4db42ae6a502235b0d21d95473bbd",
+      "capabilities": {
+        "camera_photo": true,
+        "files_pick": true,
+        "blob_store": {
+          "enabled": true,
+          "max_total_bytes": 67108864,
+          "max_item_bytes": 16777216
+        },
+        "location_foreground": true,
+        "notifications_local": true,
+        "notifications_push": false
+      },
+      "permission_declarations": [
+        "camera",
+        "files_pick",
+        "location_foreground",
+        "notifications"
+      ],
+      "telemetry_classes": [
+        "app.lifecycle",
+        "app.http",
+        "runtime.error",
+        "bridge.timing",
+        "reducer.timing",
+        "policy.violation",
+        "host.webview_crash"
+      ],
+      "release_readiness": {
+        "status": "ok",
+        "warnings": [],
+        "errors": []
+      }
+    },
+    "release_readiness": {
+      "status": "ok",
+      "warnings": [],
+      "errors": []
+    }
+  }
+}
