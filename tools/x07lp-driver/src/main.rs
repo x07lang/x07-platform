@@ -2180,6 +2180,31 @@ fn run_wasm_tool_capture(
     Ok((tool, code, stdout, stderr))
 }
 
+fn looks_like_cli_report(value: &Value) -> bool {
+    matches!(
+        get_str(value, &["schema_version"]),
+        Some(schema) if schema.starts_with("lp.")
+    ) && value.get("command").is_some()
+}
+
+fn summarize_report_shape(report: &Value) -> String {
+    let top_keys = report
+        .as_object()
+        .map(|obj| obj.keys().cloned().collect::<Vec<_>>().join(","))
+        .unwrap_or_else(|| "<non-object>".to_string());
+    let stdout_json = get_path(report, &["result", "stdout_json"])
+        .map(|value| {
+            serde_json::to_string(value).unwrap_or_else(|_| "<unserializable>".to_string())
+        })
+        .unwrap_or_else(|| "<missing>".to_string());
+    let stdout_preview = if stdout_json.len() > 512 {
+        format!("{}...", &stdout_json[..512])
+    } else {
+        stdout_json
+    };
+    format!("top_keys=[{top_keys}] stdout_json={stdout_preview}")
+}
+
 fn read_json_from_report_stdout(stdout: &[u8]) -> Result<Value> {
     let report: Value = serde_json::from_slice(stdout).context("parse x07 run report")?;
     let b64 = get_str(&report, &["solve", "solve_output_b64"])
@@ -2189,12 +2214,25 @@ fn read_json_from_report_stdout(stdout: &[u8]) -> Result<Value> {
                 &["result", "stdout_json", "solve", "solve_output_b64"],
             )
         })
-        .or_else(|| get_str(&report, &["report", "solve", "solve_output_b64"]))
-        .ok_or_else(|| anyhow!("missing solve_output_b64 in x07 report"))?;
-    let bytes = BASE64
-        .decode(b64.as_bytes())
-        .context("decode solve_output_b64")?;
-    serde_json::from_slice(&bytes).context("parse decoded cli report")
+        .or_else(|| get_str(&report, &["report", "solve", "solve_output_b64"]));
+    if let Some(b64) = b64 {
+        let bytes = BASE64
+            .decode(b64.as_bytes())
+            .context("decode solve_output_b64")?;
+        return serde_json::from_slice(&bytes).context("parse decoded cli report");
+    }
+    if let Some(stdout_json) = get_path(&report, &["result", "stdout_json"])
+        .filter(|value| looks_like_cli_report(value))
+    {
+        return Ok(stdout_json.clone());
+    }
+    if looks_like_cli_report(&report) {
+        return Ok(report);
+    }
+    bail!(
+        "missing solve_output_b64 in x07 report: {}",
+        summarize_report_shape(&report)
+    )
 }
 
 fn search_workspace_file(name: &str) -> Option<PathBuf> {
