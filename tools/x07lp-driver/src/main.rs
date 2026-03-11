@@ -3288,6 +3288,8 @@ fn run_remote_runtime_probe(exec_id: &str, work_dir: &Path, remote: &Value) -> R
         .unwrap_or_else(|| REMOTE_RUNTIME_PROVIDER.to_string());
     let public_listener = get_str(remote, &["routing", "public_base_url"])
         .unwrap_or_else(|| remote_exec_public_listener(&base_url, exec_id));
+    let public_probe_url = get_str(remote, &["routing", "probe_base_url"])
+        .unwrap_or_else(|| public_listener.clone());
     let candidate_upstream = get_str(remote, &["routing", "candidate_upstream"])
         .or_else(|| {
             get_str(remote, &["runtime", "candidate_bind_addr"])
@@ -3478,7 +3480,7 @@ fn run_remote_runtime_probe(exec_id: &str, work_dir: &Path, remote: &Value) -> R
         }
     }
 
-    match http_probe_with_profile(&target_profile, &public_listener, &[200]) {
+    match http_probe_with_profile(&target_profile, &public_probe_url, &[200]) {
         Ok(_) => checks.push(remote_probe_check(
             "public_listener",
             true,
