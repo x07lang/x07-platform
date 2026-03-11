@@ -62,6 +62,7 @@ const DEFAULT_REMOTE_BEARER_TOKEN: &str = "x07lp-oss-dev-token";
 const DEFAULT_REMOTE_SECRET_STORE_FILE: &str = "remote-secret-store.enc.json";
 const DEFAULT_REMOTE_OTLP_EXPORT_FILE: &str = "collector-metrics.jsonl";
 const DEFAULT_REMOTE_NATS_URL: &str = "nats://127.0.0.1:4222";
+const DEFAULT_REMOTE_RUNTIME_HOST: &str = "127.0.0.1";
 const DEFAULT_REMOTE_LATTICE: &str = "default";
 const DEFAULT_HOSTED_CLIENT_ID: &str = "x07lp-cli";
 const DEFAULT_HOSTED_SCOPE: &str = "cloud:all offline_access";
@@ -2425,6 +2426,13 @@ fn remote_nats_url() -> String {
         .unwrap_or_else(|| DEFAULT_REMOTE_NATS_URL.to_string())
 }
 
+fn remote_runtime_host() -> String {
+    std::env::var("X07LP_REMOTE_RUNTIME_HOST")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_REMOTE_RUNTIME_HOST.to_string())
+}
+
 fn remote_registry_host(raw: &str) -> String {
     raw.trim()
         .trim_end_matches('/')
@@ -2846,8 +2854,8 @@ fn deploy_remote_slot(
     })?;
     Ok(RemoteSlotDeployment {
         app_name: app_name.clone(),
-        bind_addr: format!("127.0.0.1:{port}"),
-        upstream_url: format!("http://127.0.0.1:{port}"),
+        bind_addr: format!("{}:{port}", remote_runtime_host()),
+        upstream_url: format!("http://{}:{port}", remote_runtime_host()),
         work_dir: work_dir.to_path_buf(),
         manifest_path,
         manifest_digest,
@@ -17585,6 +17593,32 @@ mod tests {
                 },
             }
         }
+    }
+
+    #[test]
+    fn remote_runtime_host_defaults_to_loopback() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("lock env");
+        let _host = ScopedEnvVar {
+            key: "X07LP_REMOTE_RUNTIME_HOST",
+            previous: std::env::var_os("X07LP_REMOTE_RUNTIME_HOST"),
+        };
+        unsafe {
+            std::env::remove_var("X07LP_REMOTE_RUNTIME_HOST");
+        }
+        assert_eq!(remote_runtime_host(), "127.0.0.1");
+    }
+
+    #[test]
+    fn remote_runtime_host_uses_explicit_env() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("lock env");
+        let _host = ScopedEnvVar::set("X07LP_REMOTE_RUNTIME_HOST", "wasmcloud");
+        assert_eq!(remote_runtime_host(), "wasmcloud");
     }
 
     #[derive(Debug, Clone)]
