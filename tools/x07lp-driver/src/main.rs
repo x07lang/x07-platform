@@ -3253,10 +3253,13 @@ fn local_remote_runtime_probe_host(base_url: &str) -> Option<String> {
             let runtime_host = remote_runtime_host();
             if runtime_host.trim().is_empty() {
                 host
-            } else {
+            } else if loopback_host(&runtime_host) {
                 runtime_host
+            } else {
+                String::new()
             }
         })
+        .filter(|host| !host.is_empty())
 }
 
 fn tcp_probe(host: &str, port: u16, timeout: Duration) -> Result<()> {
@@ -17747,15 +17750,25 @@ mod tests {
     }
 
     #[test]
-    fn local_remote_runtime_probe_host_prefers_runtime_env() {
+    fn local_remote_runtime_probe_host_skips_non_loopback_runtime_env() {
         let _guard = TEST_ENV_LOCK
             .get_or_init(|| Mutex::new(()))
             .lock()
             .expect("lock env");
         let _host = ScopedEnvVar::set("X07LP_REMOTE_RUNTIME_HOST", "wasmcloud");
+        assert_eq!(local_remote_runtime_probe_host("http://127.0.0.1:8081"), None);
+    }
+
+    #[test]
+    fn local_remote_runtime_probe_host_uses_loopback_runtime_env() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("lock env");
+        let _host = ScopedEnvVar::set("X07LP_REMOTE_RUNTIME_HOST", "127.0.0.1");
         assert_eq!(
             local_remote_runtime_probe_host("http://127.0.0.1:8081").as_deref(),
-            Some("wasmcloud")
+            Some("127.0.0.1")
         );
     }
 
