@@ -56,6 +56,39 @@ x07 run -- env list --project prj_demo --json
 x07 run -- context use --org org_demo --project prj_demo --env env_demo --json
 ```
 
+Hosted deploy examples against the same cloud session:
+
+```bash
+x07 run -- deploy accept \
+  --hosted \
+  --pack-dir path/to/pack \
+  --pack-manifest app.pack.json \
+  --json
+
+x07 run -- deploy run \
+  --hosted \
+  --deployment-id lpexec_example \
+  --json
+
+x07 run -- deploy status \
+  --hosted \
+  --deployment-id lpexec_example \
+  --json
+
+x07 run -- deploy query \
+  --hosted \
+  --deployment-id lpexec_example \
+  --view summary \
+  --json
+```
+
+Hosted deploy routing rules:
+
+- Use `--hosted` explicitly to send deploy commands through the saved hosted session and selected hosted context.
+- Use `--target` for the OSS self-hosted remote path.
+- Use neither selector to keep deploy commands local.
+- Hosted status uses `GET /v1/deployments/:id`, not `/v1/deployments/:id/status`.
+
 Implementation note:
 
 - `x07 run -- ...` and the MCP tools delegate to the shared Rust driver in `tools/x07lp-driver/`.

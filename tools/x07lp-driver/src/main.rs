@@ -189,6 +189,13 @@ struct HostedAuthMetadata {
     scope: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeployRouteMode {
+    Local,
+    Remote,
+    Hosted,
+}
+
 #[derive(Parser, Debug)]
 #[command(disable_help_subcommand = true, version = TOOL_VERSION)]
 struct Cli {
@@ -382,6 +389,14 @@ struct HostedContextUseArgs {
     common: HostedCommonArgs,
 }
 
+#[derive(Args, Debug, Clone)]
+struct HostedDeployArgs {
+    #[arg(long, default_value_t = false)]
+    hosted: bool,
+    #[arg(long, requires = "hosted")]
+    api_base: Option<String>,
+}
+
 #[derive(Args, Debug)]
 struct DeployAcceptArgs {
     #[arg(long)]
@@ -392,10 +407,12 @@ struct DeployAcceptArgs {
     change: Option<String>,
     #[arg(long)]
     ops_profile: Option<String>,
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["hosted", "api_base"])]
     target: Option<String>,
     #[arg(long)]
     fixture: Option<String>,
+    #[command(flatten)]
+    hosted: HostedDeployArgs,
     #[command(flatten)]
     common: CommonStateArgs,
 }
@@ -412,10 +429,12 @@ struct DeployRunArgs {
     metrics_dir: Option<String>,
     #[arg(long)]
     pause_scale: Option<f64>,
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["hosted", "api_base"])]
     target: Option<String>,
     #[arg(long)]
     fixture: Option<String>,
+    #[command(flatten)]
+    hosted: HostedDeployArgs,
     #[command(flatten)]
     common: CommonStateArgs,
 }
@@ -436,8 +455,10 @@ struct DeployQueryArgs {
     latest: bool,
     #[arg(long, default_value_t = false)]
     rebuild_index: bool,
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["hosted", "api_base"])]
     target: Option<String>,
+    #[command(flatten)]
+    hosted: HostedDeployArgs,
     #[command(flatten)]
     common: CommonStateArgs,
 }
@@ -446,8 +467,10 @@ struct DeployQueryArgs {
 struct DeploymentStatusArgs {
     #[arg(long = "deployment", alias = "deployment-id")]
     deployment_id: String,
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["hosted", "api_base"])]
     target: Option<String>,
+    #[command(flatten)]
+    hosted: HostedDeployArgs,
     #[command(flatten)]
     common: CommonStateArgs,
 }
@@ -458,8 +481,10 @@ struct DeploymentControlArgs {
     deployment_id: String,
     #[arg(long)]
     reason: String,
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["hosted", "api_base"])]
     target: Option<String>,
+    #[command(flatten)]
+    hosted: HostedDeployArgs,
     #[command(flatten)]
     common: CommonStateArgs,
 }
@@ -472,8 +497,10 @@ struct DeploymentRerunArgs {
     from_step: Option<usize>,
     #[arg(long)]
     reason: String,
-    #[arg(long)]
+    #[arg(long, conflicts_with_all = ["hosted", "api_base"])]
     target: Option<String>,
+    #[command(flatten)]
+    hosted: HostedDeployArgs,
     #[command(flatten)]
     common: CommonStateArgs,
 }
@@ -1405,9 +1432,13 @@ fn scope_array(value: &Value) -> Vec<String> {
 
 fn access_token_kid(access_token: &str) -> Option<String> {
     let header_segment = access_token.split('.').next()?;
-    let bytes = BASE64_URL_SAFE_NO_PAD.decode(header_segment.as_bytes()).ok()?;
+    let bytes = BASE64_URL_SAFE_NO_PAD
+        .decode(header_segment.as_bytes())
+        .ok()?;
     let doc: Value = serde_json::from_slice(&bytes).ok()?;
-    doc.get("kid").and_then(Value::as_str).map(ToOwned::to_owned)
+    doc.get("kid")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
 }
 
 fn validate_hosted_token_response(doc: &Value) -> Result<()> {
@@ -1670,8 +1701,7 @@ fn delete_hosted_session_doc() -> Result<bool> {
 }
 
 fn session_needs_refresh(session: &Value, now_unix_ms: u64) -> bool {
-    get_u64(session, &["tokens", "access_token_expires_unix_ms"])
-        .unwrap_or_default()
+    get_u64(session, &["tokens", "access_token_expires_unix_ms"]).unwrap_or_default()
         <= now_unix_ms.saturating_add(HOSTED_SESSION_REFRESH_SKEW_MS)
 }
 
@@ -1737,7 +1767,8 @@ fn build_hosted_session_doc(
     let access_token = get_str(token_response, &["access_token"]).unwrap();
     let refresh_token = get_str(token_response, &["refresh_token"])
         .or_else(|| current.and_then(|value| get_str(value, &["tokens", "refresh_token"])));
-    let refresh_token_ref = current.and_then(|value| get_str(value, &["tokens", "refresh_token_ref"]));
+    let refresh_token_ref =
+        current.and_then(|value| get_str(value, &["tokens", "refresh_token_ref"]));
     if refresh_token.is_none() && refresh_token_ref.is_none() {
         bail!("hosted login did not return a refresh token");
     }
@@ -1890,6 +1921,19 @@ fn cas_put(state_dir: &Path, logical_name: &str, media_type: &str, data: &[u8]) 
 
 fn load_cas_blob(state_dir: &Path, sha: &str) -> Result<Vec<u8>> {
     fs::read(rel_store_blob_path(state_dir, sha)).with_context(|| format!("read cas blob {}", sha))
+}
+
+fn cas_upload_metadata(state_dir: &Path, sha: &str) -> (String, String) {
+    let meta = load_json(&rel_store_meta_path(state_dir, sha)).ok();
+    let logical_name = meta
+        .as_ref()
+        .and_then(|doc| get_str(doc, &["logical_name"]))
+        .unwrap_or_else(|| format!("{sha}.bin"));
+    let media_type = meta
+        .as_ref()
+        .and_then(|doc| get_str(doc, &["media_type"]))
+        .unwrap_or_else(|| "application/octet-stream".to_string());
+    (logical_name, media_type)
 }
 
 fn logical_name_from_path(path: &Path) -> String {
@@ -6007,6 +6051,16 @@ fn remote_mode_selected(explicit: Option<&str>) -> Result<bool> {
     Ok(resolve_target_name(explicit)?.is_some())
 }
 
+fn resolve_deploy_route_mode(target: Option<&str>, hosted: bool) -> Result<DeployRouteMode> {
+    if hosted {
+        return Ok(DeployRouteMode::Hosted);
+    }
+    if remote_mode_selected(target)? {
+        return Ok(DeployRouteMode::Remote);
+    }
+    Ok(DeployRouteMode::Local)
+}
+
 fn first_diag_message(report: &Value) -> String {
     report
         .get("diagnostics")
@@ -6298,6 +6352,59 @@ fn hosted_request_form(
     }
 }
 
+fn hosted_api_json(
+    session: &Value,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+) -> Result<Value> {
+    let api_base = session_api_base(session)?;
+    let access_token = session_access_token(session)?;
+    let response = hosted_request_json(
+        method,
+        &format!("{}{}", api_base.trim_end_matches('/'), path),
+        Some(&access_token),
+        body,
+    )?;
+    if let Some(message) = oauth_error_message(&response) {
+        bail!("{message}");
+    }
+    unwrap_hosted_cli_report(response)
+}
+
+fn hosted_api_put_bytes(
+    session: &Value,
+    path: &str,
+    body: &[u8],
+    content_type: &str,
+    logical_name: Option<&str>,
+) -> Result<Value> {
+    let api_base = session_api_base(session)?;
+    let access_token = session_access_token(session)?;
+    let url = format!("{}{}", api_base.trim_end_matches('/'), path);
+    let agent = remote_agent();
+    let request = agent
+        .put(&url)
+        .set("accept", "application/json")
+        .set("authorization", &format!("Bearer {access_token}"))
+        .set("content-type", content_type);
+    let request = if let Some(logical_name) = logical_name {
+        request.set("x-logical-name", logical_name)
+    } else {
+        request
+    };
+    let response = request.send_bytes(body);
+    let response = match response {
+        Ok(response) => decode_http_json_response(response),
+        Err(UreqError::Status(_, response)) => decode_http_json_response(response),
+        Err(UreqError::Transport(err)) => bail!("hosted request failed: PUT {url}: {err}"),
+    }?;
+    if let Some(message) = oauth_error_message(&response) {
+        bail!("{message}");
+    }
+    unwrap_hosted_cli_report(response)
+}
+
 fn unwrap_hosted_cli_report(response: Value) -> Result<Value> {
     if get_str(&response, &["schema_version"]).as_deref() != Some("lp.cli.report@0.1.0") {
         return Ok(response);
@@ -6320,7 +6427,11 @@ fn oauth_error_message(response: &Value) -> Option<String> {
     })
 }
 
-fn parse_hosted_auth_metadata(api_base: &str, metadata_url: &str, response: Value) -> Result<HostedAuthMetadata> {
+fn parse_hosted_auth_metadata(
+    api_base: &str,
+    metadata_url: &str,
+    response: Value,
+) -> Result<HostedAuthMetadata> {
     let doc = unwrap_hosted_cli_report(response)?;
     let issuer = get_str(&doc, &["issuer"]).ok_or_else(|| anyhow!("missing OIDC issuer"))?;
     let jwks_uri = get_str(&doc, &["jwks_uri"]).ok_or_else(|| anyhow!("missing OIDC jwks_uri"))?;
@@ -6346,7 +6457,10 @@ fn parse_hosted_auth_metadata(api_base: &str, metadata_url: &str, response: Valu
 }
 
 fn load_hosted_auth_metadata(api_base: &str) -> Result<HostedAuthMetadata> {
-    let metadata_url = format!("{}/.well-known/openid-configuration", api_base.trim_end_matches('/'));
+    let metadata_url = format!(
+        "{}/.well-known/openid-configuration",
+        api_base.trim_end_matches('/')
+    );
     let response = hosted_request_json("GET", &metadata_url, None, None)?;
     parse_hosted_auth_metadata(api_base, &metadata_url, response)
 }
@@ -6406,10 +6520,13 @@ fn wait_for_browser_login_code(listener: TcpListener, expected_state: &str) -> R
                     bail!("login failed: {description}");
                 }
                 if request.query.get("state").map(String::as_str) != Some(expected_state) {
-                    let body =
-                        "<html><body><h1>x07lp login failed</h1><p>state mismatch</p></body></html>";
-                    let _ =
-                        write_http_response(&mut stream, 400, "text/html; charset=utf-8", body.as_bytes());
+                    let body = "<html><body><h1>x07lp login failed</h1><p>state mismatch</p></body></html>";
+                    let _ = write_http_response(
+                        &mut stream,
+                        400,
+                        "text/html; charset=utf-8",
+                        body.as_bytes(),
+                    );
                     bail!("login failed: state mismatch");
                 }
                 let code = request
@@ -6418,8 +6535,7 @@ fn wait_for_browser_login_code(listener: TcpListener, expected_state: &str) -> R
                     .filter(|value| !value.is_empty())
                     .cloned()
                     .ok_or_else(|| anyhow!("login failed: missing authorization code"))?;
-                let body =
-                    "<html><body><h1>x07lp login complete</h1><p>You can return to the terminal.</p></body></html>";
+                let body = "<html><body><h1>x07lp login complete</h1><p>You can return to the terminal.</p></body></html>";
                 let _ = write_http_response(
                     &mut stream,
                     200,
@@ -6478,8 +6594,8 @@ fn device_flow_token(metadata: &HostedAuthMetadata) -> Result<Value> {
     let start = unwrap_hosted_cli_report(device_start)?;
     let device_code = get_str(&start, &["device_code"])
         .ok_or_else(|| anyhow!("device login failed: missing device_code"))?;
-    let user_code =
-        get_str(&start, &["user_code"]).ok_or_else(|| anyhow!("device login failed: missing user_code"))?;
+    let user_code = get_str(&start, &["user_code"])
+        .ok_or_else(|| anyhow!("device login failed: missing user_code"))?;
     let verification_uri = get_str(&start, &["verification_uri"])
         .ok_or_else(|| anyhow!("device login failed: missing verification_uri"))?;
     let verification_uri_complete = get_str(&start, &["verification_uri_complete"]);
@@ -6519,7 +6635,10 @@ fn device_flow_token(metadata: &HostedAuthMetadata) -> Result<Value> {
                     continue;
                 }
                 "access_denied" | "expired_token" => {
-                    bail!("{}", oauth_error_message(&response).unwrap_or_else(|| error.to_string()))
+                    bail!(
+                        "{}",
+                        oauth_error_message(&response).unwrap_or_else(|| error.to_string())
+                    )
                 }
                 _ => bail!(
                     "{}",
@@ -6545,8 +6664,12 @@ fn browser_flow_token(metadata: &HostedAuthMetadata) -> Result<Value> {
     let state = random_urlsafe_token(16);
     let verifier = random_urlsafe_token(32);
     let challenge = pkce_code_challenge(&verifier);
-    let mut url = Url::parse(&metadata.authorization_endpoint)
-        .with_context(|| format!("parse authorization endpoint {}", metadata.authorization_endpoint))?;
+    let mut url = Url::parse(&metadata.authorization_endpoint).with_context(|| {
+        format!(
+            "parse authorization endpoint {}",
+            metadata.authorization_endpoint
+        )
+    })?;
     {
         let mut query = url.query_pairs_mut();
         query.append_pair("response_type", "code");
@@ -6565,7 +6688,12 @@ fn browser_flow_token(metadata: &HostedAuthMetadata) -> Result<Value> {
 }
 
 fn fetch_hosted_whoami(api_base: &str, access_token: &str) -> Result<Value> {
-    let response = hosted_request_json("GET", &format!("{api_base}/v1/whoami"), Some(access_token), None)?;
+    let response = hosted_request_json(
+        "GET",
+        &format!("{api_base}/v1/whoami"),
+        Some(access_token),
+        None,
+    )?;
     if let Some(message) = oauth_error_message(&response) {
         bail!("whoami failed: {message}");
     }
@@ -6627,7 +6755,10 @@ fn refresh_hosted_session(session: &Value) -> Result<Value> {
     }
     let token_response = unwrap_hosted_cli_report(response)?;
     validate_hosted_token_response(&token_response)?;
-    let whoami = fetch_hosted_whoami(&metadata.api_base, &get_str(&token_response, &["access_token"]).unwrap())?;
+    let whoami = fetch_hosted_whoami(
+        &metadata.api_base,
+        &get_str(&token_response, &["access_token"]).unwrap(),
+    )?;
     let updated = build_hosted_session_doc(&metadata, &token_response, &whoami, Some(session))?;
     let _ = store_hosted_session_doc(&updated)?;
     Ok(updated)
@@ -6807,13 +6938,8 @@ fn resolve_environment_id(session: &Value, project_id: &str, identifier: &str) -
         None,
     )?;
     let items = result_items(&result, "lp.environment.list.result@0.1.0")?;
-    let item = find_item_by_identifier(
-        items,
-        identifier,
-        "environment_id",
-        "environment_slug",
-    )
-    .ok_or_else(|| anyhow!("unknown environment `{identifier}`"))?;
+    let item = find_item_by_identifier(items, identifier, "environment_id", "environment_slug")
+        .ok_or_else(|| anyhow!("unknown environment `{identifier}`"))?;
     get_str(item, &["environment_id"])
         .ok_or_else(|| anyhow!("environment is missing environment_id"))
 }
@@ -7038,7 +7164,9 @@ fn command_context(args: HostedContextArgs) -> Result<Value> {
                 let org_id = resolve_org_id(&session, &args.org)?;
                 let project_id = resolve_project_id_in_org(&session, &org_id, &args.project)?;
                 let environment_id = match args.environment.as_deref() {
-                    Some(identifier) => Some(resolve_environment_id(&session, &project_id, identifier)?),
+                    Some(identifier) => {
+                        Some(resolve_environment_id(&session, &project_id, identifier)?)
+                    }
                     None => None,
                 };
                 let body = json!({
@@ -7622,6 +7750,54 @@ fn load_accept_ops_docs(
     Ok((Some(ops_doc), capabilities_doc, required_secrets))
 }
 
+#[derive(Debug, Clone)]
+struct PreparedDeployAccept {
+    run_id: String,
+    exec_id: String,
+    run_doc: Value,
+    exec_doc: Value,
+    decision_doc: Value,
+    change_doc: Option<Value>,
+    ops_profile_doc: Option<Value>,
+    capabilities_doc: Option<Value>,
+    required_secrets: Vec<String>,
+    manifest_digest: Value,
+    digests: BTreeSet<String>,
+}
+
+fn prepare_deploy_accept_request(
+    state_dir: &Path,
+    args: &DeployAcceptArgs,
+    staged: &Value,
+) -> Result<PreparedDeployAccept> {
+    let (run_id, exec_id, run_doc, exec_doc, decision_doc, change_doc) =
+        load_remote_accept_stage(state_dir, staged)?;
+    let (ops_profile_doc, capabilities_doc, required_secrets) = load_accept_ops_docs(args)?;
+    let (_, manifest_raw) = load_pack_manifest_from_run(state_dir, &run_doc)?;
+    let manifest_doc: Value = serde_json::from_slice(&manifest_raw)?;
+    let mut digests = BTreeSet::new();
+    collect_sha256_refs(&manifest_doc, &mut digests);
+    collect_sha256_refs(&run_doc, &mut digests);
+    collect_sha256_refs(&exec_doc, &mut digests);
+    collect_sha256_refs(&decision_doc, &mut digests);
+    if let Some(change_doc) = &change_doc {
+        collect_sha256_refs(change_doc, &mut digests);
+    }
+    Ok(PreparedDeployAccept {
+        run_id,
+        exec_id,
+        run_doc,
+        exec_doc,
+        decision_doc,
+        change_doc,
+        ops_profile_doc,
+        capabilities_doc,
+        required_secrets,
+        manifest_digest: digest_value(&manifest_raw),
+        digests,
+    })
+}
+
 fn collect_sha256_refs(value: &Value, out: &mut BTreeSet<String>) {
     match value {
         Value::Object(map) => {
@@ -7656,6 +7832,31 @@ fn remote_cas_presence(target: &ResolvedTarget, digests: &[String]) -> Result<BT
         target,
         "POST",
         "/v1/artifacts/cas/presence",
+        Some(&json!({ "digests": digests })),
+    )?;
+    Ok(doc
+        .get("missing")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn hosted_target_result(session: &Value) -> Value {
+    json!({
+        "name": get_str(session, &["target", "name"]).unwrap_or_else(|| "cloud".to_string()),
+        "kind": "hosted",
+        "base_url": get_str(session, &["target", "api_base"]).unwrap_or_default(),
+    })
+}
+
+fn hosted_cas_presence(session: &Value, digests: &[String]) -> Result<BTreeSet<String>> {
+    let doc = hosted_api_json(
+        session,
+        "POST",
+        "/v1/cas/check",
         Some(&json!({ "digests": digests })),
     )?;
     Ok(doc
@@ -7723,6 +7924,52 @@ fn remote_push_cas(
             "name": target.name,
             "base_url": target.base_url
         },
+        "artifact": {
+            "kind": REMOTE_ARTIFACT_KIND
+        },
+        "manifest_digest": manifest_digest,
+        "probed": digests_vec.len(),
+        "missing_count": missing.len(),
+        "uploaded_count": uploaded.len(),
+        "skipped_count": skipped.len(),
+        "uploaded": uploaded,
+        "skipped": skipped
+    }))
+}
+
+fn hosted_push_cas(
+    session: &Value,
+    state_dir: &Path,
+    manifest_digest: Value,
+    digests: &BTreeSet<String>,
+) -> Result<Value> {
+    let digests_vec: Vec<String> = digests
+        .iter()
+        .filter(|sha| rel_store_blob_path(state_dir, sha).exists())
+        .cloned()
+        .collect();
+    let missing = hosted_cas_presence(session, &digests_vec)?;
+    let mut uploaded = Vec::new();
+    let mut skipped = Vec::new();
+    for sha in &digests_vec {
+        if missing.contains(sha) {
+            let blob = load_cas_blob(state_dir, sha)?;
+            let (logical_name, media_type) = cas_upload_metadata(state_dir, sha);
+            let _ = hosted_api_put_bytes(
+                session,
+                &format!("/v1/cas/objects/sha256/{sha}"),
+                &blob,
+                &media_type,
+                Some(&logical_name),
+            )?;
+            uploaded.push(json!({ "sha256": sha }));
+        } else {
+            skipped.push(json!({ "sha256": sha }));
+        }
+    }
+    Ok(json!({
+        "schema_version": "lp.deploy.push.result@0.1.0",
+        "target": hosted_target_result(session),
         "artifact": {
             "kind": REMOTE_ARTIFACT_KIND
         },
@@ -8234,10 +8481,18 @@ fn command_adapter_conformance(args: AdapterConformanceArgs) -> Result<Value> {
 }
 
 fn command_accept(args: DeployAcceptArgs) -> Result<Value> {
-    let Some(target) = resolve_remote_target(args.target.as_deref())? else {
-        let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
-        return run_local_accept_stage(&args, &state_dir);
-    };
+    match resolve_deploy_route_mode(args.target.as_deref(), args.hosted.hosted)? {
+        DeployRouteMode::Local => {
+            let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
+            run_local_accept_stage(&args, &state_dir)
+        }
+        DeployRouteMode::Remote => command_accept_remote(args),
+        DeployRouteMode::Hosted => command_accept_hosted(args),
+    }
+}
+
+fn command_accept_remote(args: DeployAcceptArgs) -> Result<Value> {
+    let target = required_remote_target(args.target.as_deref())?;
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let staged = match run_local_accept_stage(&args, &state_dir) {
         Ok(report) => report,
@@ -8282,10 +8537,7 @@ fn command_accept(args: DeployAcceptArgs) -> Result<Value> {
             )],
         ));
     }
-    let (run_id, exec_id, run_doc, mut exec_doc, decision_doc, change_doc) =
-        load_remote_accept_stage(&state_dir, &staged)?;
-    attach_remote_execution_context(&mut exec_doc, &run_doc, &target, &state_dir);
-    let (ops_profile_doc, capabilities_doc, required_secrets) = match load_accept_ops_docs(&args) {
+    let mut prepared = match prepare_deploy_accept_request(&state_dir, &args, &staged) {
         Ok(docs) => docs,
         Err(err) => {
             return Ok(remote_error_report(
@@ -8295,14 +8547,18 @@ fn command_accept(args: DeployAcceptArgs) -> Result<Value> {
             ));
         }
     };
-    let (_, manifest_raw) = load_pack_manifest_from_run(&state_dir, &run_doc)?;
-    let manifest_doc: Value = serde_json::from_slice(&manifest_raw)?;
-    let mut digests = BTreeSet::new();
-    collect_sha256_refs(&manifest_doc, &mut digests);
-    collect_sha256_refs(&run_doc, &mut digests);
-    collect_sha256_refs(&exec_doc, &mut digests);
-    collect_sha256_refs(&decision_doc, &mut digests);
-    let push = match remote_push_cas(&target, &state_dir, digest_value(&manifest_raw), &digests) {
+    attach_remote_execution_context(
+        &mut prepared.exec_doc,
+        &prepared.run_doc,
+        &target,
+        &state_dir,
+    );
+    let push = match remote_push_cas(
+        &target,
+        &state_dir,
+        prepared.manifest_digest.clone(),
+        &prepared.digests,
+    ) {
         Ok(doc) => doc,
         Err(err) => {
             return Ok(remote_error_report(
@@ -8313,13 +8569,13 @@ fn command_accept(args: DeployAcceptArgs) -> Result<Value> {
         }
     };
     let request = json!({
-        "run": run_doc,
-        "execution": exec_doc,
-        "decision": decision_doc,
-        "change_request": change_doc,
-        "ops_profile": ops_profile_doc,
-        "capabilities": capabilities_doc,
-        "required_secrets": required_secrets,
+        "run": prepared.run_doc,
+        "execution": prepared.exec_doc,
+        "decision": prepared.decision_doc,
+        "change_request": prepared.change_doc,
+        "ops_profile": prepared.ops_profile_doc,
+        "capabilities": prepared.capabilities_doc,
+        "required_secrets": prepared.required_secrets,
         "fixture": args.fixture,
         "push": push
     });
@@ -8337,10 +8593,10 @@ fn command_accept(args: DeployAcceptArgs) -> Result<Value> {
     if report.get("ok").and_then(Value::as_bool) != Some(true) {
         return Ok(report);
     }
-    let remote_run_id = get_str(&report, &["result", "run_id"]).unwrap_or(run_id.clone());
+    let remote_run_id = get_str(&report, &["result", "run_id"]).unwrap_or(prepared.run_id.clone());
     let remote_exec_id = get_str(&report, &["result", "exec_id"])
         .or_else(|| get_str(&report, &["result", "deployment_id"]))
-        .unwrap_or(exec_id.clone());
+        .unwrap_or(prepared.exec_id.clone());
     ensure_object_field(&mut report, "result").insert("run_id".to_string(), json!(remote_run_id));
     ensure_object_field(&mut report, "result")
         .insert("deployment_id".to_string(), json!(remote_exec_id.clone()));
@@ -8368,6 +8624,49 @@ fn command_accept(args: DeployAcceptArgs) -> Result<Value> {
         get_str(&report, &["result", "run_id"]).as_deref(),
         Vec::new(),
     ))
+}
+
+fn command_accept_hosted(args: DeployAcceptArgs) -> Result<Value> {
+    let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
+    let staged = run_local_accept_stage(&args, &state_dir)?;
+    if staged.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Ok(staged);
+    }
+    let prepared = prepare_deploy_accept_request(&state_dir, &args, &staged)?;
+    let session = ensure_hosted_session_ready(args.hosted.api_base.as_deref())?;
+    hosted_accept_prepared(&session, &state_dir, &prepared, args.fixture.as_deref())
+}
+
+fn hosted_accept_prepared(
+    session: &Value,
+    state_dir: &Path,
+    prepared: &PreparedDeployAccept,
+    fixture: Option<&str>,
+) -> Result<Value> {
+    let push = hosted_push_cas(
+        session,
+        state_dir,
+        prepared.manifest_digest.clone(),
+        &prepared.digests,
+    )?;
+    let request = json!({
+        "run": prepared.run_doc,
+        "execution": prepared.exec_doc,
+        "decision": prepared.decision_doc,
+        "change_request": prepared.change_doc,
+        "ops_profile": prepared.ops_profile_doc,
+        "capabilities": prepared.capabilities_doc,
+        "required_secrets": prepared.required_secrets,
+        "fixture": fixture,
+        "push": push,
+    });
+    let mut report =
+        hosted_v1_request_report(session, "POST", "/v1/deploy/accept", Some(&request))?;
+    if report.get("ok").and_then(Value::as_bool) == Some(true) {
+        ensure_object_field(&mut report, "result")
+            .insert("push".to_string(), request["push"].clone());
+    }
+    Ok(report)
 }
 
 fn remote_target_result(target: &ResolvedTarget) -> Value {
@@ -8559,6 +8858,75 @@ fn remote_command_query(args: &DeployQueryArgs) -> Result<Value> {
             remote_error_report("deploy query", "LP_REMOTE_QUERY_FAILED", &err.to_string())
         }),
     )
+}
+
+fn hosted_command_run(args: &DeployRunArgs) -> Result<Value> {
+    let session = ensure_hosted_session_ready(args.hosted.api_base.as_deref())?;
+    hosted_v1_request_report(
+        &session,
+        "POST",
+        "/v1/deploy/run",
+        Some(&json!({
+            "run_id": args.accepted_run,
+            "deployment_id": (!args.deployment_id.is_empty()).then_some(args.deployment_id.as_str()),
+            "fixture": args.fixture,
+            "pause_scale": args.pause_scale,
+        })),
+    )
+}
+
+fn hosted_command_status(args: &DeploymentStatusArgs) -> Result<Value> {
+    let session = ensure_hosted_session_ready(args.hosted.api_base.as_deref())?;
+    hosted_v1_request_report(
+        &session,
+        "GET",
+        &format!("/v1/deployments/{}", args.deployment_id),
+        None,
+    )
+}
+
+fn hosted_command_query(args: &DeployQueryArgs) -> Result<Value> {
+    let Some(deployment_id) = args
+        .deployment_id
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(cli_report(
+            "deploy query",
+            false,
+            2,
+            json!({}),
+            None,
+            vec![result_diag(
+                "LP_QUERY_INVALID",
+                "parse",
+                "hosted query requires --deployment",
+                "error",
+            )],
+        ));
+    };
+    let session = ensure_hosted_session_ready(args.hosted.api_base.as_deref())?;
+    let mut path = format!("/v1/deployments/{deployment_id}/query?view={}", args.view);
+    if let Some(limit) = args.limit {
+        path.push_str(&format!("&limit={limit}"));
+    }
+    if args.rebuild_index {
+        path.push_str("&rebuild_index=true");
+    }
+    hosted_v1_request_report(&session, "GET", &path, None)
+}
+
+fn hosted_command_control(
+    session: &Value,
+    _command: &str,
+    path: String,
+    body: Value,
+) -> Result<Value> {
+    let report = hosted_v1_request_report(session, "POST", &path, Some(&body))?;
+    if report.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Ok(report);
+    }
+    Ok(report)
 }
 
 fn remote_command_control(
@@ -12689,10 +13057,11 @@ fn command_device_release_control(
 }
 
 fn command_status(args: DeploymentStatusArgs) -> Result<Value> {
-    if remote_mode_selected(args.target.as_deref())? {
-        return remote_command_status(&args);
+    match resolve_deploy_route_mode(args.target.as_deref(), args.hosted.hosted)? {
+        DeployRouteMode::Hosted => hosted_command_status(&args),
+        DeployRouteMode::Remote => remote_command_status(&args),
+        DeployRouteMode::Local => command_status_state(args),
     }
-    command_status_state(args)
 }
 
 fn command_status_state(args: DeploymentStatusArgs) -> Result<Value> {
@@ -12709,10 +13078,11 @@ fn command_status_state(args: DeploymentStatusArgs) -> Result<Value> {
 }
 
 fn command_query(args: DeployQueryArgs) -> Result<Value> {
-    if remote_mode_selected(args.target.as_deref())? {
-        return remote_command_query(&args);
+    match resolve_deploy_route_mode(args.target.as_deref(), args.hosted.hosted)? {
+        DeployRouteMode::Hosted => hosted_command_query(&args),
+        DeployRouteMode::Remote => remote_command_query(&args),
+        DeployRouteMode::Local => command_query_state(args),
     }
-    command_query_state(args)
 }
 
 fn command_query_state(args: DeployQueryArgs) -> Result<Value> {
@@ -12809,10 +13179,11 @@ fn command_query_state(args: DeployQueryArgs) -> Result<Value> {
 }
 
 fn command_run(args: DeployRunArgs) -> Result<Value> {
-    if remote_mode_selected(args.target.as_deref())? {
-        return remote_command_run(&args);
+    match resolve_deploy_route_mode(args.target.as_deref(), args.hosted.hosted)? {
+        DeployRouteMode::Hosted => hosted_command_run(&args),
+        DeployRouteMode::Remote => remote_command_run(&args),
+        DeployRouteMode::Local => command_run_execution(args),
     }
-    command_run_execution(args)
 }
 
 fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
@@ -13810,16 +14181,25 @@ fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
 }
 
 fn command_stop(args: DeploymentControlArgs) -> Result<Value> {
-    if remote_mode_selected(args.target.as_deref())? {
-        return remote_command_control(
+    match resolve_deploy_route_mode(args.target.as_deref(), args.hosted.hosted)? {
+        DeployRouteMode::Hosted => {
+            let session = ensure_hosted_session_ready(args.hosted.api_base.as_deref())?;
+            hosted_command_control(
+                &session,
+                "deploy stop",
+                format!("/v1/deployments/{}/stop", args.deployment_id),
+                json!({ "reason": args.reason }),
+            )
+        }
+        DeployRouteMode::Remote => remote_command_control(
             args.target.as_deref(),
             "deploy stop",
             "LP_REMOTE_RUN_FAILED",
             format!("/v1/deployments/{}/stop", args.deployment_id),
             json!({ "reason": args.reason }),
-        );
+        ),
+        DeployRouteMode::Local => command_stop_execution(args),
     }
-    command_stop_execution(args)
 }
 
 fn command_stop_execution(args: DeploymentControlArgs) -> Result<Value> {
@@ -13920,16 +14300,25 @@ fn command_stop_execution(args: DeploymentControlArgs) -> Result<Value> {
 }
 
 fn command_rollback(args: DeploymentControlArgs) -> Result<Value> {
-    if remote_mode_selected(args.target.as_deref())? {
-        return remote_command_control(
+    match resolve_deploy_route_mode(args.target.as_deref(), args.hosted.hosted)? {
+        DeployRouteMode::Hosted => {
+            let session = ensure_hosted_session_ready(args.hosted.api_base.as_deref())?;
+            hosted_command_control(
+                &session,
+                "deploy rollback",
+                format!("/v1/deployments/{}/rollback", args.deployment_id),
+                json!({ "reason": args.reason }),
+            )
+        }
+        DeployRouteMode::Remote => remote_command_control(
             args.target.as_deref(),
             "deploy rollback",
             "LP_REMOTE_RUN_FAILED",
             format!("/v1/deployments/{}/rollback", args.deployment_id),
             json!({ "reason": args.reason }),
-        );
+        ),
+        DeployRouteMode::Local => command_rollback_execution(args),
     }
-    command_rollback_execution(args)
 }
 
 fn command_rollback_execution(args: DeploymentControlArgs) -> Result<Value> {
@@ -14026,16 +14415,25 @@ fn command_rollback_execution(args: DeploymentControlArgs) -> Result<Value> {
 }
 
 fn command_pause(args: DeploymentControlArgs) -> Result<Value> {
-    if remote_mode_selected(args.target.as_deref())? {
-        return remote_command_control(
+    match resolve_deploy_route_mode(args.target.as_deref(), args.hosted.hosted)? {
+        DeployRouteMode::Hosted => {
+            let session = ensure_hosted_session_ready(args.hosted.api_base.as_deref())?;
+            hosted_command_control(
+                &session,
+                "deploy pause",
+                format!("/v1/deployments/{}/pause", args.deployment_id),
+                json!({ "reason": args.reason }),
+            )
+        }
+        DeployRouteMode::Remote => remote_command_control(
             args.target.as_deref(),
             "deploy pause",
             "LP_REMOTE_RUN_FAILED",
             format!("/v1/deployments/{}/pause", args.deployment_id),
             json!({ "reason": args.reason }),
-        );
+        ),
+        DeployRouteMode::Local => command_pause_execution(args),
     }
-    command_pause_execution(args)
 }
 
 fn command_pause_execution(args: DeploymentControlArgs) -> Result<Value> {
@@ -14098,16 +14496,25 @@ fn command_pause_execution(args: DeploymentControlArgs) -> Result<Value> {
 }
 
 fn command_rerun(args: DeploymentRerunArgs) -> Result<Value> {
-    if remote_mode_selected(args.target.as_deref())? {
-        return remote_command_control(
+    match resolve_deploy_route_mode(args.target.as_deref(), args.hosted.hosted)? {
+        DeployRouteMode::Hosted => {
+            let session = ensure_hosted_session_ready(args.hosted.api_base.as_deref())?;
+            hosted_command_control(
+                &session,
+                "deploy rerun",
+                format!("/v1/deployments/{}/rerun", args.deployment_id),
+                json!({ "reason": args.reason, "from_step": args.from_step }),
+            )
+        }
+        DeployRouteMode::Remote => remote_command_control(
             args.target.as_deref(),
             "deploy rerun",
             "LP_REMOTE_RUN_FAILED",
             format!("/v1/deployments/{}/rerun", args.deployment_id),
             json!({ "reason": args.reason, "from_step": args.from_step.unwrap_or(0) }),
-        );
+        ),
+        DeployRouteMode::Local => command_rerun_execution(args),
     }
-    command_rerun_execution(args)
 }
 
 fn command_rerun_execution(args: DeploymentRerunArgs) -> Result<Value> {
@@ -16071,6 +16478,10 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
                 pause_scale: body_doc.get("pause_scale").and_then(Value::as_f64),
                 target: None,
                 fixture: fixture.clone(),
+                hosted: HostedDeployArgs {
+                    hosted: false,
+                    api_base: None,
+                },
                 common,
             }) {
                 Ok(report) => report,
@@ -16132,6 +16543,10 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
             command_status_state(DeploymentStatusArgs {
                 deployment_id: (*exec_id).to_string(),
                 target: None,
+                hosted: HostedDeployArgs {
+                    hosted: false,
+                    api_base: None,
+                },
                 common,
             })?,
         ),
@@ -16147,6 +16562,10 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
                 latest: false,
                 rebuild_index: request_query_bool(&request, "rebuild_index", false),
                 target: None,
+                hosted: HostedDeployArgs {
+                    hosted: false,
+                    api_base: None,
+                },
                 common,
             })?,
         ),
@@ -16156,6 +16575,10 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
                 deployment_id: (*exec_id).to_string(),
                 reason: get_http_string(&body_doc, "reason", "remote_stop"),
                 target: None,
+                hosted: HostedDeployArgs {
+                    hosted: false,
+                    api_base: None,
+                },
                 common,
             })?;
             let _ = record_remote_event(
@@ -16180,6 +16603,10 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
                 deployment_id: (*exec_id).to_string(),
                 reason: get_http_string(&body_doc, "reason", "remote_rollback"),
                 target: None,
+                hosted: HostedDeployArgs {
+                    hosted: false,
+                    api_base: None,
+                },
                 common,
             })?;
             let _ = record_remote_event(
@@ -16204,6 +16631,10 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
                 deployment_id: (*exec_id).to_string(),
                 reason: get_http_string(&body_doc, "reason", "remote_pause"),
                 target: None,
+                hosted: HostedDeployArgs {
+                    hosted: false,
+                    api_base: None,
+                },
                 common,
             })?;
             let _ = record_remote_event(
@@ -16232,6 +16663,10 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
                     .map(|value| value as usize),
                 reason: get_http_string(&body_doc, "reason", "remote_rerun"),
                 target: None,
+                hosted: HostedDeployArgs {
+                    hosted: false,
+                    api_base: None,
+                },
                 common,
             })?;
             let _ = record_remote_event(
@@ -16499,6 +16934,10 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         latest: false,
                         rebuild_index: false,
                         target: None,
+                        hosted: HostedDeployArgs {
+                            hosted: false,
+                            api_base: None,
+                        },
                         common: common.clone(),
                     })?,
                 ),
@@ -16513,6 +16952,10 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         latest: false,
                         rebuild_index: false,
                         target: None,
+                        hosted: HostedDeployArgs {
+                            hosted: false,
+                            api_base: None,
+                        },
                         common: common.clone(),
                     })?,
                 ),
@@ -16595,6 +17038,10 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         deployment_id: (*exec_id).to_string(),
                         reason: get_http_string(&body_doc, "reason", "http_pause"),
                         target: None,
+                        hosted: HostedDeployArgs {
+                            hosted: false,
+                            api_base: None,
+                        },
                         common: common.clone(),
                     })?,
                 ),
@@ -16605,6 +17052,10 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         from_step: Some(get_http_u64(&body_doc, "from_step", 0) as usize),
                         reason: get_http_string(&body_doc, "reason", "http_rerun"),
                         target: None,
+                        hosted: HostedDeployArgs {
+                            hosted: false,
+                            api_base: None,
+                        },
                         common: common.clone(),
                     })?,
                 ),
@@ -16614,6 +17065,10 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         deployment_id: (*exec_id).to_string(),
                         reason: get_http_string(&body_doc, "reason", "http_rollback"),
                         target: None,
+                        hosted: HostedDeployArgs {
+                            hosted: false,
+                            api_base: None,
+                        },
                         common: common.clone(),
                     })?,
                 ),
@@ -16623,6 +17078,10 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         deployment_id: (*exec_id).to_string(),
                         reason: get_http_string(&body_doc, "reason", "http_stop"),
                         target: None,
+                        hosted: HostedDeployArgs {
+                            hosted: false,
+                            api_base: None,
+                        },
                         common: common.clone(),
                     })?,
                 ),
@@ -17178,7 +17637,12 @@ mod tests {
         })
     }
 
-    fn sample_session(api_base: &str, access_token: &str, refresh_token: &str, expires_at: u64) -> Value {
+    fn sample_session(
+        api_base: &str,
+        access_token: &str,
+        refresh_token: &str,
+        expires_at: u64,
+    ) -> Value {
         json!({
             "schema_version": "lp.auth.session@0.1.0",
             "issuer": format!("{api_base}/issuer"),
@@ -17233,6 +17697,13 @@ mod tests {
         cli_report(command, true, 0, result, None, Vec::new())
     }
 
+    fn hosted_deploy_args(hosted: bool) -> HostedDeployArgs {
+        HostedDeployArgs {
+            hosted,
+            api_base: None,
+        }
+    }
+
     fn form_map(body: &[u8]) -> BTreeMap<String, String> {
         url::form_urlencoded::parse(body)
             .into_owned()
@@ -17247,7 +17718,12 @@ mod tests {
             .unwrap_or_else(|poison| poison.into_inner());
         let tmp = TempDir::new("session-roundtrip")?;
         let _config = ScopedEnvVar::set("X07LP_CONFIG_DIR", &tmp.path.to_string_lossy());
-        let session = sample_session("http://127.0.0.1:39001", "access.initial", "refresh.initial", now_ms().saturating_add(60_000));
+        let session = sample_session(
+            "http://127.0.0.1:39001",
+            "access.initial",
+            "refresh.initial",
+            now_ms().saturating_add(60_000),
+        );
         let path = store_hosted_session_doc(&session)?;
         assert_eq!(path, tmp.path.join("session.json"));
         assert_eq!(load_hosted_session_doc()?, session);
@@ -17266,45 +17742,61 @@ mod tests {
         let _config = ScopedEnvVar::set("X07LP_CONFIG_DIR", &tmp.path.to_string_lossy());
         let observed = Arc::new(Mutex::new(Vec::<ObservedRequest>::new()));
         let observed_requests = Arc::clone(&observed);
-        let server = MockServer::spawn(move |base_url| move |request| {
-            observed_requests.lock().unwrap().push(ObservedRequest {
-                method: request.method.clone(),
-                path: request.path.clone(),
-                query: request.query.clone(),
-                body: request.body.clone(),
-                authorization: request.headers.get("authorization").cloned(),
-            });
-            match (request.method.as_str(), request.path.as_str()) {
-                ("GET", "/.well-known/openid-configuration") => {
-                    TestResponse::json(200, sample_metadata(&base_url))
+        let server = MockServer::spawn(move |base_url| {
+            move |request| {
+                observed_requests.lock().unwrap().push(ObservedRequest {
+                    method: request.method.clone(),
+                    path: request.path.clone(),
+                    query: request.query.clone(),
+                    body: request.body.clone(),
+                    authorization: request.headers.get("authorization").cloned(),
+                });
+                match (request.method.as_str(), request.path.as_str()) {
+                    ("GET", "/.well-known/openid-configuration") => {
+                        TestResponse::json(200, sample_metadata(&base_url))
+                    }
+                    ("POST", "/oauth/token") => {
+                        let form = form_map(&request.body);
+                        assert_eq!(
+                            form.get("grant_type").map(String::as_str),
+                            Some("refresh_token")
+                        );
+                        assert_eq!(
+                            form.get("client_id").map(String::as_str),
+                            Some(DEFAULT_HOSTED_CLIENT_ID)
+                        );
+                        assert_eq!(
+                            form.get("refresh_token").map(String::as_str),
+                            Some("refresh.old")
+                        );
+                        TestResponse::json(
+                            200,
+                            sample_token_response(&base_url, "access.new", "refresh.new"),
+                        )
+                    }
+                    ("GET", "/v1/whoami") => {
+                        assert_eq!(
+                            request.headers.get("authorization").map(String::as_str),
+                            Some("Bearer access.new")
+                        );
+                        TestResponse::json(
+                            200,
+                            wrapped_cli_report(
+                                "whoami",
+                                sample_whoami(&base_url, "org_demo", "prj_demo"),
+                            ),
+                        )
+                    }
+                    _ => TestResponse::json(404, json!({"error":"not_found"})),
                 }
-                ("POST", "/oauth/token") => {
-                    let form = form_map(&request.body);
-                    assert_eq!(form.get("grant_type").map(String::as_str), Some("refresh_token"));
-                    assert_eq!(form.get("client_id").map(String::as_str), Some(DEFAULT_HOSTED_CLIENT_ID));
-                    assert_eq!(form.get("refresh_token").map(String::as_str), Some("refresh.old"));
-                    TestResponse::json(
-                        200,
-                        sample_token_response(&base_url, "access.new", "refresh.new"),
-                    )
-                }
-                ("GET", "/v1/whoami") => {
-                    assert_eq!(
-                        request.headers.get("authorization").map(String::as_str),
-                        Some("Bearer access.new")
-                    );
-                    TestResponse::json(
-                        200,
-                        wrapped_cli_report(
-                            "whoami",
-                            sample_whoami(&base_url, "org_demo", "prj_demo"),
-                        ),
-                    )
-                }
-                _ => TestResponse::json(404, json!({"error":"not_found"})),
             }
         })?;
-        let expired = sample_session(&server.base_url, "access.old", "refresh.old", now_ms().saturating_sub(1));
+        let expired = sample_session(
+            &server.base_url,
+            "access.old",
+            "refresh.old",
+            now_ms().saturating_sub(1),
+        );
         let _ = store_hosted_session_doc(&expired)?;
         let report = command_whoami(HostedCommonArgs {
             api_base: None,
@@ -17330,9 +17822,15 @@ mod tests {
         assert_eq!(requests[0].path, "/.well-known/openid-configuration");
         assert_eq!(requests[1].method, "POST");
         assert_eq!(requests[1].path, "/oauth/token");
-        assert_eq!(requests[2].authorization.as_deref(), Some("Bearer access.new"));
+        assert_eq!(
+            requests[2].authorization.as_deref(),
+            Some("Bearer access.new")
+        );
         assert_eq!(requests[2].path, "/v1/whoami");
-        assert_eq!(requests[3].authorization.as_deref(), Some("Bearer access.new"));
+        assert_eq!(
+            requests[3].authorization.as_deref(),
+            Some("Bearer access.new")
+        );
         assert_eq!(requests[3].path, "/v1/whoami");
         Ok(())
     }
@@ -17347,132 +17845,131 @@ mod tests {
         let _config = ScopedEnvVar::set("X07LP_CONFIG_DIR", &tmp.path.to_string_lossy());
         let observed = Arc::new(Mutex::new(Vec::<ObservedRequest>::new()));
         let observed_requests = Arc::clone(&observed);
-        let server = MockServer::spawn(move |base_url| move |request| {
-            observed_requests.lock().unwrap().push(ObservedRequest {
-                method: request.method.clone(),
-                path: request.path.clone(),
-                query: request.query.clone(),
-                body: request.body.clone(),
-                authorization: request.headers.get("authorization").cloned(),
-            });
-            match (request.method.as_str(), request.path.as_str()) {
-                ("GET", "/v1/orgs") => TestResponse::json(
-                    200,
-                    wrapped_cli_report(
-                        "org list",
-                        json!({
-                            "schema_version": "lp.org.list.result@0.1.0",
-                            "items": [{
-                                "org_id": "org_demo",
-                                "org_slug": "demo-org",
-                                "display_name": "Demo Org",
-                                "role": "owner",
-                                "selected": true,
-                                "created_unix_ms": now_ms(),
-                                "updated_unix_ms": now_ms()
-                            }, {
-                                "org_id": "org_next",
-                                "org_slug": "next-org",
-                                "display_name": "Next Org",
-                                "role": "owner",
-                                "selected": false,
-                                "created_unix_ms": now_ms(),
-                                "updated_unix_ms": now_ms()
-                            }]
-                        }),
-                    ),
-                ),
-                ("POST", "/v1/orgs") => TestResponse::json(
-                    200,
-                    wrapped_cli_report(
-                        "org create",
-                        json!({
-                            "schema_version": "lp.org.list.result@0.1.0",
-                            "items": []
-                        }),
-                    ),
-                ),
-                ("GET", "/v1/projects") => {
-                    let result = match request.query.get("org_id").map(String::as_str) {
-                        Some("org_next") => json!({
-                            "schema_version": "lp.project.list.result@0.1.0",
-                            "items": [{
-                                "project_id": "prj_next",
-                                "org_id": "org_next",
-                                "project_slug": "next-project",
-                                "display_name": "Next Project",
-                                "selected": false,
-                                "created_unix_ms": now_ms(),
-                                "updated_unix_ms": now_ms()
-                            }]
-                        }),
-                        _ => json!({
-                            "schema_version": "lp.project.list.result@0.1.0",
-                            "items": []
-                        }),
-                    };
-                    TestResponse::json(200, wrapped_cli_report("project list", result))
-                }
-                ("POST", "/v1/projects") => TestResponse::json(
-                    200,
-                    wrapped_cli_report(
-                        "project create",
-                        json!({
-                            "schema_version": "lp.project.list.result@0.1.0",
-                            "items": []
-                        }),
-                    ),
-                ),
-                ("GET", "/v1/environments") => {
-                    let result = match request.query.get("project_id").map(String::as_str) {
-                        Some("prj_next") => json!({
-                            "schema_version": "lp.environment.list.result@0.1.0",
-                            "items": [{
-                                "environment_id": "env_next",
-                                "project_id": "prj_next",
-                                "environment_slug": "next-env",
-                                "display_name": "Next Env",
-                                "selected": false,
-                                "created_unix_ms": now_ms(),
-                                "updated_unix_ms": now_ms()
-                            }]
-                        }),
-                        _ => json!({
-                            "schema_version": "lp.environment.list.result@0.1.0",
-                            "items": []
-                        }),
-                    };
-                    TestResponse::json(200, wrapped_cli_report("env list", result))
-                }
-                ("POST", "/v1/environments") => TestResponse::json(
-                    200,
-                    wrapped_cli_report(
-                        "env create",
-                        json!({
-                            "schema_version": "lp.environment.list.result@0.1.0",
-                            "items": []
-                        }),
-                    ),
-                ),
-                ("POST", "/v1/context/select") => {
-                    let mut next_session = sample_session(
-                        &base_url,
-                        "access.live",
-                        "refresh.live",
-                        now_ms().saturating_add(60_000),
-                    );
-                    next_session["default_context"] = json!({
-                        "org_id": "org_next",
-                        "org_slug": "demo-org",
-                        "project_id": "prj_next",
-                        "project_slug": "demo-project"
-                    });
-                    TestResponse::json(
+        let server = MockServer::spawn(move |base_url| {
+            move |request| {
+                observed_requests.lock().unwrap().push(ObservedRequest {
+                    method: request.method.clone(),
+                    path: request.path.clone(),
+                    query: request.query.clone(),
+                    body: request.body.clone(),
+                    authorization: request.headers.get("authorization").cloned(),
+                });
+                match (request.method.as_str(), request.path.as_str()) {
+                    ("GET", "/v1/orgs") => TestResponse::json(
                         200,
-                        wrapped_cli_report("context use", next_session),
-                    )
+                        wrapped_cli_report(
+                            "org list",
+                            json!({
+                                "schema_version": "lp.org.list.result@0.1.0",
+                                "items": [{
+                                    "org_id": "org_demo",
+                                    "org_slug": "demo-org",
+                                    "display_name": "Demo Org",
+                                    "role": "owner",
+                                    "selected": true,
+                                    "created_unix_ms": now_ms(),
+                                    "updated_unix_ms": now_ms()
+                                }, {
+                                    "org_id": "org_next",
+                                    "org_slug": "next-org",
+                                    "display_name": "Next Org",
+                                    "role": "owner",
+                                    "selected": false,
+                                    "created_unix_ms": now_ms(),
+                                    "updated_unix_ms": now_ms()
+                                }]
+                            }),
+                        ),
+                    ),
+                    ("POST", "/v1/orgs") => TestResponse::json(
+                        200,
+                        wrapped_cli_report(
+                            "org create",
+                            json!({
+                                "schema_version": "lp.org.list.result@0.1.0",
+                                "items": []
+                            }),
+                        ),
+                    ),
+                    ("GET", "/v1/projects") => {
+                        let result = match request.query.get("org_id").map(String::as_str) {
+                            Some("org_next") => json!({
+                                "schema_version": "lp.project.list.result@0.1.0",
+                                "items": [{
+                                    "project_id": "prj_next",
+                                    "org_id": "org_next",
+                                    "project_slug": "next-project",
+                                    "display_name": "Next Project",
+                                    "selected": false,
+                                    "created_unix_ms": now_ms(),
+                                    "updated_unix_ms": now_ms()
+                                }]
+                            }),
+                            _ => json!({
+                                "schema_version": "lp.project.list.result@0.1.0",
+                                "items": []
+                            }),
+                        };
+                        TestResponse::json(200, wrapped_cli_report("project list", result))
+                    }
+                    ("POST", "/v1/projects") => TestResponse::json(
+                        200,
+                        wrapped_cli_report(
+                            "project create",
+                            json!({
+                                "schema_version": "lp.project.list.result@0.1.0",
+                                "items": []
+                            }),
+                        ),
+                    ),
+                    ("GET", "/v1/environments") => {
+                        let result = match request.query.get("project_id").map(String::as_str) {
+                            Some("prj_next") => json!({
+                                "schema_version": "lp.environment.list.result@0.1.0",
+                                "items": [{
+                                    "environment_id": "env_next",
+                                    "project_id": "prj_next",
+                                    "environment_slug": "next-env",
+                                    "display_name": "Next Env",
+                                    "selected": false,
+                                    "created_unix_ms": now_ms(),
+                                    "updated_unix_ms": now_ms()
+                                }]
+                            }),
+                            _ => json!({
+                                "schema_version": "lp.environment.list.result@0.1.0",
+                                "items": []
+                            }),
+                        };
+                        TestResponse::json(200, wrapped_cli_report("env list", result))
+                    }
+                    ("POST", "/v1/environments") => TestResponse::json(
+                        200,
+                        wrapped_cli_report(
+                            "env create",
+                            json!({
+                                "schema_version": "lp.environment.list.result@0.1.0",
+                                "items": []
+                            }),
+                        ),
+                    ),
+                    ("POST", "/v1/context/select") => {
+                        let mut next_session = sample_session(
+                            &base_url,
+                            "access.live",
+                            "refresh.live",
+                            now_ms().saturating_add(60_000),
+                        );
+                        next_session["default_context"] = json!({
+                            "org_id": "org_next",
+                            "org_slug": "demo-org",
+                            "project_id": "prj_next",
+                            "project_slug": "demo-project"
+                        });
+                        TestResponse::json(200, wrapped_cli_report("context use", next_session))
+                    }
+                    _ => TestResponse::json(404, json!({"error":"not_found"})),
                 }
-                _ => TestResponse::json(404, json!({"error":"not_found"})),
             }
         })?;
         let session = sample_session(
@@ -17566,7 +18063,10 @@ mod tests {
             Some("org_demo")
         );
         let project_create: Value = serde_json::from_slice(&requests[3].body)?;
-        assert_eq!(project_create.get("org_id").and_then(Value::as_str), Some("org_demo"));
+        assert_eq!(
+            project_create.get("org_id").and_then(Value::as_str),
+            Some("org_demo")
+        );
         assert_eq!(
             project_create.get("slug").and_then(Value::as_str),
             Some("demo-project")
@@ -17594,7 +18094,10 @@ mod tests {
             Some("prj_next")
         );
         let context_select: Value = serde_json::from_slice(&requests[9].body)?;
-        assert_eq!(context_select.get("org_id").and_then(Value::as_str), Some("org_next"));
+        assert_eq!(
+            context_select.get("org_id").and_then(Value::as_str),
+            Some("org_next")
+        );
         assert_eq!(
             context_select.get("project_id").and_then(Value::as_str),
             Some("prj_next")
@@ -17603,7 +18106,10 @@ mod tests {
             context_select.get("environment_id").and_then(Value::as_str),
             Some("env_next")
         );
-        assert_eq!(requests[9].authorization.as_deref(), Some("Bearer access.live"));
+        assert_eq!(
+            requests[9].authorization.as_deref(),
+            Some("Bearer access.live")
+        );
         let updated = load_hosted_session_doc()?;
         assert_eq!(
             get_str(&updated, &["default_context", "org_id"]).as_deref(),
@@ -17612,6 +18118,412 @@ mod tests {
         assert_eq!(
             get_str(&updated, &["default_context", "project_id"]).as_deref(),
             Some("prj_next")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn deploy_status_stays_local_without_explicit_hosted_selector() -> Result<()> {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = TempDir::new("deploy-status-local")?;
+        let _config = ScopedEnvVar::set("X07LP_CONFIG_DIR", &tmp.path.to_string_lossy());
+        let session = sample_session(
+            "http://127.0.0.1:39001",
+            "access.live",
+            "refresh.live",
+            now_ms().saturating_add(60_000),
+        );
+        let _ = store_hosted_session_doc(&session)?;
+        let state_dir = tmp.path.join("state");
+        let _ = write_json(
+            &exec_path(&state_dir, "lpexec_local"),
+            &json!({
+                "exec_id": "lpexec_local",
+                "run_id": "lprun_local",
+                "status": "accepted"
+            }),
+        )?;
+        let report = command_status(DeploymentStatusArgs {
+            deployment_id: "lpexec_local".to_string(),
+            target: None,
+            hosted: hosted_deploy_args(false),
+            common: CommonStateArgs {
+                state_dir: Some(state_dir.to_string_lossy().into_owned()),
+                now_unix_ms: None,
+                json: true,
+            },
+        })?;
+        assert_eq!(report.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            get_str(&report, &["result", "deployment", "exec_id"]).as_deref(),
+            Some("lpexec_local")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hosted_deploy_commands_shape_requests() -> Result<()> {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = TempDir::new("hosted-deploy-commands")?;
+        let _config = ScopedEnvVar::set("X07LP_CONFIG_DIR", &tmp.path.to_string_lossy());
+        let observed = Arc::new(Mutex::new(Vec::<ObservedRequest>::new()));
+        let observed_requests = Arc::clone(&observed);
+        let server = MockServer::spawn(move |_base_url| {
+            move |request| {
+                observed_requests.lock().unwrap().push(ObservedRequest {
+                    method: request.method.clone(),
+                    path: request.path.clone(),
+                    query: request.query.clone(),
+                    body: request.body.clone(),
+                    authorization: request.headers.get("authorization").cloned(),
+                });
+                match (request.method.as_str(), request.path.as_str()) {
+                    ("POST", "/v1/deploy/run") => TestResponse::json(
+                        200,
+                        wrapped_cli_report(
+                            "deploy run",
+                            json!({
+                                "schema_version": "lp.deploy.remote.result@0.1.0",
+                                "op": "run",
+                                "run_id": "lprun_remote",
+                                "deployment_id": "lpexec_remote"
+                            }),
+                        ),
+                    ),
+                    ("GET", "/v1/deployments/lpexec_remote") => TestResponse::json(
+                        200,
+                        wrapped_cli_report(
+                            "deploy status",
+                            json!({
+                                "deployment": {
+                                    "exec_id": "lpexec_remote",
+                                    "run_id": "lprun_remote"
+                                }
+                            }),
+                        ),
+                    ),
+                    ("GET", "/v1/deployments/lpexec_remote/query") => TestResponse::json(
+                        200,
+                        wrapped_cli_report(
+                            "deploy query",
+                            json!({
+                                "schema_version": "lp.deploy.query.result@0.1.0",
+                                "view": request.query.get("view").cloned().unwrap_or_default()
+                            }),
+                        ),
+                    ),
+                    ("POST", "/v1/deployments/lpexec_remote/pause") => TestResponse::json(
+                        200,
+                        wrapped_cli_report("deploy pause", json!({"op": "pause", "ok": true})),
+                    ),
+                    ("POST", "/v1/deployments/lpexec_remote/rerun") => TestResponse::json(
+                        200,
+                        wrapped_cli_report("deploy rerun", json!({"op": "rerun", "ok": true})),
+                    ),
+                    ("POST", "/v1/deployments/lpexec_remote/rollback") => TestResponse::json(
+                        200,
+                        wrapped_cli_report(
+                            "deploy rollback",
+                            json!({"op": "rollback", "ok": true}),
+                        ),
+                    ),
+                    ("POST", "/v1/deployments/lpexec_remote/stop") => TestResponse::json(
+                        200,
+                        wrapped_cli_report("deploy stop", json!({"op": "stop", "ok": true})),
+                    ),
+                    _ => TestResponse::json(404, json!({"error":"not_found"})),
+                }
+            }
+        })?;
+        let session = sample_session(
+            &server.base_url,
+            "access.live",
+            "refresh.live",
+            now_ms().saturating_add(60_000),
+        );
+        let _ = store_hosted_session_doc(&session)?;
+
+        let _ = command_run(DeployRunArgs {
+            deployment_id: "lpexec_remote".to_string(),
+            accepted_run: Some("lprun_accept".to_string()),
+            plan: None,
+            metrics_dir: None,
+            pause_scale: Some(2.5),
+            target: None,
+            fixture: Some("remote_promote".to_string()),
+            hosted: hosted_deploy_args(true),
+            common: CommonStateArgs {
+                state_dir: None,
+                now_unix_ms: None,
+                json: true,
+            },
+        })?;
+        let _ = command_status(DeploymentStatusArgs {
+            deployment_id: "lpexec_remote".to_string(),
+            target: None,
+            hosted: hosted_deploy_args(true),
+            common: CommonStateArgs {
+                state_dir: None,
+                now_unix_ms: None,
+                json: true,
+            },
+        })?;
+        let _ = command_query(DeployQueryArgs {
+            deployment_id: Some("lpexec_remote".to_string()),
+            app_id: None,
+            env: None,
+            view: "timeline".to_string(),
+            limit: Some(7),
+            latest: false,
+            rebuild_index: true,
+            target: None,
+            hosted: hosted_deploy_args(true),
+            common: CommonStateArgs {
+                state_dir: None,
+                now_unix_ms: None,
+                json: true,
+            },
+        })?;
+        let _ = command_pause(DeploymentControlArgs {
+            deployment_id: "lpexec_remote".to_string(),
+            reason: "pause for inspection".to_string(),
+            target: None,
+            hosted: hosted_deploy_args(true),
+            common: CommonStateArgs {
+                state_dir: None,
+                now_unix_ms: None,
+                json: true,
+            },
+        })?;
+        let _ = command_rerun(DeploymentRerunArgs {
+            deployment_id: "lpexec_remote".to_string(),
+            from_step: Some(3),
+            reason: "rerun the tail".to_string(),
+            target: None,
+            hosted: hosted_deploy_args(true),
+            common: CommonStateArgs {
+                state_dir: None,
+                now_unix_ms: None,
+                json: true,
+            },
+        })?;
+        let _ = command_rollback(DeploymentControlArgs {
+            deployment_id: "lpexec_remote".to_string(),
+            reason: "rollback now".to_string(),
+            target: None,
+            hosted: hosted_deploy_args(true),
+            common: CommonStateArgs {
+                state_dir: None,
+                now_unix_ms: None,
+                json: true,
+            },
+        })?;
+        let _ = command_stop(DeploymentControlArgs {
+            deployment_id: "lpexec_remote".to_string(),
+            reason: "stop now".to_string(),
+            target: None,
+            hosted: hosted_deploy_args(true),
+            common: CommonStateArgs {
+                state_dir: None,
+                now_unix_ms: None,
+                json: true,
+            },
+        })?;
+
+        let requests = observed.lock().unwrap();
+        assert_eq!(requests.len(), 7);
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/v1/deploy/run");
+        assert_eq!(
+            requests[0].authorization.as_deref(),
+            Some("Bearer access.live")
+        );
+        let run_body: Value = serde_json::from_slice(&requests[0].body)?;
+        assert_eq!(
+            run_body.get("run_id").and_then(Value::as_str),
+            Some("lprun_accept")
+        );
+        assert_eq!(
+            run_body.get("deployment_id").and_then(Value::as_str),
+            Some("lpexec_remote")
+        );
+        assert_eq!(
+            run_body.get("fixture").and_then(Value::as_str),
+            Some("remote_promote")
+        );
+        assert_eq!(
+            run_body.get("pause_scale").and_then(Value::as_f64),
+            Some(2.5)
+        );
+        assert_eq!(requests[1].method, "GET");
+        assert_eq!(requests[1].path, "/v1/deployments/lpexec_remote");
+        assert_eq!(requests[2].method, "GET");
+        assert_eq!(requests[2].path, "/v1/deployments/lpexec_remote/query");
+        assert_eq!(
+            requests[2].query.get("view").map(String::as_str),
+            Some("timeline")
+        );
+        assert_eq!(
+            requests[2].query.get("limit").map(String::as_str),
+            Some("7")
+        );
+        assert_eq!(
+            requests[2].query.get("rebuild_index").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(requests[3].path, "/v1/deployments/lpexec_remote/pause");
+        let pause_body: Value = serde_json::from_slice(&requests[3].body)?;
+        assert_eq!(
+            pause_body.get("reason").and_then(Value::as_str),
+            Some("pause for inspection")
+        );
+        assert_eq!(requests[4].path, "/v1/deployments/lpexec_remote/rerun");
+        let rerun_body: Value = serde_json::from_slice(&requests[4].body)?;
+        assert_eq!(
+            rerun_body.get("reason").and_then(Value::as_str),
+            Some("rerun the tail")
+        );
+        assert_eq!(rerun_body.get("from_step").and_then(Value::as_u64), Some(3));
+        assert_eq!(requests[5].path, "/v1/deployments/lpexec_remote/rollback");
+        assert_eq!(requests[6].path, "/v1/deployments/lpexec_remote/stop");
+        Ok(())
+    }
+
+    #[test]
+    fn hosted_accept_pushes_missing_cas_before_posting_deploy_request() -> Result<()> {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = TempDir::new("hosted-accept")?;
+        let state_dir = tmp.path.join("state");
+        let blob = b"{\"demo\":true}";
+        let artifact = cas_put(&state_dir, "app.pack.json", "application/json", blob)?;
+        let sha =
+            get_str(&artifact, &["digest", "sha256"]).ok_or_else(|| anyhow!("missing sha"))?;
+        let mut digests = BTreeSet::new();
+        let _ = digests.insert(sha.clone());
+        let observed = Arc::new(Mutex::new(Vec::<ObservedRequest>::new()));
+        let observed_requests = Arc::clone(&observed);
+        let upload_sha = sha.clone();
+        let server = MockServer::spawn(move |_base_url| {
+            move |request| {
+                observed_requests.lock().unwrap().push(ObservedRequest {
+                    method: request.method.clone(),
+                    path: request.path.clone(),
+                    query: request.query.clone(),
+                    body: request.body.clone(),
+                    authorization: request.headers.get("authorization").cloned(),
+                });
+                match (request.method.as_str(), request.path.as_str()) {
+                    ("POST", "/v1/cas/check") => {
+                        let body: Value = serde_json::from_slice(&request.body).unwrap();
+                        let digests = body
+                            .get("digests")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default();
+                        assert_eq!(digests, vec![json!(upload_sha.clone())]);
+                        TestResponse::json(200, json!({ "missing": [upload_sha.clone()] }))
+                    }
+                    ("PUT", path) if path == format!("/v1/cas/objects/sha256/{upload_sha}") => {
+                        TestResponse::json(
+                            200,
+                            json!({"ok": true, "artifact": {"sha256": upload_sha.clone()}}),
+                        )
+                    }
+                    ("POST", "/v1/deploy/accept") => TestResponse::json(
+                        200,
+                        wrapped_cli_report(
+                            "deploy accept",
+                            json!({
+                                "run_id": "lprun_hosted",
+                                "exec_id": "lpexec_hosted",
+                                "deployment_id": "lpexec_hosted",
+                                "decision_id": "lpdec_hosted"
+                            }),
+                        ),
+                    ),
+                    _ => TestResponse::json(404, json!({"error":"not_found"})),
+                }
+            }
+        })?;
+        let session = sample_session(
+            &server.base_url,
+            "access.live",
+            "refresh.live",
+            now_ms().saturating_add(60_000),
+        );
+        let prepared = PreparedDeployAccept {
+            run_id: "lprun_local".to_string(),
+            exec_id: "lpexec_local".to_string(),
+            run_doc: json!({
+                "run_id": "lprun_local",
+                "inputs": {
+                    "pack": {
+                        "store_uri": format!("sha256:{sha}")
+                    }
+                }
+            }),
+            exec_doc: json!({
+                "exec_id": "lpexec_local",
+                "run_id": "lprun_local",
+                "artifacts": [{
+                    "sha256": sha
+                }]
+            }),
+            decision_doc: json!({
+                "decision_id": "lpdec_local",
+                "exec_id": "lpexec_local",
+                "artifacts": [{
+                    "sha256": sha
+                }]
+            }),
+            change_doc: None,
+            ops_profile_doc: None,
+            capabilities_doc: None,
+            required_secrets: Vec::new(),
+            manifest_digest: digest_value(blob),
+            digests,
+        };
+        let report =
+            hosted_accept_prepared(&session, &state_dir, &prepared, Some("remote_promote"))?;
+        assert_eq!(report.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            get_str(&report, &["result", "deployment_id"]).as_deref(),
+            Some("lpexec_hosted")
+        );
+        assert_eq!(
+            get_path(&report, &["result", "push", "uploaded_count"]).and_then(Value::as_u64),
+            Some(1)
+        );
+        let requests = observed.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].path, "/v1/cas/check");
+        assert_eq!(requests[1].path, format!("/v1/cas/objects/sha256/{sha}"));
+        assert_eq!(
+            requests[1].authorization.as_deref(),
+            Some("Bearer access.live")
+        );
+        assert_eq!(requests[1].body, blob);
+        assert_eq!(requests[2].path, "/v1/deploy/accept");
+        let accept_body: Value = serde_json::from_slice(&requests[2].body)?;
+        assert_eq!(
+            accept_body.get("fixture").and_then(Value::as_str),
+            Some("remote_promote")
+        );
+        assert_eq!(
+            accept_body
+                .get("push")
+                .and_then(|value| value.get("uploaded_count"))
+                .and_then(Value::as_u64),
+            Some(1)
         );
         Ok(())
     }

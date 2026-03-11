@@ -18,7 +18,7 @@ Current goals:
 
 Public surface:
 - public `lp.*` contracts consumed from `contracts/spec/schemas/` with `x07-platform-contracts` as the authoritative source
-- `x07lp` CLI for local `change`, `deploy`, `target`, `adapter`, `incident`, `regress`, `app`, `device`, `platform`, `ui`, and `schema` workflows plus hosted `login`, `whoami`, `logout`, `org`, `project`, `env`, and `context` flows
+- `x07lp` CLI for local `change`, `deploy`, `target`, `adapter`, `incident`, `regress`, `app`, `device`, `platform`, `ui`, and `schema` workflows plus hosted `login`, `whoami`, `logout`, `org`, `project`, `env`, `context`, and explicit `deploy --hosted` flows
 - local content-addressed state under `.x07lp/` or `--state-dir`
 - hosted session state under `~/.config/x07lp/session.json` (or `X07LP_CONFIG_DIR` / `XDG_CONFIG_HOME`)
 - local runtime, routing, signed control actions, incident capture, regression generation, and query/index support for `x07.app.pack@0.1.0`
@@ -55,7 +55,20 @@ x07 run -- org list --json
 x07 run -- project create --org org_demo --name "Demo Project" --slug demo-project --json
 x07 run -- env create --project prj_demo --name Production --slug production --json
 x07 run -- context use --org org_demo --project prj_demo --env env_demo --json
+x07 run -- deploy accept --hosted --pack-dir path/to/pack --pack-manifest app.pack.json --json
+x07 run -- deploy run --hosted --deployment-id lpexec_example --json
+x07 run -- deploy status --hosted --deployment-id lpexec_example --json
+x07 run -- deploy query --hosted --deployment-id lpexec_example --view summary --json
+x07 run -- deploy pause --hosted --deployment-id lpexec_example --reason "pause for inspection" --json
+x07 run -- deploy rerun --hosted --deployment-id lpexec_example --reason "rerun tail" --from-step 3 --json
+x07 run -- deploy rollback --hosted --deployment-id lpexec_example --reason "rollback now" --json
+x07 run -- deploy stop --hosted --deployment-id lpexec_example --reason "stop now" --json
 ```
+
+Hosted deploy note:
+- Pass `--hosted` explicitly on deploy commands to use the saved hosted session and current hosted context.
+- `--target` still selects the OSS self-hosted remote path, and omitting both `--hosted` and `--target` keeps deploy commands local.
+- `deploy status --hosted` uses `GET /v1/deployments/:id`; there is no hosted `/status` suffix.
 
 Device distribution note:
 - `x07lp device release-create`, `release-validate`, `release-run`, `release-query`, `release-observe`, `release-pause`, `release-resume`, `release-halt`, `release-stop`, `release-complete`, `release-rerun`, and `release-rollback` drive the shared device-release engine.
