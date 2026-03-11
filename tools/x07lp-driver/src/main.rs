@@ -2079,13 +2079,58 @@ fn run_capture(argv: &[String], cwd: Option<&Path>) -> Result<(i32, Vec<u8>, Vec
 }
 
 #[derive(Debug, Clone)]
-struct WasmToolCommand {
+struct ExternalToolCommand {
     argv0: String,
     prefix: Vec<String>,
     display_name: String,
 }
 
-fn resolve_wasm_tool() -> Option<WasmToolCommand> {
+fn resolve_core_tool() -> Option<ExternalToolCommand> {
+    if let Ok(explicit) = std::env::var("X07_BIN")
+        && Path::new(&explicit).is_file()
+    {
+        return Some(ExternalToolCommand {
+            argv0: explicit,
+            prefix: Vec::new(),
+            display_name: "x07".to_string(),
+        });
+    }
+    let workspace_candidates = [
+        root_dir()
+            .join("../x07/target/debug/x07")
+            .to_string_lossy()
+            .into_owned(),
+        root_dir()
+            .join("../x07/target/release/x07")
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    for candidate in workspace_candidates {
+        if Path::new(&candidate).is_file() {
+            return Some(ExternalToolCommand {
+                argv0: candidate,
+                prefix: Vec::new(),
+                display_name: "x07".to_string(),
+            });
+        }
+    }
+    which("x07").map(|x07| ExternalToolCommand {
+        argv0: x07,
+        prefix: Vec::new(),
+        display_name: "x07".to_string(),
+    })
+}
+
+fn resolve_wasm_tool() -> Option<ExternalToolCommand> {
+    if let Ok(explicit) = std::env::var("X07_WASM_BIN")
+        && Path::new(&explicit).is_file()
+    {
+        return Some(ExternalToolCommand {
+            argv0: explicit,
+            prefix: Vec::new(),
+            display_name: "x07 wasm".to_string(),
+        });
+    }
     let workspace_candidates = [
         root_dir()
             .join("../x07-wasm-backend/target/debug/x07-wasm")
@@ -2098,7 +2143,7 @@ fn resolve_wasm_tool() -> Option<WasmToolCommand> {
     ];
     for candidate in workspace_candidates {
         if Path::new(&candidate).is_file() {
-            return Some(WasmToolCommand {
+            return Some(ExternalToolCommand {
                 argv0: candidate,
                 prefix: Vec::new(),
                 display_name: "x07 wasm".to_string(),
@@ -2106,14 +2151,14 @@ fn resolve_wasm_tool() -> Option<WasmToolCommand> {
         }
     }
     if let Some(x07_wasm) = which("x07-wasm") {
-        return Some(WasmToolCommand {
+        return Some(ExternalToolCommand {
             argv0: x07_wasm,
             prefix: Vec::new(),
             display_name: "x07 wasm".to_string(),
         });
     }
-    if let Some(x07) = which("x07") {
-        return Some(WasmToolCommand {
+    if let Some(x07) = resolve_core_tool().map(|tool| tool.argv0) {
+        return Some(ExternalToolCommand {
             argv0: x07,
             prefix: vec!["wasm".to_string()],
             display_name: "x07 wasm".to_string(),
@@ -2125,7 +2170,7 @@ fn resolve_wasm_tool() -> Option<WasmToolCommand> {
 fn run_wasm_tool_capture(
     args: &[String],
     cwd: Option<&Path>,
-) -> Result<(WasmToolCommand, i32, Vec<u8>, Vec<u8>)> {
+) -> Result<(ExternalToolCommand, i32, Vec<u8>, Vec<u8>)> {
     let tool = resolve_wasm_tool()
         .ok_or_else(|| anyhow!("missing wasm toolchain: expected `x07 wasm` or `x07-wasm`"))?;
     let mut argv = vec![tool.argv0.clone()];
@@ -7638,8 +7683,11 @@ fn run_local_accept_stage(args: &DeployAcceptArgs, state_dir: &Path) -> Result<V
         normalize_pack_inputs(&args.pack_manifest, args.pack_dir.as_deref())?;
     let pack_dir_arg = x07_input_path_arg(&pack_dir_path)?;
     let state_dir_arg = x07_state_dir_arg(state_dir)?;
-    let mut argv = vec![
-        "x07".to_string(),
+    let core_tool =
+        resolve_core_tool().ok_or_else(|| anyhow!("missing core toolchain: expected `x07`"))?;
+    let mut argv = vec![core_tool.argv0.clone()];
+    argv.extend(core_tool.prefix.clone());
+    argv.extend([
         "run".to_string(),
         "--".to_string(),
         "deploy".to_string(),
@@ -7651,7 +7699,7 @@ fn run_local_accept_stage(args: &DeployAcceptArgs, state_dir: &Path) -> Result<V
         "--state-dir".to_string(),
         state_dir_arg,
         "--json".to_string(),
-    ];
+    ]);
     if let Some(change) = args.change.as_ref().filter(|value| !value.is_empty()) {
         argv.push("--change".to_string());
         argv.push(x07_input_path_arg(&repo_path(change))?);
