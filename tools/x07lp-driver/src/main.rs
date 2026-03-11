@@ -3236,6 +3236,29 @@ fn loopback_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
+fn local_remote_nats_monitor_host(base_url: &str) -> Option<String> {
+    url_host_port(base_url, 80)
+        .filter(|(host, _)| loopback_host(host))
+        .map(|(host, _)| {
+            url_host_port(&remote_nats_url(), 4222)
+                .map(|(nats_host, _)| nats_host)
+                .unwrap_or(host)
+        })
+}
+
+fn local_remote_runtime_probe_host(base_url: &str) -> Option<String> {
+    url_host_port(base_url, 80)
+        .filter(|(host, _)| loopback_host(host))
+        .map(|(host, _)| {
+            let runtime_host = remote_runtime_host();
+            if runtime_host.trim().is_empty() {
+                host
+            } else {
+                runtime_host
+            }
+        })
+}
+
 fn tcp_probe(host: &str, port: u16, timeout: Duration) -> Result<()> {
     let addrs = format!("{host}:{port}")
         .to_socket_addrs()
@@ -3505,8 +3528,8 @@ fn run_remote_runtime_probe(exec_id: &str, work_dir: &Path, remote: &Value) -> R
         }
     }
 
-    if let Some((host, _)) = url_host_port(&base_url, 80).filter(|(host, _)| loopback_host(host)) {
-        match http_probe(&format!("http://{host}:8222/varz"), &[200]) {
+    if let Some(nats_host) = local_remote_nats_monitor_host(&base_url) {
+        match http_probe(&format!("http://{nats_host}:8222/varz"), &[200]) {
             Ok(_) => checks.push(remote_probe_check(
                 "nats_monitor",
                 true,
@@ -3522,7 +3545,9 @@ fn run_remote_runtime_probe(exec_id: &str, work_dir: &Path, remote: &Value) -> R
                 checks.push(remote_probe_check("nats_monitor", false, &err.to_string()));
             }
         }
-        match tcp_probe(&host, 4000, timeout) {
+    }
+    if let Some(runtime_host) = local_remote_runtime_probe_host(&base_url) {
+        match tcp_probe(&runtime_host, 4000, timeout) {
             Ok(()) => checks.push(remote_probe_check(
                 "wasmcloud_host_port",
                 true,
@@ -17693,6 +17718,45 @@ mod tests {
             Some("http://wasmcloud:26007")
         );
         Ok(())
+    }
+
+    #[test]
+    fn local_remote_nats_monitor_host_prefers_remote_nats_target() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("lock env");
+        let _nats = ScopedEnvVar::set("X07LP_REMOTE_NATS_URL", "nats://nats:4222");
+        assert_eq!(
+            local_remote_nats_monitor_host("http://127.0.0.1:8081").as_deref(),
+            Some("nats")
+        );
+    }
+
+    #[test]
+    fn local_remote_nats_monitor_host_skips_non_local_control_plane() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("lock env");
+        let _nats = ScopedEnvVar::set("X07LP_REMOTE_NATS_URL", "nats://nats:4222");
+        assert_eq!(
+            local_remote_nats_monitor_host("https://cloud.x07.io"),
+            None
+        );
+    }
+
+    #[test]
+    fn local_remote_runtime_probe_host_prefers_runtime_env() {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("lock env");
+        let _host = ScopedEnvVar::set("X07LP_REMOTE_RUNTIME_HOST", "wasmcloud");
+        assert_eq!(
+            local_remote_runtime_probe_host("http://127.0.0.1:8081").as_deref(),
+            Some("wasmcloud")
+        );
     }
 
     #[derive(Debug, Clone)]
