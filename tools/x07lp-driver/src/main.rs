@@ -3018,6 +3018,9 @@ fn persist_remote_provider_deployment(
         .and_then(Value::as_str)
         .unwrap_or(DEFAULT_REMOTE_LATTICE)
         .to_string();
+    let existing_probe_base_url = get_path(&Value::Object(remote.clone()), &["routing", "probe_base_url"])
+        .cloned()
+        .unwrap_or(Value::Null);
     remote.insert(
         "publish".to_string(),
         json!({
@@ -3053,6 +3056,7 @@ fn persist_remote_provider_deployment(
         "routing".to_string(),
         json!({
             "public_base_url": deployment.public_listener,
+            "probe_base_url": existing_probe_base_url,
             "listener_id": format!("edge-http-v1:{exec_id}"),
             "router_state": remote_router_state_path(state_dir, &exec_id).to_string_lossy(),
             "api_prefix": deployment.api_prefix,
@@ -17621,6 +17625,74 @@ mod tests {
             .expect("lock env");
         let _host = ScopedEnvVar::set("X07LP_REMOTE_RUNTIME_HOST", "wasmcloud");
         assert_eq!(remote_runtime_host(), "wasmcloud");
+    }
+
+    #[test]
+    fn persist_remote_provider_deployment_preserves_probe_base_url() -> Result<()> {
+        let tmp = TempDir::new("preserve-probe-base-url")?;
+        let mut exec_doc = json!({
+            "exec_id": "lpexec_test",
+            "meta": {
+                "target": {
+                    "app_id": "app_min",
+                    "environment": "staging"
+                },
+                "ext": {
+                    "remote": {
+                        "runtime": {
+                            "lattice_id": "default"
+                        },
+                        "routing": {
+                            "probe_base_url": "http://127.0.0.1:8081/r/lpexec_test"
+                        }
+                    }
+                }
+            }
+        });
+        let deployment = RemoteProviderDeployment {
+            public_listener: "http://127.0.0.1:18081/r/lpexec_test".to_string(),
+            api_prefix: "/api".to_string(),
+            component_ref: "gateway:5443/staging/app_min@sha256:abc".to_string(),
+            registry: "gateway:5443".to_string(),
+            namespace: "staging".to_string(),
+            repository: "app_min".to_string(),
+            component_digest: json!({"sha256":"abc","bytes_len":123}),
+            stable: RemoteSlotDeployment {
+                app_name: "lp-lpexec_test-stable".to_string(),
+                bind_addr: "wasmcloud:26007".to_string(),
+                upstream_url: "http://wasmcloud:26007".to_string(),
+                work_dir: tmp.path.join("stable"),
+                manifest_path: tmp.path.join("stable/wadm.manifest.json"),
+                manifest_digest: json!({"sha256":"stable","bytes_len":456}),
+                instance_ref: "wasmcloud://default/lp-lpexec_test-stable".to_string(),
+            },
+            candidate: RemoteSlotDeployment {
+                app_name: "lp-lpexec_test-candidate".to_string(),
+                bind_addr: "wasmcloud:26008".to_string(),
+                upstream_url: "http://wasmcloud:26008".to_string(),
+                work_dir: tmp.path.join("candidate"),
+                manifest_path: tmp.path.join("candidate/wadm.manifest.json"),
+                manifest_digest: json!({"sha256":"candidate","bytes_len":789}),
+                instance_ref: "wasmcloud://default/lp-lpexec_test-candidate".to_string(),
+            },
+            host_ids: vec!["host_demo".to_string()],
+        };
+
+        persist_remote_provider_deployment(&tmp.path, &mut exec_doc, &deployment, 42)?;
+
+        assert_eq!(
+            get_str(&exec_doc, &["meta", "ext", "remote", "routing", "probe_base_url"]).as_deref(),
+            Some("http://127.0.0.1:8081/r/lpexec_test")
+        );
+        assert_eq!(
+            get_str(&exec_doc, &["meta", "ext", "remote", "routing", "candidate_upstream"]).as_deref(),
+            Some("http://wasmcloud:26008")
+        );
+        assert_eq!(
+            get_str(&exec_doc, &["meta", "ext", "remote", "routing", "stable_upstream"]).as_deref(),
+            Some("http://wasmcloud:26007")
+        );
+        Ok(())
     }
 
     #[derive(Debug, Clone)]
