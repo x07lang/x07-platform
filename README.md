@@ -171,8 +171,6 @@ The Command Center is a dark-themed SPA served by `x07lpd` at the address you sp
 
 **Screenshots:**
 
-The Command Center uses a dark cybersecurity-inspired design with purple accent gradients, real-time status pills, metric cards, and control action buttons.
-
 ![Command Center - Device Releases](/docs/screenshots/device-releases.png)
 ![Command Center - Applications](/docs/screenshots/apps.png)
 ![Command Center - Device Release Detail](/docs/screenshots/device-release-detail.png)
