@@ -10,7 +10,7 @@
     "run_id": "__ANY__"
   },
   "result": {
-    "schema_version": "lp.incident.query.result@0.1.0",
+    "schema_version": "lp.incident.query.result@0.2.0",
     "view": "full",
     "resolution": {
       "by": "incident_id",
@@ -40,7 +40,7 @@
     "regression_id": "__ANY__",
     "signature_status": "__ANY__",
     "bundle": {
-      "kind": "lp.incident.bundle@0.1.0",
+      "kind": "lp.incident.bundle@0.2.0",
       "digest": {
         "sha256": "__ANY__",
         "bytes_len": "__ANY__"
@@ -48,7 +48,7 @@
       "store_uri": "__ANY__"
     },
     "meta": {
-      "schema_version": "lp.incident.bundle.meta.local@0.1.0",
+      "schema_version": "lp.incident.bundle.meta.local@0.2.0",
       "classification": "http_5xx",
       "source": "router",
       "incident_status": "open",

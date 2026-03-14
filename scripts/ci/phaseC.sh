@@ -82,9 +82,25 @@ run_x07lp() {
   local report_path="$1"
   local out_path="$2"
   shift 2
+  local argv=("$@")
+  local has_target=0
+  local arg
+  if [ "${#argv[@]}" -gt 0 ] && [ "${argv[0]}" != "schema" ] && {
+    [ "${argv[0]}" = "deploy" ] || [ "${argv[0]}" = "incident" ] || [ "${argv[0]}" = "regress" ];
+  }; then
+    for arg in "${argv[@]}"; do
+      if [ "$arg" = "--target" ]; then
+        has_target=1
+        break
+      fi
+    done
+    if [ "$has_target" -eq 0 ]; then
+      argv+=(--target __local__)
+    fi
+  fi
   (
     cd "$ROOT_DIR"
-    x07 run -- "$@" >"$report_path"
+    x07 run -- "${argv[@]}" >"$report_path"
   )
   decode_solve_output_b64 "$report_path" "$out_path"
 }

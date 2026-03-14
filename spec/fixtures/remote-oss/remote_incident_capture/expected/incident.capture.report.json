@@ -4,7 +4,7 @@
   "ok": true,
   "exit_code": 0,
   "result": {
-    "schema_version": "lp.incident.query.result@0.1.0",
+    "schema_version": "lp.incident.query.result@0.2.0",
     "view": "full",
     "resolution": {
       "by": "incident_id",
@@ -29,7 +29,7 @@
     "regression_id": null,
     "signature_status": "__ANY__",
     "bundle": {
-      "kind": "lp.incident.bundle@0.1.0",
+      "kind": "lp.incident.bundle@0.2.0",
       "digest": {
         "sha256": "__ANY__",
         "bytes_len": "__ANY__"

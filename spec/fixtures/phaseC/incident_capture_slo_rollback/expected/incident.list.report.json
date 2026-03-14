@@ -10,7 +10,7 @@
     "run_id": "__ANY__"
   },
   "result": {
-    "schema_version": "lp.incident.query.result@0.1.0",
+    "schema_version": "lp.incident.query.result@0.2.0",
     "view": "list",
     "resolution": {
       "by": "deployment_id",

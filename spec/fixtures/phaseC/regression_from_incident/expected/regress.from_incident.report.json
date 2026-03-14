@@ -10,7 +10,7 @@
     "run_id": "__ANY__"
   },
   "result": {
-    "schema_version": "lp.regression.run.result@0.1.0",
+    "schema_version": "lp.regression.run.result@0.2.0",
     "incident_id": "__ANY__",
     "regression_id": "__ANY__",
     "ok": true,

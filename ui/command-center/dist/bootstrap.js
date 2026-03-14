@@ -311,8 +311,11 @@ function actionButton(label, path, body, options = {}) {
   return button;
 }
 
-function sectionTitle(title, subtitle) {
+function sectionTitle(title, subtitle, eyebrow = null) {
   const box = el("div", "section-head");
+  if (eyebrow) {
+    append(box, el("p", "section-kicker", eyebrow));
+  }
   append(box, el("h2", null, title));
   if (subtitle) {
     append(box, el("p", "muted", subtitle));
@@ -485,6 +488,29 @@ function detailsBlock(summaryText, ...children) {
   const details = el("details", "details-block");
   append(details, el("summary", null, summaryText), ...children);
   return details;
+}
+
+function metricCard(label, value, detail = null, tone = "neutral") {
+  const card = el("article", `metric-card metric-card-${tone}`);
+  append(
+    card,
+    el("span", "metric-label", label),
+    el("strong", "metric-value", inlineValue(value, "0")),
+  );
+  if (detail) {
+    append(card, el("span", "metric-detail", detail));
+  }
+  return card;
+}
+
+function metricGrid(items) {
+  const values = items.filter(Boolean);
+  if (!values.length) {
+    return null;
+  }
+  const grid = el("div", "metric-grid");
+  append(grid, ...values);
+  return grid;
 }
 
 function textList(items, emptyText) {
@@ -749,6 +775,17 @@ function renderAppsView() {
   const appsResult = unwrapResult(state.data.apps);
   const apps = getItems(state.data.apps);
   const incidents = getItems(state.data.incidents);
+  const openIncidentCount = incidents.filter(
+    (item) => String(item?.incident_status ?? "").toLowerCase() !== "closed",
+  ).length;
+  const killedAppCount = apps.filter((item) =>
+    String(item?.kill_state ?? "").toLowerCase().includes("kill"),
+  ).length;
+  const attentionAppCount = apps.filter(
+    (item) =>
+      Number(item?.incident_count_open ?? 0) > 0 ||
+      toneForStatus(item?.deployment_status ?? item?.outcome) === "danger",
+  ).length;
 
   const controls = el("div", "button-row");
   append(
@@ -758,18 +795,55 @@ function renderAppsView() {
   );
   append(
     wrapper,
-    sectionTitle("Applications", "Polling every 3 seconds."),
+    sectionTitle("Applications", "Control app state, deployment posture, and incident response.", "Operations Workspace"),
     controls,
+    metricGrid([
+      metricCard("Apps", String(apps.length), "tracked in the local control plane", "accent"),
+      metricCard(
+        "Open incidents",
+        String(openIncidentCount),
+        openIncidentCount ? "requires operator review" : "all clear",
+        openIncidentCount ? "danger" : "ok",
+      ),
+      metricCard(
+        "Killed scopes",
+        String(killedAppCount),
+        killedAppCount ? "manual kill switch is active" : "no app kill switches",
+        killedAppCount ? "warn" : "ok",
+      ),
+      metricCard(
+        "Attention apps",
+        String(attentionAppCount),
+        appsResult?.generated_unix_ms ? `snapshot ${formatTimestamp(appsResult.generated_unix_ms)}` : "latest indexed state",
+        attentionAppCount ? "warn" : "neutral",
+      ),
+    ]),
   );
 
+  const board = el("div", "card-grid");
   if (!apps.length) {
-    append(wrapper, el("div", "card empty", "No apps indexed."));
+    append(board, el("div", "card empty", "No apps indexed."));
   }
 
   for (const item of apps) {
     const card = createCard(`${item.app_id ?? "unknown"} / ${item.environment ?? "unknown"}`);
+    const appTone =
+      Number(item?.incident_count_open ?? 0) > 0
+        ? "danger"
+        : String(item?.kill_state ?? "").toLowerCase().includes("kill")
+          ? "warn"
+          : toneForStatus(item?.deployment_status ?? item?.outcome);
+    card.classList.add(`card-tone-${appTone}`);
     append(
       card,
+      pillRow([
+        labeledPill("deployment", item.deployment_status ?? item.outcome),
+        labeledPill("kill", item.kill_state ?? "n/a", toneForStatus(item.kill_state)),
+        pill(
+          `open incidents: ${Number(item.incident_count_open ?? 0)}`,
+          Number(item.incident_count_open ?? 0) > 0 ? "danger" : "ok",
+        ),
+      ]),
       keyValueList([
         ["Latest deployment", item.latest_deployment_id ?? "n/a"],
         ["Latest incident", item.latest_incident_id ?? "n/a"],
@@ -802,8 +876,9 @@ function renderAppsView() {
       ),
     );
     append(card, row);
-    append(wrapper, card);
+    board.appendChild(card);
   }
+  append(wrapper, board);
 
   const incidentsSection = createCard(
     "Recent Incidents",
@@ -824,13 +899,48 @@ function renderDeviceReleaseListView() {
   const wrapper = el("div", "stack");
   const deviceReleases = getItems(state.data.deviceReleases);
   const snapshot = unwrapResult(state.data.deviceReleases);
+  const activeAutomationCount = deviceReleases.filter((item) => {
+    const automationState = String(item?.automation_state ?? "").toLowerCase();
+    const status = String(item?.status ?? "").toLowerCase();
+    return automationState === "active" || status === "running" || status === "started";
+  }).length;
+  const readyCount = deviceReleases.filter(
+    (item) =>
+      String(item?.release_readiness_status ?? item?.release_readiness?.status ?? "").toLowerCase() === "ok",
+  ).length;
+  const nativeIncidentCount = deviceReleases.reduce(
+    (sum, item) => sum + Number(item?.latest_native_health_rollup?.native_incident_count ?? 0),
+    0,
+  );
 
   append(
     wrapper,
     sectionTitle(
       "Device Releases",
       snapshot?.generated_unix_ms ? `Snapshot ${new Date(snapshot.generated_unix_ms).toLocaleString()}` : "Polling every 3 seconds.",
+      "Release Control Room",
     ),
+    metricGrid([
+      metricCard("Releases", String(deviceReleases.length), "release executions in scope", "accent"),
+      metricCard(
+        "Active automation",
+        String(activeAutomationCount),
+        activeAutomationCount ? "still rolling forward" : "all releases settled",
+        activeAutomationCount ? "warn" : "ok",
+      ),
+      metricCard(
+        "Ready lanes",
+        `${readyCount}/${deviceReleases.length || 0}`,
+        "package readiness gates passing",
+        readyCount === deviceReleases.length && deviceReleases.length ? "ok" : "neutral",
+      ),
+      metricCard(
+        "Native incidents",
+        String(nativeIncidentCount),
+        nativeIncidentCount ? "investigate before widening rollout" : "no linked native incidents",
+        nativeIncidentCount ? "danger" : "ok",
+      ),
+    ]),
   );
 
   if (!deviceReleases.length) {
@@ -838,12 +948,14 @@ function renderDeviceReleaseListView() {
     return wrapper;
   }
 
+  const board = el("div", "card-grid");
   for (const item of deviceReleases) {
     const app = item.app ?? {};
     const nativeSummary = objectValue(item.native_summary) ?? {};
     const latestIncidentId = deviceReleaseLatestIncidentId(item);
     const latestRegressionStatus = deviceReleaseLatestRegressionStatus(item);
     const card = createCard(`${app.app_id ?? "unknown"} / ${nativeSummary.target_kind ?? item.target ?? "n/a"}`);
+    card.classList.add(`card-tone-${toneForStatus(item?.status ?? item?.current_state)}`);
     append(
       card,
       pillRow([
@@ -874,9 +986,10 @@ function renderDeviceReleaseListView() {
       latestIncidentId ? navButton("Open latest incident", incidentHref(latestIncidentId)) : null,
     );
     append(card, row);
-    append(wrapper, card);
+    board.appendChild(card);
   }
 
+  append(wrapper, board);
   return wrapper;
 }
 
@@ -892,14 +1005,33 @@ function renderDeviceReleaseView() {
     controls,
     navButton("Back to releases", "/device-releases"),
     latestIncidentId ? navButton("Open latest incident", incidentHref(latestIncidentId)) : null,
+    actionButton("Observe", `/api/device-releases/${encodePathSegment(execId)}/observe`, { reason: "ui_device_release_observe" }, { variant: "btn-secondary" }),
     actionButton("Pause", `/api/device-releases/${encodePathSegment(execId)}/pause`, { reason: "ui_device_release_pause" }),
     actionButton("Resume", `/api/device-releases/${encodePathSegment(execId)}/resume`, { reason: "ui_device_release_resume" }),
+    actionButton(
+      "Rerun",
+      `/api/device-releases/${encodePathSegment(execId)}/rerun`,
+      { reason: "ui_device_release_rerun", from_step: 0 },
+      {
+        variant: "btn-secondary",
+        afterSuccess: async (result) => {
+          const newExecutionId = findFirstStringByKey(result, ["new_execution_id", "release_exec_id"]);
+          if (newExecutionId && newExecutionId !== execId) {
+            navigate(deviceReleaseHref(newExecutionId));
+            return;
+          }
+          await refresh();
+        },
+      },
+    ),
     actionButton("Complete", `/api/device-releases/${encodePathSegment(execId)}/complete`, { reason: "ui_device_release_complete" }),
     actionButton("Halt", `/api/device-releases/${encodePathSegment(execId)}/halt`, { reason: "ui_device_release_halt" }, { variant: "btn-danger" }),
+    actionButton("Stop", `/api/device-releases/${encodePathSegment(execId)}/stop`, { reason: "ui_device_release_stop" }, { variant: "btn-danger" }),
     actionButton("Rollback", `/api/device-releases/${encodePathSegment(execId)}/rollback`, { reason: "ui_device_release_rollback" }, { variant: "btn-danger" }),
   );
 
   const summaryCard = createCard("Release Overview", "Native-aware release detail from the normalized query payload.");
+  summaryCard.classList.add(`card-tone-${toneForStatus(deviceRelease?.status ?? deviceRelease?.current_state)}`);
   append(
     summaryCard,
     pillRow([
@@ -931,6 +1063,35 @@ function renderDeviceReleaseView() {
     ]),
   );
 
+  const detailMetrics = metricGrid([
+    metricCard(
+      "Rollout",
+      formatPercent(deviceRelease?.current_rollout_percent),
+      deviceRelease?.automation_state ? `automation ${deviceRelease.automation_state}` : "manual state unknown",
+      toneForStatus(deviceRelease?.status ?? deviceRelease?.current_state),
+    ),
+    metricCard(
+      "Native incidents",
+      String(Number(deviceRelease?.latest_native_health_rollup?.native_incident_count ?? 0)),
+      latestIncidentId ? `latest ${shortText(latestIncidentId, 8)}` : "no linked incidents",
+      Number(deviceRelease?.latest_native_health_rollup?.native_incident_count ?? 0) > 0 ? "danger" : "ok",
+    ),
+    metricCard(
+      "Validation warnings",
+      String(arrayValue(deviceRelease?.native_validation_warnings).length),
+      "package readiness warnings",
+      arrayValue(deviceRelease?.native_validation_warnings).length ? "warn" : "ok",
+    ),
+    metricCard(
+      "Regression",
+      deviceReleaseLatestRegressionStatus(deviceRelease),
+      deviceReleaseLatestRegressionId(deviceRelease)
+        ? shortText(deviceReleaseLatestRegressionId(deviceRelease), 8)
+        : "no generated regression",
+      toneForRegressionStatus(deviceReleaseLatestRegressionStatus(deviceRelease)),
+    ),
+  ]);
+
   const linkedIncidentsCard = createCard("Linked Incidents", "Incident linkage and regression state threaded through release query.");
   if (!linkedIncidents.length) {
     append(linkedIncidentsCard, el("p", "muted", "No incidents linked to this device release."));
@@ -955,7 +1116,7 @@ function renderDeviceReleaseView() {
     renderNativeHealthCard(deviceRelease),
   );
 
-  append(wrapper, sectionTitle("Device Release", execId), controls, grid, linkedIncidentsCard, rawCard);
+  append(wrapper, sectionTitle("Device Release", execId, "Execution Detail"), controls, detailMetrics, grid, linkedIncidentsCard, rawCard);
   return wrapper;
 }
 
@@ -989,6 +1150,7 @@ function renderDeploymentView() {
   );
 
   const summaryCard = createCard("Deployment", execId);
+  summaryCard.classList.add(`card-tone-${toneForStatus(deployment?.status ?? deployment?.execution?.status)}`);
   append(
     summaryCard,
     keyValueList([
@@ -1002,6 +1164,33 @@ function renderDeploymentView() {
     detailsBlock("Full deployment query JSON", jsonBlock(state.data.deployment)),
   );
 
+  const deploymentMetrics = metricGrid([
+    metricCard(
+      "Status",
+      deployment?.status ?? deployment?.execution?.status ?? "n/a",
+      deployment?.outcome ?? deployment?.summary?.outcome ?? "no outcome recorded",
+      toneForStatus(deployment?.status ?? deployment?.execution?.status),
+    ),
+    metricCard(
+      "Incidents",
+      String(incidents.length),
+      incidents.length ? "related incidents need review" : "no incidents linked",
+      incidents.length ? "danger" : "ok",
+    ),
+    metricCard(
+      "Target",
+      deployment?.target?.app_id ?? "n/a",
+      deployment?.target?.environment ?? "environment unavailable",
+      "accent",
+    ),
+    metricCard(
+      "Decision",
+      shortText(deployment?.decision_id, 8),
+      "last decision applied to this execution",
+      "neutral",
+    ),
+  ]);
+
   const incidentCard = createCard("Related Incidents");
   if (!incidents.length) {
     append(incidentCard, el("p", "muted", "No incidents linked to this deployment."));
@@ -1011,7 +1200,7 @@ function renderDeploymentView() {
     }
   }
 
-  append(wrapper, controls, summaryCard, incidentCard);
+  append(wrapper, sectionTitle("Deployment", execId, "Delivery Execution"), controls, deploymentMetrics, summaryCard, incidentCard);
   return wrapper;
 }
 
@@ -1173,6 +1362,13 @@ function renderIncidentView() {
   );
 
   const overviewCard = createCard("Incident Overview", "Normalized incident detail with release and regression linkage.");
+  overviewCard.classList.add(
+    `card-tone-${
+      incident?.native_classification
+        ? toneForNativeClassification(incident.native_classification)
+        : toneForStatus(incident?.classification ?? incident?.incident_status)
+    }`,
+  );
   append(
     overviewCard,
     pillRow([
@@ -1203,6 +1399,33 @@ function renderIncidentView() {
     ]),
   );
 
+  const incidentMetrics = metricGrid([
+    metricCard(
+      "Status",
+      incident?.incident_status ?? "n/a",
+      incident?.classification ?? "classification unavailable",
+      toneForStatus(incident?.incident_status ?? incident?.classification),
+    ),
+    metricCard(
+      "Regression",
+      incident?.regression_status ?? "not_requested",
+      incident?.regression_id ? shortText(incident.regression_id, 8) : "no generated regression",
+      toneForRegressionStatus(incident?.regression_status ?? "not_requested"),
+    ),
+    metricCard(
+      "Target",
+      incidentTargetKind(incident) ?? "n/a",
+      incidentProviderKind(incident) ?? "provider unavailable",
+      "accent",
+    ),
+    metricCard(
+      "Artifacts",
+      String(arrayValue(incident?.refs).length || 0),
+      formatTimestamp(incident?.captured_unix_ms),
+      "neutral",
+    ),
+  ]);
+
   const rawCard = createCard("Raw Payload");
   append(rawCard, detailsBlock("Full incident query JSON", jsonBlock(state.data.incident)));
 
@@ -1215,19 +1438,37 @@ function renderIncidentView() {
     renderRegressionCard(incident),
   );
 
-  append(wrapper, sectionTitle("Incident", incidentId), controls, grid, renderCapturedArtifactsCard(incident), rawCard);
+  append(wrapper, sectionTitle("Incident", incidentId, "Operational Detail"), controls, incidentMetrics, grid, renderCapturedArtifactsCard(incident), rawCard);
   return wrapper;
 }
 
 function renderBanner() {
   if (state.error) {
     const panel = el("section", "banner banner-error");
-    append(panel, el("strong", null, state.error.message), el("pre", "json-block", state.error.detail ?? ""));
+    const copy = el("div", "banner-copy");
+    append(copy, el("strong", null, state.error.message));
+    if (state.error.detail) {
+      append(copy, el("p", "muted", "The backend returned a structured error."));
+    }
+    append(panel, copy);
+    if (state.error.detail) {
+      append(panel, detailsBlock("Error detail", el("pre", "json-block", state.error.detail ?? "")));
+    }
     return panel;
   }
   if (state.actionResult) {
     const panel = el("section", "banner banner-ok");
-    append(panel, el("strong", null, "Last action result"), jsonBlock(state.actionResult));
+    const head = el("div", "banner-head");
+    const copy = el("div", "banner-copy");
+    const clearButton = el("button", "btn btn-ghost btn-compact", "Clear");
+    clearButton.type = "button";
+    clearButton.addEventListener("click", () => {
+      state.actionResult = null;
+      render();
+    });
+    append(copy, el("strong", null, "Last action result"), el("p", "muted", "Latest control-plane response from a manual action."));
+    append(head, copy, clearButton);
+    append(panel, head, detailsBlock("Action report JSON", jsonBlock(state.actionResult)));
     return panel;
   }
   return null;
@@ -1238,28 +1479,51 @@ function render() {
 
   const page = el("main", "page");
   const header = el("header", "hero");
+  const heroLayout = el("div", "hero-layout");
+  const heroCopy = el("div", "hero-copy");
+  const routeLabel =
+    state.route.kind === "deviceReleaseList"
+      ? "Device Releases"
+      : state.route.kind === "deviceRelease"
+        ? "Device Release"
+        : state.route.kind === "apps"
+          ? "Applications"
+          : state.route.kind === "deployment"
+            ? "Deployment"
+            : "Incident";
+  const heroSubtitle = state.loading
+    ? "Refreshing backend state..."
+    : state.route.kind === "deviceReleaseList"
+      ? "Release orchestration, rollout health, and store-facing controls."
+      : state.route.kind === "deviceRelease"
+        ? `Execution ${state.route.execId}`
+        : state.route.kind === "apps"
+          ? "Applications, incidents, deployment state, and kill-switch controls."
+          : state.route.kind === "deployment"
+            ? `Execution ${state.route.execId}`
+            : `Incident ${state.route.incidentId}`;
   append(
-    header,
+    heroCopy,
     el("p", "eyebrow", "x07 Platform"),
     el("h1", null, "Command Center"),
-    el(
-      "p",
-      "muted",
-      state.loading
-        ? "Refreshing backend state..."
-        : state.route.kind === "deviceReleaseList"
-          ? "Store release orchestration, rollout state, and manual controls."
-          : state.route.kind === "deviceRelease"
-            ? `Device release ${state.route.execId}`
-            : state.route.kind === "apps"
-          ? "Applications, incidents, and control actions."
-          : state.route.kind === "deployment"
-            ? `Deployment ${state.route.execId}`
-            : `Incident ${state.route.incidentId}`,
-    ),
+    el("p", "muted", heroSubtitle),
+    pillRow([
+      pill(routeLabel, "accent"),
+      pill(state.loading ? "Refreshing" : "Live data", state.loading ? "warn" : "ok"),
+      pill("Polling every 3s", "neutral"),
+    ]),
   );
+  append(
+    heroLayout,
+    heroCopy,
+    metricGrid([
+      metricCard("Surface", routeLabel, "current operator view", "accent"),
+      metricCard("Control plane", "Local", "served by x07lpd", "neutral"),
+    ]),
+  );
+  append(header, heroLayout);
 
-  const routeTabs = el("div", "button-row");
+  const routeTabs = el("div", "button-row route-tabs");
   append(
     routeTabs,
     navButton("Device Releases", "/device-releases", state.route.kind === "deviceReleaseList"),
@@ -1300,51 +1564,79 @@ function installStyles() {
   style.id = "command-center-style";
   style.textContent = `
     :root {
-      --lp-bg: #f6f2ea;
-      --lp-surface: #fffdf8;
-      --lp-border: #d8cfc2;
-      --lp-ink: #1c1b19;
-      --lp-muted: #6c655c;
-      --lp-accent: #0b6e4f;
-      --lp-danger: #8f2d18;
-      --lp-shadow: 0 10px 30px rgba(28, 27, 25, 0.08);
+      --lp-bg: #f4f0e8;
+      --lp-surface: rgba(255, 253, 249, 0.96);
+      --lp-border: #d7d0c5;
+      --lp-ink: #1c1a16;
+      --lp-muted: #655d52;
+      --lp-accent: #0f8c84;
+      --lp-accent-soft: rgba(15, 140, 132, 0.12);
+      --lp-info: #2f5fd3;
+      --lp-info-soft: rgba(47, 95, 211, 0.12);
+      --lp-warm: #c87a18;
+      --lp-warm-soft: rgba(200, 122, 24, 0.12);
+      --lp-danger: #994122;
+      --lp-danger-soft: rgba(153, 65, 34, 0.14);
+      --lp-hero: #153047;
+      --lp-hero-2: #102537;
+      --lp-shadow: 0 18px 42px rgba(25, 22, 18, 0.08);
     }
     body {
       background:
-        radial-gradient(circle at top left, rgba(11, 110, 79, 0.08), transparent 28rem),
-        linear-gradient(180deg, #f3ede0, var(--lp-bg));
+        radial-gradient(circle at top left, rgba(15, 140, 132, 0.12), transparent 30rem),
+        radial-gradient(circle at top right, rgba(47, 95, 211, 0.08), transparent 26rem),
+        linear-gradient(180deg, #ece7df, var(--lp-bg));
       color: var(--lp-ink);
     }
     #app {
-      padding: 24px;
+      padding: 24px 24px 40px;
     }
     .page {
-      max-width: 1080px;
+      max-width: 1240px;
       margin: 0 auto;
       display: grid;
-      gap: 16px;
+      gap: 20px;
     }
     .hero {
-      background: var(--lp-surface);
-      border: 1px solid var(--lp-border);
-      border-radius: 18px;
+      background: linear-gradient(135deg, var(--lp-hero), var(--lp-hero-2));
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 28px;
       box-shadow: var(--lp-shadow);
-      padding: 20px;
+      padding: 24px;
+      color: #eef5f6;
+    }
+    .hero-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.8fr) minmax(240px, 0.9fr);
+      gap: 16px;
+      align-items: stretch;
+    }
+    .hero-copy {
+      display: grid;
+      gap: 10px;
     }
     .hero h1,
     .section-head h2,
     .card h3 {
       margin: 0;
-      font-family: Georgia, "Times New Roman", serif;
+      font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif;
       font-weight: 700;
       letter-spacing: -0.02em;
+    }
+    .hero p {
+      margin: 0;
     }
     .eyebrow {
       margin: 0 0 6px;
       text-transform: uppercase;
       letter-spacing: 0.12em;
       font-size: 12px;
-      color: var(--lp-accent);
+      color: #8ee4d7;
+    }
+    .hero .muted,
+    .hero .metric-label,
+    .hero .metric-detail {
+      color: rgba(238, 245, 246, 0.78);
     }
     .muted {
       color: var(--lp-muted);
@@ -1361,19 +1653,37 @@ function installStyles() {
       display: grid;
       gap: 16px;
       grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      align-items: start;
     }
     .card,
     .banner {
       background: var(--lp-surface);
       border: 1px solid var(--lp-border);
-      border-radius: 18px;
+      border-radius: 22px;
       box-shadow: var(--lp-shadow);
-      padding: 18px;
+      padding: 20px;
+    }
+    .card-tone-ok {
+      border-top: 4px solid var(--lp-accent);
+    }
+    .card-tone-warn {
+      border-top: 4px solid var(--lp-warm);
+    }
+    .card-tone-danger {
+      border-top: 4px solid var(--lp-danger);
     }
     .section-head {
       display: grid;
       gap: 6px;
       margin-bottom: 14px;
+    }
+    .section-kicker {
+      margin: 0;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-size: 12px;
+      color: var(--lp-info);
+      font-weight: 700;
     }
     .section-head p {
       margin: 0;
@@ -1389,33 +1699,113 @@ function installStyles() {
       flex-wrap: wrap;
       gap: 10px;
     }
+    .route-tabs {
+      gap: 12px;
+    }
     .button-row-compact {
       gap: 8px;
     }
     .btn {
       appearance: none;
       border: 1px solid var(--lp-border);
-      background: #f7f0e5;
-      border-radius: 999px;
+      background: rgba(255, 253, 249, 0.85);
+      border-radius: 14px;
       padding: 10px 14px;
       font: inherit;
       color: var(--lp-ink);
+      font-weight: 600;
+      transition:
+        transform 140ms ease,
+        border-color 140ms ease,
+        background 140ms ease,
+        box-shadow 140ms ease;
     }
     .btn:hover:not(:disabled) {
-      border-color: var(--lp-accent);
+      border-color: rgba(15, 140, 132, 0.32);
+      transform: translateY(-1px);
+      box-shadow: 0 10px 18px rgba(17, 28, 40, 0.06);
     }
     .btn-active {
-      background: #e2f0e7;
-      border-color: rgba(11, 110, 79, 0.45);
+      background: var(--lp-accent-soft);
+      border-color: rgba(15, 140, 132, 0.34);
+      color: #0c625d;
+    }
+    .btn-secondary {
+      background: var(--lp-info-soft);
+      border-color: rgba(47, 95, 211, 0.25);
+      color: #264ba5;
     }
     .btn-danger {
       color: white;
       background: var(--lp-danger);
       border-color: var(--lp-danger);
     }
+    .btn-ghost {
+      background: transparent;
+      box-shadow: none;
+    }
+    .btn-compact {
+      padding: 8px 12px;
+      font-size: 13px;
+    }
     .btn:disabled {
       cursor: not-allowed;
       opacity: 0.55;
+    }
+    .metric-grid {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    }
+    .metric-card {
+      display: grid;
+      gap: 6px;
+      min-height: 100px;
+      padding: 16px;
+      border-radius: 18px;
+      border: 1px solid var(--lp-border);
+      background: rgba(255, 253, 249, 0.9);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+    }
+    .metric-card-accent {
+      background: linear-gradient(180deg, rgba(15, 140, 132, 0.12), rgba(255, 253, 249, 0.92));
+      border-color: rgba(15, 140, 132, 0.22);
+    }
+    .metric-card-ok {
+      background: linear-gradient(180deg, rgba(15, 140, 132, 0.08), rgba(255, 253, 249, 0.92));
+    }
+    .metric-card-warn {
+      background: linear-gradient(180deg, rgba(200, 122, 24, 0.08), rgba(255, 253, 249, 0.92));
+    }
+    .metric-card-danger {
+      background: linear-gradient(180deg, rgba(153, 65, 34, 0.1), rgba(255, 253, 249, 0.92));
+    }
+    .hero .metric-card {
+      background: rgba(255, 255, 255, 0.08);
+      border-color: rgba(255, 255, 255, 0.12);
+      box-shadow: none;
+      color: #eef5f6;
+    }
+    .hero .metric-card-accent {
+      background: rgba(142, 228, 215, 0.12);
+      border-color: rgba(142, 228, 215, 0.18);
+    }
+    .metric-label {
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--lp-muted);
+      font-weight: 700;
+    }
+    .metric-value {
+      font-size: clamp(22px, 3vw, 34px);
+      line-height: 1;
+      letter-spacing: -0.03em;
+    }
+    .metric-detail {
+      color: var(--lp-muted);
+      font-size: 13px;
+      line-height: 1.45;
     }
     .pill-row {
       display: flex;
@@ -1437,16 +1827,24 @@ function installStyles() {
       letter-spacing: 0.01em;
     }
     .pill-ok {
-      background: rgba(11, 110, 79, 0.12);
-      color: #084634;
+      background: rgba(15, 140, 132, 0.12);
+      color: #0a6761;
     }
     .pill-warn {
-      background: rgba(179, 119, 0, 0.14);
-      color: #735000;
+      background: rgba(200, 122, 24, 0.14);
+      color: #7a4d0c;
     }
     .pill-danger {
-      background: rgba(143, 45, 24, 0.14);
-      color: #7b2615;
+      background: rgba(153, 65, 34, 0.14);
+      color: #7a301a;
+    }
+    .pill-accent {
+      background: var(--lp-accent-soft);
+      color: #0a6761;
+    }
+    .pill-info {
+      background: var(--lp-info-soft);
+      color: #234aa7;
     }
     .pill-neutral {
       background: rgba(28, 27, 25, 0.06);
@@ -1536,9 +1934,29 @@ function installStyles() {
     .bullet-list li + li {
       margin-top: 6px;
     }
+    .banner-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: start;
+      gap: 12px;
+    }
+    .banner-copy {
+      display: grid;
+      gap: 4px;
+    }
+    .empty {
+      display: grid;
+      place-items: center;
+      min-height: 180px;
+      text-align: center;
+      color: var(--lp-muted);
+    }
     @media (max-width: 700px) {
       #app {
         padding: 14px;
+      }
+      .hero-layout {
+        grid-template-columns: 1fr;
       }
       .kv-list {
         grid-template-columns: 1fr;

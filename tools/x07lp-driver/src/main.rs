@@ -2222,8 +2222,8 @@ fn read_json_from_report_stdout(stdout: &[u8]) -> Result<Value> {
             .context("decode solve_output_b64")?;
         return serde_json::from_slice(&bytes).context("parse decoded cli report");
     }
-    if let Some(stdout_json) = get_path(&report, &["result", "stdout_json"])
-        .filter(|value| looks_like_cli_report(value))
+    if let Some(stdout_json) =
+        get_path(&report, &["result", "stdout_json"]).filter(|value| looks_like_cli_report(value))
     {
         return Ok(stdout_json.clone());
     }
@@ -2263,6 +2263,54 @@ fn search_workspace_file(name: &str) -> Option<PathBuf> {
 
 fn resolve_plan_path(path: Option<&str>) -> Option<PathBuf> {
     path.map(repo_path)
+}
+
+fn project_root_for_path(path: &Path) -> Option<PathBuf> {
+    for parent in path.ancestors() {
+        if parent.join("arch").is_dir() {
+            return Some(parent.to_path_buf());
+        }
+    }
+    None
+}
+
+fn resolve_plan_input_path(raw: &str, plan_path: Option<&Path>) -> Option<PathBuf> {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        return Some(path);
+    }
+
+    if let Some(plan_root) = plan_path.and_then(project_root_for_path) {
+        let candidate = plan_root.join(&path);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    if let Some(plan_dir) = plan_path.and_then(Path::parent) {
+        let candidate = plan_dir.join(&path);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    if let Some(candidate) = Path::new(raw)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .and_then(search_workspace_file)
+    {
+        return Some(candidate);
+    }
+
+    plan_path
+        .and_then(project_root_for_path)
+        .map(|plan_root| plan_root.join(&path))
+        .or_else(|| {
+            plan_path
+                .and_then(Path::parent)
+                .map(|plan_dir| plan_dir.join(&path))
+        })
+        .or(Some(path))
 }
 
 fn resolve_tool_cwd_and_path(path: Option<&Path>) -> (PathBuf, Option<String>) {
@@ -3018,9 +3066,12 @@ fn persist_remote_provider_deployment(
         .and_then(Value::as_str)
         .unwrap_or(DEFAULT_REMOTE_LATTICE)
         .to_string();
-    let existing_probe_base_url = get_path(&Value::Object(remote.clone()), &["routing", "probe_base_url"])
-        .cloned()
-        .unwrap_or(Value::Null);
+    let existing_probe_base_url = get_path(
+        &Value::Object(remote.clone()),
+        &["routing", "probe_base_url"],
+    )
+    .cloned()
+    .unwrap_or(Value::Null);
     remote.insert(
         "publish".to_string(),
         json!({
@@ -3318,8 +3369,8 @@ fn run_remote_runtime_probe(exec_id: &str, work_dir: &Path, remote: &Value) -> R
         .unwrap_or_else(|| REMOTE_RUNTIME_PROVIDER.to_string());
     let public_listener = get_str(remote, &["routing", "public_base_url"])
         .unwrap_or_else(|| remote_exec_public_listener(&base_url, exec_id));
-    let public_probe_url = get_str(remote, &["routing", "probe_base_url"])
-        .unwrap_or_else(|| public_listener.clone());
+    let public_probe_url =
+        get_str(remote, &["routing", "probe_base_url"]).unwrap_or_else(|| public_listener.clone());
     let candidate_upstream = get_str(remote, &["routing", "candidate_upstream"])
         .or_else(|| {
             get_str(remote, &["runtime", "candidate_bind_addr"])
@@ -5337,24 +5388,16 @@ fn which(bin: &str) -> Option<String> {
     None
 }
 
-fn resolve_plan_inputs(plan_doc: &Value) -> (Option<PathBuf>, Option<PathBuf>) {
-    let ops_name = get_str(plan_doc, &["ops_profile", "path"])
-        .unwrap_or_else(|| "ops_release.json".to_string());
-    let slo_name = get_str(plan_doc, &["slo_profile", "path"]);
-    (
-        search_workspace_file(
-            Path::new(&ops_name)
-                .file_name()
-                .and_then(OsStr::to_str)
-                .unwrap_or("ops_release.json"),
-        ),
-        slo_name.and_then(|name| {
-            Path::new(&name)
-                .file_name()
-                .and_then(OsStr::to_str)
-                .and_then(search_workspace_file)
-        }),
-    )
+fn resolve_plan_inputs(
+    plan_doc: &Value,
+    plan_path: Option<&Path>,
+) -> (Option<PathBuf>, Option<PathBuf>) {
+    let ops_path = get_str(plan_doc, &["ops_profile", "path"])
+        .and_then(|path| resolve_plan_input_path(&path, plan_path))
+        .or_else(|| search_workspace_file("ops_release.json"));
+    let slo_path = get_str(plan_doc, &["slo_profile", "path"])
+        .and_then(|path| resolve_plan_input_path(&path, plan_path));
+    (ops_path, slo_path)
 }
 
 fn normalize_plan(mut plan_doc: Value) -> Value {
@@ -13351,9 +13394,9 @@ fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
         RemoteLeaseAcquire::Conflict(report) => return Ok(report),
     };
     let plan_path = resolve_plan_path(args.plan.as_deref());
-    let (plan_doc, plan_bytes) = match plan_path {
+    let (plan_doc, plan_bytes) = match plan_path.as_ref() {
         Some(path) => {
-            let plan = normalize_plan(load_json(&path)?);
+            let plan = normalize_plan(load_json(path)?);
             let bytes = canon_json_bytes(&plan);
             (plan, bytes)
         }
@@ -13604,7 +13647,7 @@ fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
         0,
         1,
     )?;
-    let (ops_path, slo_path) = resolve_plan_inputs(&plan_doc);
+    let (ops_path, slo_path) = resolve_plan_inputs(&plan_doc, plan_path.as_deref());
     let runtime_probe_doc = if let Some(remote) = get_path(&exec_doc, &["meta", "ext", "remote"]) {
         run_remote_runtime_probe(&args.deployment_id, &candidate_paths["work"], remote)?
     } else {
@@ -15568,7 +15611,7 @@ enum UiHttpResponse {
 fn ui_manifest_doc() -> Value {
     json!({
         "wasmUrl": "app.wasm",
-        "componentEsmUrl": "transpiled/app.mjs",
+        "componentEsmUrl": Value::Null,
         "apiPrefix": "/api",
     })
 }
@@ -17010,6 +17053,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
         now_unix_ms: None,
         json: true,
     };
+    let local_target = Some(LOCAL_TARGET_SENTINEL.to_string());
     let response = match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/healthz") => UiHttpResponse::Json(200, json!({"ok": true})),
         ("GET", "/app.manifest.json") => UiHttpResponse::Json(200, ui_manifest_doc()),
@@ -17040,7 +17084,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                 env: None,
                 limit: None,
                 rebuild_index: false,
-                target: None,
+                target: local_target.clone(),
                 common: common.clone(),
             })?,
         ),
@@ -17061,7 +17105,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         limit: None,
                         latest: false,
                         rebuild_index: false,
-                        target: None,
+                        target: local_target.clone(),
                         hosted: HostedDeployArgs {
                             hosted: false,
                             api_base: None,
@@ -17079,7 +17123,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         limit: None,
                         latest: false,
                         rebuild_index: false,
-                        target: None,
+                        target: local_target.clone(),
                         hosted: HostedDeployArgs {
                             hosted: false,
                             api_base: None,
@@ -17101,7 +17145,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         env: None,
                         limit: None,
                         rebuild_index: false,
-                        target: None,
+                        target: local_target.clone(),
                         common: common.clone(),
                     })?,
                 ),
@@ -17119,7 +17163,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         env: None,
                         limit: None,
                         rebuild_index: false,
-                        target: None,
+                        target: local_target.clone(),
                         common: common.clone(),
                     })?,
                 ),
@@ -17130,7 +17174,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         app_id: None,
                         provider_id: None,
                         distribution_lane: None,
-                        target: None,
+                        target: local_target.clone(),
                         view: "full".to_string(),
                         limit: None,
                         latest: false,
@@ -17144,7 +17188,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         app_id: None,
                         provider_id: None,
                         distribution_lane: None,
-                        target: None,
+                        target: local_target.clone(),
                         view: "decisions".to_string(),
                         limit: None,
                         latest: false,
@@ -17156,7 +17200,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                     command_incident_get(IncidentGetArgs {
                         incident_id: (*incident_id).to_string(),
                         rebuild_index: false,
-                        target: None,
+                        target: local_target.clone(),
                         common: common.clone(),
                     })?,
                 ),
@@ -17165,7 +17209,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                     command_pause(DeploymentControlArgs {
                         deployment_id: (*exec_id).to_string(),
                         reason: get_http_string(&body_doc, "reason", "http_pause"),
-                        target: None,
+                        target: local_target.clone(),
                         hosted: HostedDeployArgs {
                             hosted: false,
                             api_base: None,
@@ -17179,7 +17223,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         deployment_id: (*exec_id).to_string(),
                         from_step: Some(get_http_u64(&body_doc, "from_step", 0) as usize),
                         reason: get_http_string(&body_doc, "reason", "http_rerun"),
-                        target: None,
+                        target: local_target.clone(),
                         hosted: HostedDeployArgs {
                             hosted: false,
                             api_base: None,
@@ -17192,7 +17236,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                     command_rollback(DeploymentControlArgs {
                         deployment_id: (*exec_id).to_string(),
                         reason: get_http_string(&body_doc, "reason", "http_rollback"),
-                        target: None,
+                        target: local_target.clone(),
                         hosted: HostedDeployArgs {
                             hosted: false,
                             api_base: None,
@@ -17205,7 +17249,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                     command_stop(DeploymentControlArgs {
                         deployment_id: (*exec_id).to_string(),
                         reason: get_http_string(&body_doc, "reason", "http_stop"),
-                        target: None,
+                        target: local_target.clone(),
                         hosted: HostedDeployArgs {
                             hosted: false,
                             api_base: None,
@@ -17369,7 +17413,7 @@ fn dispatch_ui_request(request: HttpRequest, state_dir: &Path) -> Result<UiHttpR
                         name: get_http_string(&body_doc, "name", "incident"),
                         out_dir: get_http_optional_string(&body_doc, "out_dir"),
                         dry_run: get_http_bool(&body_doc, "dry_run", false),
-                        target: None,
+                        target: local_target.clone(),
                         common: common.clone(),
                     })?,
                 ),
@@ -17630,6 +17674,51 @@ mod tests {
     }
 
     #[test]
+    fn project_root_for_path_uses_nearest_arch_ancestor() -> Result<()> {
+        let tmp = TempDir::new("plan-project-root")?;
+        let plan_path = tmp.path.join("dist/demo/deploy.plan.json");
+        fs::create_dir_all(plan_path.parent().unwrap())?;
+        fs::create_dir_all(tmp.path.join("arch"))?;
+        fs::write(&plan_path, b"{}")?;
+
+        assert_eq!(project_root_for_path(&plan_path), Some(tmp.path.clone()));
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_plan_inputs_prefers_external_plan_repo_root() -> Result<()> {
+        let tmp = TempDir::new("external-plan-inputs")?;
+        let plan_path = tmp.path.join("dist/crewops/deploy.plan.json");
+        let ops_path = tmp.path.join("arch/app/ops/ops_release.json");
+        let slo_path = tmp.path.join("arch/slo/slo_min.json");
+
+        fs::create_dir_all(plan_path.parent().unwrap())?;
+        fs::create_dir_all(ops_path.parent().unwrap())?;
+        fs::create_dir_all(slo_path.parent().unwrap())?;
+        fs::write(&plan_path, b"{}")?;
+        fs::write(&ops_path, b"{}")?;
+        fs::write(&slo_path, b"{}")?;
+
+        let plan_doc = json!({
+            "ops_profile": {
+                "path": "/tmp/external/ops_release.json"
+            },
+            "slo_profile": {
+                "path": "arch/slo/slo_min.json"
+            }
+        });
+
+        let (resolved_ops, resolved_slo) = resolve_plan_inputs(&plan_doc, Some(&plan_path));
+
+        assert_eq!(
+            resolved_ops,
+            Some(PathBuf::from("/tmp/external/ops_release.json"))
+        );
+        assert_eq!(resolved_slo, Some(slo_path));
+        Ok(())
+    }
+
+    #[test]
     fn remote_runtime_host_defaults_to_loopback() {
         let _guard = TEST_ENV_LOCK
             .get_or_init(|| Mutex::new(()))
@@ -17709,15 +17798,27 @@ mod tests {
         persist_remote_provider_deployment(&tmp.path, &mut exec_doc, &deployment, 42)?;
 
         assert_eq!(
-            get_str(&exec_doc, &["meta", "ext", "remote", "routing", "probe_base_url"]).as_deref(),
+            get_str(
+                &exec_doc,
+                &["meta", "ext", "remote", "routing", "probe_base_url"]
+            )
+            .as_deref(),
             Some("http://127.0.0.1:8081/r/lpexec_test")
         );
         assert_eq!(
-            get_str(&exec_doc, &["meta", "ext", "remote", "routing", "candidate_upstream"]).as_deref(),
+            get_str(
+                &exec_doc,
+                &["meta", "ext", "remote", "routing", "candidate_upstream"]
+            )
+            .as_deref(),
             Some("http://wasmcloud:26008")
         );
         assert_eq!(
-            get_str(&exec_doc, &["meta", "ext", "remote", "routing", "stable_upstream"]).as_deref(),
+            get_str(
+                &exec_doc,
+                &["meta", "ext", "remote", "routing", "stable_upstream"]
+            )
+            .as_deref(),
             Some("http://wasmcloud:26007")
         );
         Ok(())
@@ -17743,10 +17844,7 @@ mod tests {
             .lock()
             .expect("lock env");
         let _nats = ScopedEnvVar::set("X07LP_REMOTE_NATS_URL", "nats://nats:4222");
-        assert_eq!(
-            local_remote_nats_monitor_host("https://cloud.x07.io"),
-            None
-        );
+        assert_eq!(local_remote_nats_monitor_host("https://cloud.x07.io"), None);
     }
 
     #[test]
@@ -17756,7 +17854,10 @@ mod tests {
             .lock()
             .expect("lock env");
         let _host = ScopedEnvVar::set("X07LP_REMOTE_RUNTIME_HOST", "wasmcloud");
-        assert_eq!(local_remote_runtime_probe_host("http://127.0.0.1:8081"), None);
+        assert_eq!(
+            local_remote_runtime_probe_host("http://127.0.0.1:8081"),
+            None
+        );
     }
 
     #[test]
