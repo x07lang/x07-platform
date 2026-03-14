@@ -1,6 +1,10 @@
 # x07-platform
 
-**x07-platform** is the public lifecycle runtime and self-hosted control plane for X07 applications and device artifacts.
+**x07-platform** is the lifecycle runtime and self-hosted control plane for shipping, supervising, and repairing X07 applications and device releases.
+
+In the X07 ecosystem, `x07` is where you write and package programs, `x07-wasm-backend` turns those programs into sealed app and device artifacts, and `x07-platform` runs the operational loop around them: deploy, watch, capture incidents, generate regressions, and control releases.
+
+The vision is simple: an end user or coding agent should be able to move from "the app is ready" to "the app is running safely in production" without switching to a separate ad hoc stack with different contracts, different state, and different tooling.
 
 The platform operates as one closed loop:
 
@@ -15,6 +19,26 @@ The repo is local-first. The same contracts and operator model are used for:
 - a future hosted boundary; the managed product is intentionally not the main demo path in this repo
 
 It ships a dark-themed **Command Center** web UI, a full-featured **CLI** (`x07lp`), and an **MCP tool surface** so AI agents can consume the same deploy, incident, and release state programmatically.
+
+## What Is In This Repo
+
+- **Lifecycle engine** for accepted packs, deploy plans, executions, incidents, regressions, and control actions
+- **`x07lp` CLI and driver scripts** for local and remote platform workflows
+- **Command Center UI** for operators who want a browser view over the same state the CLI exposes
+- **Public docs and fixtures** for local demos, device-release flows, and contract-backed examples
+- **MCP-facing platform surface** so coding agents can read platform state and invoke safe controls
+
+## How It Fits The Whole X07 Story
+
+The broader X07 release path looks like this:
+
+1. Build the program in [`x07`](https://github.com/x07lang/x07)
+2. Package web, app, or device artifacts in [`x07-wasm-backend`](https://github.com/x07lang/x07-wasm-backend)
+3. If needed, run the same reducer on desktop or mobile with [`x07-device-host`](https://github.com/x07lang/x07-device-host)
+4. Publish packages through [`x07-registry`](https://github.com/x07lang/x07-registry) and browse them on [`x07.io`](https://x07.io)
+5. Roll the finished artifact through `x07-platform`
+
+That makes `x07-platform` the production operations part of the language ecosystem, not a separate product bolted on later.
 
 ## What The Platform Does
 
@@ -52,6 +76,13 @@ Extra prerequisites:
 - **Python 3** for helper scripts and JSON parsing in the walkthrough below
 - **Docker** if you want to run the self-hosted wasmCloud target
 
+## Practical Ways To Use It
+
+- **Standalone local demo:** use the bundled fixtures to understand the deploy, incident, and device-release loop without any external services
+- **Self-hosted control plane:** point `x07lp` at a target and run the same contracts against a remote environment
+- **Agent-operated platform:** let an MCP-aware coding agent inspect executions, read incidents, and trigger safe controls without scraping logs or dashboards
+- **End-to-end app release path:** pair it with `x07-wasm app pack`, `x07-wasm deploy plan`, and incident-derived regression generation
+
 ## Run From Source
 
 The repo carries its pinned `.x07/` dependency snapshot. From the repo root:
@@ -66,6 +97,12 @@ The source entrypoint is `./scripts/x07lp-driver`. For a bundled standalone CLI:
 ```bash
 x07 bundle --project x07.json --profile os --out out/x07lp
 ```
+
+If you want to use it as part of the full ecosystem story, keep `x07-platform` alongside the sibling repos it consumes most often:
+
+- [`x07`](https://github.com/x07lang/x07) for the toolchain and canonical docs
+- [`x07-wasm-backend`](https://github.com/x07lang/x07-wasm-backend) for app/device build, verify, pack, and incident-regression commands
+- [`x07-crewops`](https://github.com/x07lang/x07-crewops) or another app repo for a realistic sealed-artifact input
 
 ## Quick Start: Local Demo
 
