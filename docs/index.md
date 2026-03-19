@@ -18,15 +18,19 @@
 - provide a strong OSS baseline for local deploy plus self-hosted remote deploy parity
 - keep runtime, routing, telemetry, secrets, and publish behavior behind adapters and conformance
 - preserve a clean split between the public engine and the hosted private product layer
+- widen the target-profile boundary so hosted, Kubernetes, and wasmCloud attachments share one creator-side document shape
+- carry draft workload, topology, binding, scale, and release schemas without leaking hosted-only internals into the public repo
 
 Current surface:
 
 - public `lp.*` JSON Schemas consumed from `contracts/spec/schemas/` with `x07-platform-contracts` as the authority
-- `x07lp` CLI for local and remote `change`, `deploy`, `target`, `adapter`, `incident`, `regress`, `app`, `platform`, `ui`, and `schema` flows plus hosted `login`, `whoami`, `logout`, `org`, `project`, `env`, and `context`
+- `x07lp` CLI for local and remote `change`, `deploy`, `target`, `adapter`, `incident`, `regress`, `app`, `platform`, `ui`, and `schema` flows plus hosted `login`, `whoami`, `logout`, `org`, `project`, `env`, `context`, `release-*`, and `binding-status`
 - Local filesystem content-addressed store (`--state-dir`, default `.x07lp/`)
 - Hosted session document under `~/.config/x07lp/session.json` (or `X07LP_CONFIG_DIR` / `XDG_CONFIG_HOME`)
 - Local runtime and routing for `x07.app.pack@0.1.0`
 - Remote target selection, CAS push, remote query/control parity, and adapter conformance for self-hosted targets
+- Additive target-profile kinds: `oss_remote`, `hosted`, `k8s`, and `wasmcloud`
+- Public draft schemas for `lp.workload.*`, `lp.topology.preview.result@0.1.0`, `lp.binding.*`, `lp.scale.profile@0.1.0`, and `lp.release.*`
 - MCP router/worker surface under `gateway/mcp/`
 - Historical deploy compatibility note for the preserved `docs/phaseB.md` path
 - CI gates for accept, local deploy execution, query, and MCP coverage

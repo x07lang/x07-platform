@@ -213,6 +213,11 @@ enum Commands {
     Project(HostedProjectArgs),
     Env(HostedEnvironmentArgs),
     Context(HostedContextArgs),
+    ReleaseSubmit(ReleaseSubmitArgs),
+    ReleaseQuery(ReleaseQueryArgs),
+    ReleaseExplain(ReleaseExplainArgs),
+    ReleaseRollback(ReleaseRollbackArgs),
+    BindingStatus(BindingStatusArgs),
     Accept(DeployAcceptArgs),
     Run(DeployRunArgs),
     Query(DeployQueryArgs),
@@ -507,6 +512,62 @@ struct DeploymentRerunArgs {
 }
 
 #[derive(Args, Debug)]
+struct ReleaseSubmitArgs {
+    #[arg(long)]
+    workload_id: String,
+    #[arg(long)]
+    pack_digest: String,
+    #[arg(long)]
+    environment_id: Option<String>,
+    #[arg(long)]
+    target_id: Option<String>,
+    #[arg(long)]
+    source_generation_id: Option<String>,
+    #[arg(long, default_value = "manual", value_parser = ["direct", "canary", "manual"])]
+    rollout_strategy: String,
+    #[arg(long)]
+    notes: Option<String>,
+    #[command(flatten)]
+    common: HostedCommonArgs,
+}
+
+#[derive(Args, Debug)]
+struct ReleaseQueryArgs {
+    #[arg(long = "release", alias = "release-id")]
+    release_id: String,
+    #[arg(long, default_value = "summary", value_parser = ["summary", "evidence"])]
+    view: String,
+    #[command(flatten)]
+    common: HostedCommonArgs,
+}
+
+#[derive(Args, Debug)]
+struct ReleaseExplainArgs {
+    #[arg(long = "release", alias = "release-id")]
+    release_id: String,
+    #[command(flatten)]
+    common: HostedCommonArgs,
+}
+
+#[derive(Args, Debug)]
+struct ReleaseRollbackArgs {
+    #[arg(long = "release", alias = "release-id")]
+    release_id: String,
+    #[arg(long)]
+    reason: String,
+    #[command(flatten)]
+    common: HostedCommonArgs,
+}
+
+#[derive(Args, Debug)]
+struct BindingStatusArgs {
+    #[arg(long = "binding", alias = "binding-id")]
+    binding_id: Option<String>,
+    #[command(flatten)]
+    common: HostedCommonArgs,
+}
+
+#[derive(Args, Debug)]
 struct IncidentCaptureArgs {
     #[arg(long = "deployment", alias = "deployment-id")]
     deployment_id: Option<String>,
@@ -790,6 +851,11 @@ fn real_main() -> Result<i32> {
         Commands::Project(args) => command_project(args)?,
         Commands::Env(args) => command_environment(args)?,
         Commands::Context(args) => command_context(args)?,
+        Commands::ReleaseSubmit(args) => command_release_submit(args)?,
+        Commands::ReleaseQuery(args) => command_release_query(args)?,
+        Commands::ReleaseExplain(args) => command_release_explain(args)?,
+        Commands::ReleaseRollback(args) => command_release_rollback(args)?,
+        Commands::BindingStatus(args) => command_binding_status(args)?,
         Commands::UiServe(args) => return command_ui_serve(args),
         Commands::Accept(args) => command_accept(args)?,
         Commands::Run(args) => command_run(args)?,
@@ -1159,8 +1225,9 @@ fn validate_target_profile_doc(doc: &Value) -> Result<()> {
     if get_str(doc, &["schema_version"]).as_deref() != Some("lp.target.profile@0.1.0") {
         bail!("invalid target profile schema_version");
     }
-    if get_str(doc, &["kind"]).as_deref() != Some("oss_remote") {
-        bail!("invalid target profile kind");
+    let kind = get_str(doc, &["kind"]).ok_or_else(|| anyhow!("missing target kind"))?;
+    if !matches!(kind.as_str(), "oss_remote" | "hosted" | "k8s" | "wasmcloud") {
+        bail!("unsupported target profile kind: {kind}");
     }
     if get_str(doc, &["api_version"]).as_deref() != Some("v1") {
         bail!("invalid target api_version");
@@ -1229,7 +1296,19 @@ fn validate_target_profile_doc(doc: &Value) -> Result<()> {
         ensure_regular_file(path, "oci_tls.ca_bundle_path")?;
         let _ = load_pem_certificates(path)?;
     }
+    if kind == "k8s" && get_str(doc, &["default_namespace"]).is_none() {
+        bail!("k8s targets require default_namespace");
+    }
+    if kind == "wasmcloud" && get_str(doc, &["lattice_id"]).is_none() {
+        bail!("wasmcloud targets require lattice_id");
+    }
     Ok(())
+}
+
+fn profile_supports_remote_probe(profile: &Value) -> bool {
+    get_str(profile, &["base_url"]).is_some()
+        && get_str(profile, &["api_version"]).as_deref() == Some("v1")
+        && get_str(profile, &["auth", "kind"]).as_deref() == Some("static_bearer")
 }
 
 fn load_target_profile_doc(name: &str) -> Result<Value> {
@@ -4731,6 +4810,7 @@ fn build_remote_execution_meta(exec_doc: &Value, run_doc: &Value, local_meta: &V
                 "oci_tls": Value::Null,
                 "default_namespace": Value::Null,
                 "default_env": Value::Null,
+                "cluster_ref": Value::Null,
                 "lattice_id": Value::Null,
                 "telemetry_collector_hint": Value::Null
             })
@@ -7369,6 +7449,115 @@ fn command_context(args: HostedContextArgs) -> Result<Value> {
     }
 }
 
+fn command_release_submit(args: ReleaseSubmitArgs) -> Result<Value> {
+    hosted_command_result(
+        "release submit",
+        "LP_HOSTED_API_FAILED",
+        32,
+        (|| {
+            let session = ensure_hosted_session_ready(args.common.api_base.as_deref())?;
+            let mut body = Map::new();
+            body.insert(
+                "schema_version".to_string(),
+                json!("lp.release.submit.request@0.1.0"),
+            );
+            body.insert("workload_id".to_string(), json!(args.workload_id));
+            body.insert("pack_digest".to_string(), json!(args.pack_digest));
+            body.insert("rollout_strategy".to_string(), json!(args.rollout_strategy));
+            if let Some(environment_id) = args.environment_id {
+                body.insert("environment_id".to_string(), json!(environment_id));
+            }
+            if let Some(target_id) = args.target_id {
+                body.insert("target_id".to_string(), json!(target_id));
+            }
+            if let Some(source_generation_id) = args.source_generation_id {
+                body.insert(
+                    "source_generation_id".to_string(),
+                    json!(source_generation_id),
+                );
+            }
+            if let Some(notes) = args.notes {
+                body.insert("notes".to_string(), json!(notes));
+            }
+            hosted_v1_request_report(
+                &session,
+                "POST",
+                "/v1/releases/submit",
+                Some(&Value::Object(body)),
+            )
+        })(),
+    )
+}
+
+fn command_release_query(args: ReleaseQueryArgs) -> Result<Value> {
+    hosted_command_result(
+        "release query",
+        "LP_HOSTED_API_FAILED",
+        32,
+        (|| {
+            let session = ensure_hosted_session_ready(args.common.api_base.as_deref())?;
+            let path = if args.view == "evidence" {
+                format!("/v1/releases/{}/evidence", args.release_id)
+            } else {
+                format!("/v1/releases/{}", args.release_id)
+            };
+            hosted_v1_request_report(&session, "GET", &path, None)
+        })(),
+    )
+}
+
+fn command_release_explain(args: ReleaseExplainArgs) -> Result<Value> {
+    hosted_command_result(
+        "release explain",
+        "LP_HOSTED_API_FAILED",
+        32,
+        (|| {
+            let session = ensure_hosted_session_ready(args.common.api_base.as_deref())?;
+            hosted_v1_request_report(
+                &session,
+                "GET",
+                &format!("/v1/releases/{}/review", args.release_id),
+                None,
+            )
+        })(),
+    )
+}
+
+fn command_release_rollback(args: ReleaseRollbackArgs) -> Result<Value> {
+    hosted_command_result(
+        "release rollback",
+        "LP_HOSTED_API_FAILED",
+        32,
+        (|| {
+            let session = ensure_hosted_session_ready(args.common.api_base.as_deref())?;
+            hosted_v1_request_report(
+                &session,
+                "POST",
+                &format!("/v1/releases/{}/rollback", args.release_id),
+                Some(&json!({ "reason": args.reason })),
+            )
+        })(),
+    )
+}
+
+fn command_binding_status(args: BindingStatusArgs) -> Result<Value> {
+    hosted_command_result(
+        "binding status",
+        "LP_HOSTED_API_FAILED",
+        32,
+        (|| {
+            let session = ensure_hosted_session_ready(args.common.api_base.as_deref())?;
+            let path = match args.binding_id.as_deref() {
+                Some(binding_id) if !binding_id.is_empty() => {
+                    format!("/v1/bindings/{binding_id}")
+                }
+                _ => "/v1/bindings/status".to_string(),
+            };
+            hosted_v1_request_report(&session, "GET", &path, None)
+        })(),
+    )
+}
+
 fn agent_with_ca_bundle(ca_bundle_path: Option<&Path>) -> Result<Agent> {
     let connector = native_tls_connector(ca_bundle_path)?;
     Ok(ureq::AgentBuilder::new().tls_connector(connector).build())
@@ -7696,7 +7885,7 @@ fn attach_remote_execution_context(
     let remote = json!({
         "target_profile": {
             "name": target.name,
-            "kind": "oss_remote",
+            "kind": get_str(&target.profile, &["kind"]).unwrap_or_else(|| "oss_remote".to_string()),
             "base_url": target.base_url,
             "api_version": get_str(&target.profile, &["api_version"]).unwrap_or_else(|| REMOTE_API_VERSION.to_string()),
             "auth_kind": get_str(&target.profile, &["auth", "kind"]).unwrap_or_else(|| "static_bearer".to_string()),
@@ -7708,6 +7897,7 @@ fn attach_remote_execution_context(
             "oci_tls": get_path(&target.profile, &["oci_tls"]).cloned().unwrap_or(Value::Null),
             "default_namespace": get_path(&target.profile, &["default_namespace"]).cloned().unwrap_or(Value::Null),
             "default_env": get_path(&target.profile, &["default_env"]).cloned().unwrap_or(Value::Null),
+            "cluster_ref": get_path(&target.profile, &["cluster_ref"]).cloned().unwrap_or(Value::Null),
             "lattice_id": get_path(&target.profile, &["lattice_id"]).cloned().unwrap_or(Value::Null),
             "telemetry_collector_hint": get_path(&target.profile, &["telemetry_collector_hint"])
                 .cloned()
@@ -8189,9 +8379,13 @@ fn build_target_list_item(
     last_checked_unix_ms: u64,
 ) -> Value {
     let name = get_str(doc, &["name"]).unwrap_or_default();
-    let reachable = match resolve_remote_target(Some(&name)) {
-        Ok(Some(target)) => remote_health_check(&target),
-        _ => false,
+    let reachable = if profile_supports_remote_probe(doc) {
+        match resolve_remote_target(Some(&name)) {
+            Ok(Some(target)) => remote_health_check(&target),
+            _ => false,
+        }
+    } else {
+        false
     };
     json!({
         "name": name,
@@ -8248,45 +8442,49 @@ fn command_target_add(args: TargetAddArgs) -> Result<Value> {
             ));
         }
     };
-    match remote_health_status(&target) {
-        Ok(true) => {}
-        Ok(false) => {
-            return Ok(cli_report(
-                "target add",
-                false,
-                42,
-                json!({
-                    "name": name,
-                    "profile_path": profile_path.to_string_lossy()
-                }),
-                None,
-                vec![result_diag(
-                    "LP_REMOTE_TARGET_UNREACHABLE",
-                    "run",
-                    "remote health endpoint returned ok=false",
-                    "error",
-                )],
-            ));
+    let reachable = if profile_supports_remote_probe(&doc) {
+        match remote_health_status(&target) {
+            Ok(true) => true,
+            Ok(false) => {
+                return Ok(cli_report(
+                    "target add",
+                    false,
+                    42,
+                    json!({
+                        "name": name,
+                        "profile_path": profile_path.to_string_lossy()
+                    }),
+                    None,
+                    vec![result_diag(
+                        "LP_REMOTE_TARGET_UNREACHABLE",
+                        "run",
+                        "remote health endpoint returned ok=false",
+                        "error",
+                    )],
+                ));
+            }
+            Err(err) => {
+                return Ok(cli_report(
+                    "target add",
+                    false,
+                    42,
+                    json!({
+                        "name": name,
+                        "profile_path": profile_path.to_string_lossy()
+                    }),
+                    None,
+                    vec![result_diag(
+                        "LP_REMOTE_TARGET_UNREACHABLE",
+                        "run",
+                        &err.to_string(),
+                        "error",
+                    )],
+                ));
+            }
         }
-        Err(err) => {
-            return Ok(cli_report(
-                "target add",
-                false,
-                42,
-                json!({
-                    "name": name,
-                    "profile_path": profile_path.to_string_lossy()
-                }),
-                None,
-                vec![result_diag(
-                    "LP_REMOTE_TARGET_UNREACHABLE",
-                    "run",
-                    &err.to_string(),
-                    "error",
-                )],
-            ));
-        }
-    }
+    } else {
+        false
+    };
     let stored_path = store_target_profile_doc(&doc)?;
     Ok(cli_report(
         "target add",
@@ -8295,7 +8493,7 @@ fn command_target_add(args: TargetAddArgs) -> Result<Value> {
         json!({
             "name": name,
             "profile_path": stored_path.to_string_lossy(),
-            "reachable": true
+            "reachable": reachable
         }),
         None,
         Vec::new(),
@@ -8362,9 +8560,13 @@ fn command_target_list(_args: TargetListArgs) -> Result<Value> {
 fn command_target_inspect(args: TargetInspectArgs) -> Result<Value> {
     let doc = load_target_profile_doc(&args.name)?;
     let active = current_target_name()?.as_deref() == Some(args.name.as_str());
-    let capabilities = match resolve_remote_target(Some(&args.name)) {
-        Ok(Some(target)) => remote_capabilities(&target).ok(),
-        _ => None,
+    let capabilities = if profile_supports_remote_probe(&doc) {
+        match resolve_remote_target(Some(&args.name)) {
+            Ok(Some(target)) => remote_capabilities(&target).ok(),
+            _ => None,
+        }
+    } else {
+        None
     };
     Ok(cli_report(
         "target inspect",
@@ -8843,7 +9045,7 @@ fn hosted_accept_prepared(
 fn remote_target_result(target: &ResolvedTarget) -> Value {
     json!({
         "name": target.name,
-        "kind": "oss_remote",
+        "kind": get_str(&target.profile, &["kind"]).unwrap_or_else(|| "oss_remote".to_string()),
         "base_url": target.base_url,
     })
 }
@@ -18764,6 +18966,267 @@ mod tests {
         assert_eq!(rerun_body.get("from_step").and_then(Value::as_u64), Some(3));
         assert_eq!(requests[5].path, "/v1/deployments/lpexec_remote/rollback");
         assert_eq!(requests[6].path, "/v1/deployments/lpexec_remote/stop");
+        Ok(())
+    }
+
+    #[test]
+    fn hosted_sentinel_commands_shape_requests() -> Result<()> {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = TempDir::new("hosted-sentinel-commands")?;
+        let _config = ScopedEnvVar::set("X07LP_CONFIG_DIR", &tmp.path.to_string_lossy());
+        let observed = Arc::new(Mutex::new(Vec::<ObservedRequest>::new()));
+        let observed_requests = Arc::clone(&observed);
+        let server = MockServer::spawn(move |_base_url| {
+            move |request| {
+                observed_requests.lock().unwrap().push(ObservedRequest {
+                    method: request.method.clone(),
+                    path: request.path.clone(),
+                    query: request.query.clone(),
+                    body: request.body.clone(),
+                    authorization: request.headers.get("authorization").cloned(),
+                });
+                match (request.method.as_str(), request.path.as_str()) {
+                    ("POST", "/v1/releases/submit") => TestResponse::json(
+                        200,
+                        wrapped_cli_report(
+                            "release submit",
+                            json!({
+                                "schema_version": "lp.release.query.result@0.1.0",
+                                "release_id": "lprel_demo",
+                                "workload_id": "demo.api",
+                                "status": "submitted",
+                                "pack_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                                "target_id": "target.hosted.demo",
+                                "evidence_count": 2,
+                                "latest_decision_id": null,
+                                "created_unix_ms": 1,
+                                "updated_unix_ms": 2
+                            }),
+                        ),
+                    ),
+                    ("GET", "/v1/releases/lprel_demo") => TestResponse::json(
+                        200,
+                        wrapped_cli_report(
+                            "release query",
+                            json!({
+                                "schema_version": "lp.release.query.result@0.1.0",
+                                "release_id": "lprel_demo",
+                                "workload_id": "demo.api",
+                                "status": "under_review",
+                                "pack_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                                "target_id": "target.hosted.demo",
+                                "evidence_count": 3,
+                                "latest_decision_id": "lpdec_demo",
+                                "created_unix_ms": 1,
+                                "updated_unix_ms": 3
+                            }),
+                        ),
+                    ),
+                    ("GET", "/v1/releases/lprel_demo/evidence") => TestResponse::json(
+                        200,
+                        wrapped_cli_report(
+                            "release query",
+                            json!({
+                                "schema_version": "lp.release.evidence.bundle@0.1.0",
+                                "release_id": "lprel_demo",
+                                "items": [
+                                    {
+                                        "evidence_kind": "policy_eval",
+                                        "created_unix_ms": 3,
+                                        "inline_json": {"result": "allow"}
+                                    }
+                                ]
+                            }),
+                        ),
+                    ),
+                    ("GET", "/v1/releases/lprel_demo/review") => TestResponse::json(
+                        200,
+                        wrapped_cli_report(
+                            "release explain",
+                            json!({
+                                "schema_version": "lpcloud.release.review.bundle@0.1.0",
+                                "release_id": "lprel_demo",
+                                "generated_unix_ms": 3,
+                                "reviews": [{"review_id": "lprev_demo"}],
+                                "decisions": [{"decision_id": "lpdec_demo"}]
+                            }),
+                        ),
+                    ),
+                    ("POST", "/v1/releases/lprel_demo/rollback") => TestResponse::json(
+                        200,
+                        wrapped_cli_report(
+                            "release rollback",
+                            json!({
+                                "schema_version": "lp.release.query.result@0.1.0",
+                                "release_id": "lprel_demo",
+                                "workload_id": "demo.api",
+                                "status": "rolled_back",
+                                "pack_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                                "target_id": "target.hosted.demo",
+                                "evidence_count": 4,
+                                "latest_decision_id": "lpdec_rollback",
+                                "created_unix_ms": 1,
+                                "updated_unix_ms": 4
+                            }),
+                        ),
+                    ),
+                    ("GET", "/v1/bindings/status") => TestResponse::json(
+                        200,
+                        wrapped_cli_report(
+                            "binding status",
+                            json!({
+                                "schema_version": "lp.binding.status.result@0.1.0",
+                                "view": "list",
+                                "items": [
+                                    {
+                                        "binding_id": "binding.sqlite.env_demo",
+                                        "name": "managed-sqlite",
+                                        "kind": "sqlite",
+                                        "status": "ready",
+                                        "provider_kind": "lpcloud.sqlite.shared_v1",
+                                        "last_checked_unix_ms": 4,
+                                        "message": "healthy"
+                                    }
+                                ],
+                                "generated_unix_ms": 4
+                            }),
+                        ),
+                    ),
+                    ("GET", "/v1/bindings/binding.sqlite.env_demo") => TestResponse::json(
+                        200,
+                        wrapped_cli_report(
+                            "binding status",
+                            json!({
+                                "schema_version": "lp.binding.status.result@0.1.0",
+                                "view": "detail",
+                                "items": [
+                                    {
+                                        "binding_id": "binding.sqlite.env_demo",
+                                        "name": "managed-sqlite",
+                                        "kind": "sqlite",
+                                        "status": "ready",
+                                        "provider_kind": "lpcloud.sqlite.shared_v1",
+                                        "last_checked_unix_ms": 4,
+                                        "message": "healthy"
+                                    }
+                                ],
+                                "generated_unix_ms": 4
+                            }),
+                        ),
+                    ),
+                    _ => TestResponse::json(404, json!({"error":"not_found"})),
+                }
+            }
+        })?;
+        let session = sample_session(
+            &server.base_url,
+            "access.live",
+            "refresh.live",
+            now_ms().saturating_add(60_000),
+        );
+        let _ = store_hosted_session_doc(&session)?;
+
+        let _ = command_release_submit(ReleaseSubmitArgs {
+            workload_id: "demo.api".to_string(),
+            pack_digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                .to_string(),
+            environment_id: Some("env_demo".to_string()),
+            target_id: Some("target.hosted.demo".to_string()),
+            source_generation_id: Some("gen_demo".to_string()),
+            rollout_strategy: "canary".to_string(),
+            notes: Some("candidate ready".to_string()),
+            common: HostedCommonArgs {
+                api_base: None,
+                json: true,
+            },
+        })?;
+        let _ = command_release_query(ReleaseQueryArgs {
+            release_id: "lprel_demo".to_string(),
+            view: "summary".to_string(),
+            common: HostedCommonArgs {
+                api_base: None,
+                json: true,
+            },
+        })?;
+        let _ = command_release_query(ReleaseQueryArgs {
+            release_id: "lprel_demo".to_string(),
+            view: "evidence".to_string(),
+            common: HostedCommonArgs {
+                api_base: None,
+                json: true,
+            },
+        })?;
+        let _ = command_release_explain(ReleaseExplainArgs {
+            release_id: "lprel_demo".to_string(),
+            common: HostedCommonArgs {
+                api_base: None,
+                json: true,
+            },
+        })?;
+        let _ = command_release_rollback(ReleaseRollbackArgs {
+            release_id: "lprel_demo".to_string(),
+            reason: "manual rollback".to_string(),
+            common: HostedCommonArgs {
+                api_base: None,
+                json: true,
+            },
+        })?;
+        let _ = command_binding_status(BindingStatusArgs {
+            binding_id: None,
+            common: HostedCommonArgs {
+                api_base: None,
+                json: true,
+            },
+        })?;
+        let _ = command_binding_status(BindingStatusArgs {
+            binding_id: Some("binding.sqlite.env_demo".to_string()),
+            common: HostedCommonArgs {
+                api_base: None,
+                json: true,
+            },
+        })?;
+
+        let requests = observed.lock().unwrap();
+        assert_eq!(requests.len(), 7);
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].path, "/v1/releases/submit");
+        assert_eq!(
+            requests[0].authorization.as_deref(),
+            Some("Bearer access.live")
+        );
+        let submit_body: Value = serde_json::from_slice(&requests[0].body)?;
+        assert_eq!(
+            submit_body.get("schema_version").and_then(Value::as_str),
+            Some("lp.release.submit.request@0.1.0")
+        );
+        assert_eq!(
+            submit_body.get("workload_id").and_then(Value::as_str),
+            Some("demo.api")
+        );
+        assert_eq!(
+            submit_body.get("rollout_strategy").and_then(Value::as_str),
+            Some("canary")
+        );
+        assert_eq!(requests[1].method, "GET");
+        assert_eq!(requests[1].path, "/v1/releases/lprel_demo");
+        assert_eq!(requests[2].method, "GET");
+        assert_eq!(requests[2].path, "/v1/releases/lprel_demo/evidence");
+        assert_eq!(requests[3].method, "GET");
+        assert_eq!(requests[3].path, "/v1/releases/lprel_demo/review");
+        assert_eq!(requests[4].method, "POST");
+        assert_eq!(requests[4].path, "/v1/releases/lprel_demo/rollback");
+        let rollback_body: Value = serde_json::from_slice(&requests[4].body)?;
+        assert_eq!(
+            rollback_body.get("reason").and_then(Value::as_str),
+            Some("manual rollback")
+        );
+        assert_eq!(requests[5].method, "GET");
+        assert_eq!(requests[5].path, "/v1/bindings/status");
+        assert_eq!(requests[6].method, "GET");
+        assert_eq!(requests[6].path, "/v1/bindings/binding.sqlite.env_demo");
         Ok(())
     }
 

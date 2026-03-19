@@ -16,6 +16,7 @@ The repo is local-first. The same contracts and operator model are used for:
 
 - local deploy and device-release demos
 - self-hosted OSS remote targets, currently the wasmCloud reference target
+- additive target-profile support for hosted, Kubernetes, and wasmCloud control-plane attachments
 - a future hosted boundary; the managed product is intentionally not the main demo path in this repo
 
 It ships a dark-themed **Command Center** web UI, a full-featured **CLI** (`x07lp`), and an **MCP tool surface** so AI agents can consume the same deploy, incident, and release state programmatically.
@@ -50,6 +51,7 @@ That makes `x07-platform` the production operations part of the language ecosyst
 | **Regression generation** | Generates automated test fixtures from incidents via `x07-wasm app regress from-incident`. |
 | **Operator controls** | Pause, rerun, rollback, stop, app kill/unkill, and platform kill/unkill from CLI, UI, or MCP tools. |
 | **Self-hosted remote targets** | Onboard wasmCloud-based self-hosted targets and deploy the same sealed artifacts remotely. |
+| **Workload and release draft surfaces** | Carry workload-pack inventory, topology preview, binding status, and release-review documents alongside the existing deploy and device-release loop. |
 | **Device release orchestration** | Create staged iOS and Android release plans and supervise rollout through App Store Connect and Google Play mock providers. |
 | **Command Center UI** | Dark-themed web dashboard for real-time monitoring of apps, deployments, incidents, regressions, and device releases. |
 | **MCP tool integration** | Expose all surfaces (deploy, incident, regression, app, platform, device release) as MCP tools for agent consumption. |
@@ -75,12 +77,14 @@ Extra prerequisites:
 
 - **Python 3** for helper scripts and JSON parsing in the walkthrough below
 - **Docker** if you want to run the self-hosted wasmCloud target
+- **A remote v1 control-plane endpoint** if you want to attach hosted or Kubernetes targets through `lp.target.profile@0.1.0`
 
 ## Practical Ways To Use It
 
 - **Standalone local demo:** use the bundled fixtures to understand the deploy, incident, and device-release loop without any external services
 - **Self-hosted control plane:** point `x07lp` at a target and run the same contracts against a remote environment
 - **Agent-operated platform:** let an MCP-aware coding agent inspect executions, read incidents, and trigger safe controls without scraping logs or dashboards
+- **Hosted Sentinel review loop:** use `x07lp release-submit`, `release-query`, `release-explain`, `release-rollback`, and `binding-status` against a hosted control-plane session
 - **End-to-end app release path:** pair it with `x07-wasm app pack`, `x07-wasm deploy plan`, and incident-derived regression generation
 
 ## Run From Source
@@ -182,7 +186,7 @@ Capture an incident bundle from an HTTP 5xx, runtime failure, or manual trigger.
 
 ### 4. Deploy to a self-hosted remote target
 
-Add a self-hosted wasmCloud target, inspect its adapter capabilities, select it, and deploy the same sealed artifact remotely without changing the artifact format.
+Add a self-hosted wasmCloud target, inspect its adapter capabilities, select it, and deploy the same sealed artifact remotely without changing the artifact format. The target profile boundary is additive now: `oss_remote`, `hosted`, `k8s`, and `wasmcloud` all use the same `lp.target.profile@0.1.0` document, with example profiles under `examples/targets/`.
 
 ### 5. Orchestrate device releases
 
@@ -191,6 +195,26 @@ Build iOS and Android packages with `x07-wasm device package`, create staged rel
 ### 6. Consume state through MCP
 
 AI agents can consume deploy, incident, regression, app, platform, and device-release state through the MCP tool surface. The MCP router serves the same data as the CLI and UI.
+
+### 7. Drive hosted release review and binding checks
+
+When you have a hosted session (`x07lp login`), the same CLI can submit a workload candidate and inspect the hosted Sentinel review state:
+
+```bash
+x07lp release-submit \
+  --workload-id demo.api \
+  --pack-digest sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef \
+  --environment-id env_demo \
+  --target-id target.hosted.demo \
+  --rollout-strategy canary \
+  --notes "candidate ready" \
+  --json
+
+x07lp release-query --release lprel_demo --json
+x07lp release-query --release lprel_demo --view evidence --json
+x07lp release-explain --release lprel_demo --json
+x07lp binding-status --json
+```
 
 ## Command Center UI
 
@@ -551,7 +575,7 @@ Run the Android release the same way, swapping in `crewops_android_mock_provider
 
 ## Hosted Note
 
-The CLI includes hosted auth and context commands (`login`, `whoami`, `org`, `project`, `env`, `context`). Those are the client boundary for the future managed product, not the primary demo path. The production-ready demo is the local plus self-hosted OSS line described above.
+The CLI includes hosted auth and context commands (`login`, `whoami`, `org`, `project`, `env`, `context`). It also now carries the draft workload, topology, binding, and release schema set consumed from `x07-platform-contracts`. Those are the client boundary for the managed product line, while the production-ready demo remains the local plus self-hosted OSS path described above.
 
 ## Verification and CI
 
@@ -577,4 +601,4 @@ Focused gates:
 | Engine and daemon | `tools/x07lp-driver/src/main.rs` |
 | Command Center UI | `ui/command-center/dist/` |
 
-For more detail: `docs/quickstart.md`, `docs/ci.md`, `examples/targets/wasmcloud/README.md`.
+For more detail: `docs/quickstart.md`, `docs/ci.md`, `examples/targets/wasmcloud/README.md`, `examples/targets/kubernetes/README.md`.

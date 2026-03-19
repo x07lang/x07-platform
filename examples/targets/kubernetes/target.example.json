@@ -1,0 +1,29 @@
+{
+  "schema_version": "lp.target.profile@0.1.0",
+  "name": "prod-k8s",
+  "kind": "k8s",
+  "base_url": "https://platform.example.com",
+  "api_version": "v1",
+  "auth": {
+    "kind": "static_bearer",
+    "token_ref": "file:///Users/you/.config/x07lp/tokens/prod-k8s.token"
+  },
+  "tls": {
+    "mode": "system"
+  },
+  "runtime_provider": "lp.impl.runtime.k8s_v1",
+  "routing_provider": "lp.impl.routing.k8s_ingress_v1",
+  "oci_registry": "registry.example.com",
+  "oci_auth": {
+    "kind": "basic",
+    "username_ref": "file:///Users/you/.config/x07lp/targets/prod-k8s.oci.username",
+    "password_ref": "file:///Users/you/.config/x07lp/targets/prod-k8s.oci.password"
+  },
+  "oci_tls": {
+    "mode": "system"
+  },
+  "cluster_ref": "prod-us-west-2",
+  "default_namespace": "x07",
+  "default_env": "prod",
+  "telemetry_collector_hint": "https://otel.example.com/v1/metrics"
+}
