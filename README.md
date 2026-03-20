@@ -51,7 +51,7 @@ That makes `x07-platform` the production operations part of the language ecosyst
 | **Regression generation** | Generates automated test fixtures from incidents via `x07-wasm app regress from-incident`. |
 | **Operator controls** | Pause, rerun, rollback, stop, app kill/unkill, and platform kill/unkill from CLI, UI, or MCP tools. |
 | **Self-hosted remote targets** | Onboard wasmCloud-based self-hosted targets and deploy the same sealed artifacts remotely. |
-| **Workload and release surfaces** | Carry workload-pack inventory, topology preview, binding status, hosted release-review documents, and a local Kubernetes workload lane alongside the existing deploy and device-release loop. |
+| **Workload and release surfaces** | Carry workload-pack inventory, topology preview, binding status, hosted release-review documents, and a local Kubernetes workload lane for HTTP, event-consumer, and scheduled-job cells alongside the existing deploy and device-release loop. |
 | **Device release orchestration** | Create staged iOS and Android release plans and supervise rollout through App Store Connect and Google Play mock providers. |
 | **Command Center UI** | Dark-themed web dashboard for real-time monitoring of apps, deployments, incidents, regressions, and device releases. |
 | **MCP tool integration** | Expose all surfaces (deploy, incident, regression, app, platform, device release) as MCP tools for agent consumption. |
@@ -186,6 +186,12 @@ That smoke:
 - adds a `k8s` target profile to `x07lp`
 - runs `x07lp workload accept`, `workload run`, `workload query`, `workload bindings`, and `workload stop`
 - verifies the ingress route from the host before and after teardown
+
+The workload driver now keeps the richer `x07.workload.pack@0.1.0` cell hints intact across accept, manifest render, and query refresh:
+
+- `http` cells render `Deployment`, `Service`, and `Ingress` resources with HTTP or exec probes and optional CPU-backed HPA objects
+- `event` cells render `Deployment` resources with probe, rollout, autoscaling, and event-bus metadata carried as container env plus workload annotations
+- `schedule` cells render `CronJob` resources with cron, timezone, concurrency, retry, and suspend settings, and workload query now reports desired versus observed state for those cells instead of flattening everything into the old HTTP-only status view
 
 Use `bash scripts/ci/target-conformance.sh k8s` when you want the stable target-suite entrypoint for the same local lane. The same entrypoint also carries `local`, `wasmcloud`, and `all` so target conformance is no longer a Kubernetes-only one-off.
 

@@ -106,15 +106,119 @@ struct LoadedWorkloadPack {
 }
 
 #[derive(Debug, Clone)]
+struct K8sBindingProbeHint {
+    binding_ref: String,
+    binding_kind: String,
+}
+
+#[derive(Debug, Clone)]
+struct K8sProbe {
+    probe_kind: String,
+    path: Option<String>,
+    port: Option<u16>,
+    command: Vec<String>,
+    initial_delay_seconds: Option<u64>,
+    period_seconds: Option<u64>,
+    timeout_seconds: Option<u64>,
+    success_threshold: Option<u64>,
+    failure_threshold: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct K8sProbeSet {
+    readiness: Option<K8sProbe>,
+    liveness: Option<K8sProbe>,
+    startup: Option<K8sProbe>,
+}
+
+#[derive(Debug, Clone)]
+struct K8sEventRuntime {
+    binding_ref: String,
+    topic: String,
+    consumer_group: Option<String>,
+    ack_mode: Option<String>,
+    max_in_flight: Option<u64>,
+    drain_timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct K8sScheduleRuntime {
+    cron: String,
+    timezone: Option<String>,
+    concurrency_policy: Option<String>,
+    retry_limit: Option<u64>,
+    start_deadline_seconds: Option<u64>,
+    suspend: bool,
+}
+
+#[derive(Debug, Clone)]
+struct K8sRollout {
+    strategy: String,
+    max_unavailable: Option<String>,
+    max_surge: Option<String>,
+    canary_percent: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct K8sAutoscaling {
+    min_replicas: u64,
+    max_replicas: u64,
+    target_cpu_utilization: Option<u64>,
+    target_inflight: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum K8sCellResourceKind {
+    Deployment,
+    CronJob,
+}
+
+#[derive(Debug, Clone)]
 struct K8sCellDeployment {
     cell_key: String,
+    cell_kind: String,
+    ingress_kind: String,
+    runtime_class: String,
+    scale_class: String,
+    topology_group: String,
+    binding_refs: Vec<String>,
+    binding_probe_hints: Vec<K8sBindingProbeHint>,
     image: String,
-    container_port: u16,
-    health_path: String,
-    deployment_name: String,
-    service_name: String,
-    ingress_name: String,
-    route_path: String,
+    container_port: Option<u16>,
+    deployment_name: Option<String>,
+    service_name: Option<String>,
+    ingress_name: Option<String>,
+    cronjob_name: Option<String>,
+    hpa_name: Option<String>,
+    route_path: Option<String>,
+    probes: K8sProbeSet,
+    event: Option<K8sEventRuntime>,
+    schedule: Option<K8sScheduleRuntime>,
+    rollout: Option<K8sRollout>,
+    autoscaling: Option<K8sAutoscaling>,
+}
+
+impl K8sCellDeployment {
+    fn resource_kind(&self) -> K8sCellResourceKind {
+        if self.ingress_kind == "schedule" {
+            K8sCellResourceKind::CronJob
+        } else {
+            K8sCellResourceKind::Deployment
+        }
+    }
+
+    fn desired_state(&self) -> &'static str {
+        if self
+            .schedule
+            .as_ref()
+            .map(|schedule| schedule.suspend)
+            .unwrap_or(false)
+        {
+            "paused"
+        } else {
+            "running"
+        }
+    }
 }
 
 pub(crate) fn command_workload(args: WorkloadArgs) -> Result<Value> {
@@ -248,7 +352,9 @@ fn command_run(args: WorkloadRunArgs) -> Result<Value> {
         kubectl_apply_path(&target_profile, path)?;
     }
     for cell in &cells {
-        kubectl_rollout_status(&target_profile, &namespace, &cell.deployment_name)?;
+        if let Some(deployment_name) = cell.deployment_name.as_deref() {
+            kubectl_rollout_status(&target_profile, &namespace, deployment_name)?;
+        }
     }
 
     let deployment_doc = live_deployment_doc(
@@ -307,12 +413,18 @@ fn command_query(args: WorkloadQueryArgs) -> Result<Value> {
         let deployment = current_deployment_doc(&state_dir, workload_id)?
             .map(|doc| refresh_deployment_doc(target_profile.as_ref(), doc))
             .transpose()?;
+        let workload_doc = render_workload_result_doc(
+            accepted.get("workload").unwrap_or(&Value::Null),
+            deployment.as_ref(),
+            target_profile.as_ref(),
+            &args.view,
+        )?;
         return Ok(cli_report(
             "workload query",
             true,
             0,
             json!({
-                "workload": accepted.get("workload").cloned().unwrap_or(Value::Null),
+                "workload": workload_doc,
                 "bindings": bindings,
                 "topology": accepted.get("topology").cloned().unwrap_or_else(|| json!([])),
                 "deployment": deployment.unwrap_or(Value::Null),
@@ -329,6 +441,11 @@ fn command_query(args: WorkloadQueryArgs) -> Result<Value> {
         let accepted = load_json(&path)?;
         let workload = accepted.get("workload").cloned().unwrap_or(Value::Null);
         let workload_id = workload_id(&workload)?;
+        let target_profile = resolve_k8s_target_for_workload(
+            None,
+            accepted.get("target").and_then(Value::as_object),
+        )
+        .ok();
         let display_name =
             get_str(&workload, &["display_name"]).unwrap_or_else(|| workload_id.clone());
         let cell_count = workload
@@ -336,7 +453,9 @@ fn command_query(args: WorkloadQueryArgs) -> Result<Value> {
             .and_then(Value::as_array)
             .map(|items| items.len())
             .unwrap_or(0);
-        let deployment = current_deployment_doc(&state_dir, &workload_id)?;
+        let deployment = current_deployment_doc(&state_dir, &workload_id)?
+            .map(|doc| refresh_deployment_doc(target_profile.as_ref(), doc))
+            .transpose()?;
         let health = deployment
             .as_ref()
             .and_then(|doc| get_str(doc, &["health"]))
@@ -351,12 +470,21 @@ fn command_query(args: WorkloadQueryArgs) -> Result<Value> {
             .and_then(|doc| get_path(doc, &["updated_unix_ms"]).and_then(Value::as_u64))
             .or_else(|| get_path(&accepted, &["accepted_unix_ms"]).and_then(Value::as_u64))
             .unwrap_or(0);
+        let desired_state = desired_state_for_deployment(deployment.as_ref());
+        let observed_state = observed_state_for_deployment(deployment.as_ref());
+        let active_target_id = active_target_id(
+            deployment.as_ref().and_then(|doc| doc.get("target")),
+            target_profile.as_ref(),
+        );
         items.push(json!({
             "workload_id": workload_id,
             "display_name": display_name,
             "cell_count": cell_count.max(1),
             "latest_release_id": latest_release_id,
             "health": health,
+            "desired_state": desired_state,
+            "observed_state": observed_state,
+            "active_target_id": active_target_id,
             "updated_unix_ms": updated_unix_ms,
         }));
     }
@@ -396,6 +524,8 @@ fn command_stop(args: WorkloadStopArgs) -> Result<Value> {
         for (kind, key) in [
             ("ingress", "ingress_name"),
             ("service", "service_name"),
+            ("horizontalpodautoscaler", "hpa_name"),
+            ("cronjob", "cronjob_name"),
             ("deployment", "deployment_name"),
         ] {
             if let Some(name) = cell.get(key).and_then(Value::as_str) {
@@ -407,13 +537,20 @@ fn command_stop(args: WorkloadStopArgs) -> Result<Value> {
     if let Some(map) = stopped.as_object_mut() {
         map.insert("status".to_string(), json!("stopped"));
         map.insert("health".to_string(), json!("unknown"));
+        map.insert("desired_state".to_string(), json!("stopped"));
+        map.insert("observed_state".to_string(), json!("stopped"));
+        map.insert("observed_health".to_string(), json!("unknown"));
         map.insert("updated_unix_ms".to_string(), json!(now_ms()));
         if let Some(cells) = map.get_mut("cells").and_then(Value::as_array_mut) {
             for cell in cells {
                 if let Some(cell_map) = cell.as_object_mut() {
                     cell_map.insert("status".to_string(), json!("stopped"));
+                    cell_map.insert("desired_state".to_string(), json!("stopped"));
+                    cell_map.insert("observed_state".to_string(), json!("stopped"));
+                    cell_map.insert("observed_health".to_string(), json!("unknown"));
                     cell_map.insert("replicas".to_string(), json!(0));
                     cell_map.insert("ready_replicas".to_string(), json!(0));
+                    cell_map.insert("active_jobs".to_string(), json!(0));
                 }
             }
         }
@@ -701,7 +838,12 @@ fn deployable_cells(workload_id: &str, runtime_pack: &Value) -> Result<Vec<K8sCe
         if executable.get("kind").and_then(Value::as_str) != Some("oci_image") {
             continue;
         }
-        if cell.get("ingress_kind").and_then(Value::as_str) != Some("http") {
+        let ingress_kind = cell
+            .get("ingress_kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("deployable runtime pack cell missing ingress_kind"))?
+            .to_string();
+        if !matches!(ingress_kind.as_str(), "http" | "event" | "schedule") {
             continue;
         }
         let cell_key = cell
@@ -714,33 +856,260 @@ fn deployable_cells(workload_id: &str, runtime_pack: &Value) -> Result<Vec<K8sCe
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("deployable runtime pack cell missing executable.image"))?
             .to_string();
-        let container_port = executable
-            .get("container_port")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| {
-                anyhow!("deployable runtime pack cell missing executable.container_port")
-            })? as u16;
-        let health_path = executable
-            .get("health_path")
-            .and_then(Value::as_str)
-            .unwrap_or("/")
-            .to_string();
+        let container_port = parse_optional_u16(
+            executable.get("container_port"),
+            "deployable runtime pack cell executable.container_port",
+        )?;
+        if ingress_kind == "http" && container_port.is_none() {
+            bail!("http deployable runtime pack cell missing executable.container_port");
+        }
         let stem = sanitize_k8s_name(&format!("{workload_id}-{cell_key}"));
+        let autoscaling = parse_autoscaling(cell)?;
         cells.push(K8sCellDeployment {
             cell_key: cell_key.clone(),
+            cell_kind: required_cell_string(cell, "cell_kind")?,
+            ingress_kind: ingress_kind.clone(),
+            runtime_class: required_cell_string(cell, "runtime_class")?,
+            scale_class: required_cell_string(cell, "scale_class")?,
+            topology_group: required_cell_string(cell, "topology_group")?,
+            binding_refs: parse_string_array(cell.get("binding_refs")),
+            binding_probe_hints: parse_binding_probe_hints(cell)?,
             image,
             container_port,
-            health_path,
-            deployment_name: format!("{stem}-deploy"),
-            service_name: format!("{stem}-svc"),
-            ingress_name: format!("{stem}-ing"),
-            route_path: format!(
-                "/{}",
-                sanitize_route_path(&format!("{}/{}", workload_id, cell_key))
-            ),
+            deployment_name: if ingress_kind == "schedule" {
+                None
+            } else {
+                Some(format!("{stem}-deploy"))
+            },
+            service_name: if ingress_kind == "http" {
+                Some(format!("{stem}-svc"))
+            } else {
+                None
+            },
+            ingress_name: if ingress_kind == "http" {
+                Some(format!("{stem}-ing"))
+            } else {
+                None
+            },
+            cronjob_name: if ingress_kind == "schedule" {
+                Some(format!("{stem}-cron"))
+            } else {
+                None
+            },
+            hpa_name: if ingress_kind != "schedule"
+                && autoscaling
+                    .as_ref()
+                    .and_then(|item| item.target_cpu_utilization)
+                    .is_some()
+            {
+                Some(format!("{stem}-hpa"))
+            } else {
+                None
+            },
+            route_path: if ingress_kind == "http" {
+                Some(format!(
+                    "/{}",
+                    sanitize_route_path(&format!("{}/{}", workload_id, cell_key))
+                ))
+            } else {
+                None
+            },
+            probes: parse_probe_set(cell)?,
+            event: parse_event_runtime(cell)?,
+            schedule: parse_schedule_runtime(cell)?,
+            rollout: parse_rollout(cell)?,
+            autoscaling,
         });
     }
     Ok(cells)
+}
+
+fn required_cell_string(cell: &Value, key: &str) -> Result<String> {
+    cell.get(key)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow!("deployable runtime pack cell missing {key}"))
+}
+
+fn parse_string_array(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn parse_optional_u16(value: Option<&Value>, label: &str) -> Result<Option<u16>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let raw = value
+        .as_u64()
+        .ok_or_else(|| anyhow!("{label} must be an integer"))?;
+    u16::try_from(raw)
+        .map(Some)
+        .map_err(|_| anyhow!("{label} must fit in a u16"))
+}
+
+fn parse_binding_probe_hints(cell: &Value) -> Result<Vec<K8sBindingProbeHint>> {
+    cell.get("binding_probe_hints")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|hint| {
+            Ok(K8sBindingProbeHint {
+                binding_ref: hint
+                    .get("binding_ref")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("binding_probe_hints entry missing binding_ref"))?
+                    .to_string(),
+                binding_kind: hint
+                    .get("binding_kind")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| anyhow!("binding_probe_hints entry missing binding_kind"))?
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
+fn parse_probe_set(cell: &Value) -> Result<K8sProbeSet> {
+    let Some(probes) = cell.get("probes") else {
+        return Ok(K8sProbeSet::default());
+    };
+    Ok(K8sProbeSet {
+        readiness: parse_probe(probes.get("readiness"))?,
+        liveness: parse_probe(probes.get("liveness"))?,
+        startup: parse_probe(probes.get("startup"))?,
+    })
+}
+
+fn parse_probe(value: Option<&Value>) -> Result<Option<K8sProbe>> {
+    let Some(probe) = value else {
+        return Ok(None);
+    };
+    Ok(Some(K8sProbe {
+        probe_kind: probe
+            .get("probe_kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("probe missing probe_kind"))?
+            .to_string(),
+        path: probe
+            .get("path")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        port: parse_optional_u16(probe.get("port"), "probe.port")?,
+        command: parse_string_array(probe.get("command")),
+        initial_delay_seconds: probe.get("initial_delay_seconds").and_then(Value::as_u64),
+        period_seconds: probe.get("period_seconds").and_then(Value::as_u64),
+        timeout_seconds: probe.get("timeout_seconds").and_then(Value::as_u64),
+        success_threshold: probe.get("success_threshold").and_then(Value::as_u64),
+        failure_threshold: probe.get("failure_threshold").and_then(Value::as_u64),
+    }))
+}
+
+fn parse_event_runtime(cell: &Value) -> Result<Option<K8sEventRuntime>> {
+    let Some(event) = cell.get("event") else {
+        return Ok(None);
+    };
+    Ok(Some(K8sEventRuntime {
+        binding_ref: event
+            .get("binding_ref")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("event runtime missing binding_ref"))?
+            .to_string(),
+        topic: event
+            .get("topic")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("event runtime missing topic"))?
+            .to_string(),
+        consumer_group: event
+            .get("consumer_group")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        ack_mode: event
+            .get("ack_mode")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        max_in_flight: event.get("max_in_flight").and_then(Value::as_u64),
+        drain_timeout_seconds: event.get("drain_timeout_seconds").and_then(Value::as_u64),
+    }))
+}
+
+fn parse_schedule_runtime(cell: &Value) -> Result<Option<K8sScheduleRuntime>> {
+    let Some(schedule) = cell.get("schedule") else {
+        return Ok(None);
+    };
+    Ok(Some(K8sScheduleRuntime {
+        cron: schedule
+            .get("cron")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("schedule runtime missing cron"))?
+            .to_string(),
+        timezone: schedule
+            .get("timezone")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        concurrency_policy: schedule
+            .get("concurrency_policy")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        retry_limit: schedule.get("retry_limit").and_then(Value::as_u64),
+        start_deadline_seconds: schedule
+            .get("start_deadline_seconds")
+            .and_then(Value::as_u64),
+        suspend: schedule
+            .get("suspend")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }))
+}
+
+fn parse_rollout(cell: &Value) -> Result<Option<K8sRollout>> {
+    let Some(rollout) = cell.get("rollout") else {
+        return Ok(None);
+    };
+    Ok(Some(K8sRollout {
+        strategy: rollout
+            .get("strategy")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("rollout missing strategy"))?
+            .to_string(),
+        max_unavailable: rollout
+            .get("max_unavailable")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        max_surge: rollout
+            .get("max_surge")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        canary_percent: rollout.get("canary_percent").and_then(Value::as_u64),
+    }))
+}
+
+fn parse_autoscaling(cell: &Value) -> Result<Option<K8sAutoscaling>> {
+    let Some(autoscaling) = cell.get("autoscaling") else {
+        return Ok(None);
+    };
+    Ok(Some(K8sAutoscaling {
+        min_replicas: autoscaling
+            .get("min_replicas")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow!("autoscaling missing min_replicas"))?,
+        max_replicas: autoscaling
+            .get("max_replicas")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| anyhow!("autoscaling missing max_replicas"))?,
+        target_cpu_utilization: autoscaling
+            .get("target_cpu_utilization")
+            .and_then(Value::as_u64),
+        target_inflight: autoscaling.get("target_inflight").and_then(Value::as_u64),
+    }))
 }
 
 fn write_k8s_manifests(
@@ -756,130 +1125,463 @@ fn write_k8s_manifests(
         .ok()
         .filter(|value| !value.trim().is_empty());
     for cell in cells {
-        let deployment_doc = json!({
-            "apiVersion": "apps/v1",
-            "kind": "Deployment",
-            "metadata": {
-                "name": cell.deployment_name,
-                "namespace": namespace,
-                "labels": {
-                    "x07.io/workload-id": workload_id,
-                    "x07.io/deployment-id": deployment_id,
-                    "x07.io/cell-key": cell.cell_key,
-                }
-            },
-            "spec": {
-                "replicas": 1,
-                "selector": {
-                    "matchLabels": {
-                        "x07.io/workload-id": workload_id,
-                        "x07.io/cell-key": cell.cell_key,
-                    }
-                },
-                "template": {
+        let labels = json!({
+            "x07.io/workload-id": workload_id,
+            "x07.io/deployment-id": deployment_id,
+            "x07.io/cell-key": cell.cell_key,
+            "x07.io/cell-kind": cell.cell_kind,
+            "x07.io/ingress-kind": cell.ingress_kind,
+        });
+        match cell.resource_kind() {
+            K8sCellResourceKind::Deployment => {
+                let deployment_name = cell
+                    .deployment_name
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("deployment-backed cell missing deployment_name"))?;
+                let deployment_doc = json!({
+                    "apiVersion": "apps/v1",
+                    "kind": "Deployment",
                     "metadata": {
-                        "labels": {
-                            "x07.io/workload-id": workload_id,
-                            "x07.io/deployment-id": deployment_id,
-                            "x07.io/cell-key": cell.cell_key,
-                        }
+                        "name": deployment_name,
+                        "namespace": namespace,
+                        "labels": labels,
+                        "annotations": workload_cell_annotations(cell, public_base_url),
                     },
                     "spec": {
-                        "containers": [{
-                            "name": sanitize_k8s_name(&cell.cell_key),
-                            "image": cell.image,
-                            "imagePullPolicy": "IfNotPresent",
+                        "replicas": initial_replicas(cell),
+                        "strategy": deployment_strategy_doc(cell),
+                        "selector": {
+                            "matchLabels": {
+                                "x07.io/workload-id": workload_id,
+                                "x07.io/cell-key": cell.cell_key,
+                            }
+                        },
+                        "template": {
+                            "metadata": {
+                                "labels": {
+                                    "x07.io/workload-id": workload_id,
+                                    "x07.io/deployment-id": deployment_id,
+                                    "x07.io/cell-key": cell.cell_key,
+                                    "x07.io/cell-kind": cell.cell_kind,
+                                    "x07.io/ingress-kind": cell.ingress_kind,
+                                },
+                                "annotations": workload_cell_annotations(cell, public_base_url),
+                            },
+                            "spec": {
+                                "containers": [container_doc(cell)?]
+                            }
+                        }
+                    }
+                });
+                let path = manifest_dir.join(format!("deployment.{}.json", cell.cell_key));
+                let _ = write_json(&path, &deployment_doc)?;
+                paths.push(path);
+
+                if let Some(hpa_doc) = hpa_doc(namespace, public_base_url, cell) {
+                    let path = manifest_dir.join(format!("hpa.{}.json", cell.cell_key));
+                    let _ = write_json(&path, &hpa_doc)?;
+                    paths.push(path);
+                }
+
+                if cell.ingress_kind == "http" {
+                    let service_name = cell
+                        .service_name
+                        .as_deref()
+                        .ok_or_else(|| anyhow!("http cell missing service_name"))?;
+                    let ingress_name = cell
+                        .ingress_name
+                        .as_deref()
+                        .ok_or_else(|| anyhow!("http cell missing ingress_name"))?;
+                    let route_path = cell
+                        .route_path
+                        .as_deref()
+                        .ok_or_else(|| anyhow!("http cell missing route_path"))?;
+                    let container_port = cell
+                        .container_port
+                        .ok_or_else(|| anyhow!("http cell missing container_port"))?;
+                    let service_doc = json!({
+                        "apiVersion": "v1",
+                        "kind": "Service",
+                        "metadata": {
+                            "name": service_name,
+                            "namespace": namespace,
+                            "labels": labels,
+                        },
+                        "spec": {
+                            "selector": {
+                                "x07.io/workload-id": workload_id,
+                                "x07.io/cell-key": cell.cell_key,
+                            },
                             "ports": [{
                                 "name": "http",
-                                "containerPort": cell.container_port
-                            }],
-                            "readinessProbe": {
-                                "httpGet": {
-                                    "path": cell.health_path,
-                                    "port": cell.container_port
-                                }
+                                "port": container_port,
+                                "targetPort": container_port
+                            }]
+                        }
+                    });
+                    let mut ingress_doc = json!({
+                        "apiVersion": "networking.k8s.io/v1",
+                        "kind": "Ingress",
+                        "metadata": {
+                            "name": ingress_name,
+                            "namespace": namespace,
+                            "labels": labels,
+                            "annotations": {
+                                "x07.io/public-base-url": public_base_url,
                             }
-                        }]
+                        },
+                        "spec": {
+                            "rules": [{
+                                "http": {
+                                    "paths": [{
+                                        "path": route_path,
+                                        "pathType": "Prefix",
+                                        "backend": {
+                                            "service": {
+                                                "name": service_name,
+                                                "port": {
+                                                    "number": container_port
+                                                }
+                                            }
+                                        }
+                                    }]
+                                }
+                            }]
+                        }
+                    });
+                    if let Some(class_name) = ingress_class_name.as_deref() {
+                        ingress_doc
+                            .get_mut("spec")
+                            .and_then(Value::as_object_mut)
+                            .unwrap()
+                            .insert("ingressClassName".to_string(), json!(class_name));
+                    }
+                    for (prefix, doc) in [("service", service_doc), ("ingress", ingress_doc)] {
+                        let path = manifest_dir.join(format!("{prefix}.{}.json", cell.cell_key));
+                        let _ = write_json(&path, &doc)?;
+                        paths.push(path);
                     }
                 }
             }
-        });
-        let service_doc = json!({
-            "apiVersion": "v1",
-            "kind": "Service",
-            "metadata": {
-                "name": cell.service_name,
-                "namespace": namespace,
-                "labels": {
-                    "x07.io/workload-id": workload_id,
-                    "x07.io/deployment-id": deployment_id,
-                    "x07.io/cell-key": cell.cell_key,
-                }
-            },
-            "spec": {
-                "selector": {
-                    "x07.io/workload-id": workload_id,
-                    "x07.io/cell-key": cell.cell_key,
-                },
-                "ports": [{
-                    "name": "http",
-                    "port": cell.container_port,
-                    "targetPort": cell.container_port
-                }]
-            }
-        });
-        let mut ingress_doc = json!({
-            "apiVersion": "networking.k8s.io/v1",
-            "kind": "Ingress",
-            "metadata": {
-                "name": cell.ingress_name,
-                "namespace": namespace,
-                "labels": {
-                    "x07.io/workload-id": workload_id,
-                    "x07.io/deployment-id": deployment_id,
-                    "x07.io/cell-key": cell.cell_key,
-                },
-                "annotations": {
-                    "x07.io/public-base-url": public_base_url,
-                }
-            },
-            "spec": {
-                "rules": [{
-                    "http": {
-                        "paths": [{
-                            "path": cell.route_path,
-                            "pathType": "Prefix",
-                            "backend": {
-                                "service": {
-                                    "name": cell.service_name,
-                                    "port": {
-                                        "number": cell.container_port
+            K8sCellResourceKind::CronJob => {
+                let cronjob_name = cell
+                    .cronjob_name
+                    .as_deref()
+                    .ok_or_else(|| anyhow!("scheduled cell missing cronjob_name"))?;
+                let schedule = cell
+                    .schedule
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("scheduled cell missing schedule"))?;
+                let mut cronjob_doc = json!({
+                    "apiVersion": "batch/v1",
+                    "kind": "CronJob",
+                    "metadata": {
+                        "name": cronjob_name,
+                        "namespace": namespace,
+                        "labels": labels,
+                        "annotations": workload_cell_annotations(cell, public_base_url),
+                    },
+                    "spec": {
+                        "schedule": schedule.cron,
+                        "concurrencyPolicy": cronjob_concurrency_policy(schedule.concurrency_policy.as_deref()),
+                        "suspend": schedule.suspend,
+                        "jobTemplate": {
+                            "spec": {
+                                "backoffLimit": schedule.retry_limit.unwrap_or(0),
+                                "template": {
+                                    "metadata": {
+                                        "labels": {
+                                            "x07.io/workload-id": workload_id,
+                                            "x07.io/deployment-id": deployment_id,
+                                            "x07.io/cell-key": cell.cell_key,
+                                            "x07.io/cell-kind": cell.cell_kind,
+                                            "x07.io/ingress-kind": cell.ingress_kind,
+                                        },
+                                        "annotations": workload_cell_annotations(cell, public_base_url),
+                                    },
+                                    "spec": {
+                                        "restartPolicy": "OnFailure",
+                                        "containers": [container_doc(cell)?]
                                     }
                                 }
                             }
-                        }]
+                        }
                     }
-                }]
+                });
+                if let Some(timezone) = schedule.timezone.as_deref() {
+                    cronjob_doc
+                        .get_mut("spec")
+                        .and_then(Value::as_object_mut)
+                        .unwrap()
+                        .insert("timeZone".to_string(), json!(timezone));
+                }
+                if let Some(start_deadline_seconds) = schedule.start_deadline_seconds {
+                    cronjob_doc
+                        .get_mut("spec")
+                        .and_then(Value::as_object_mut)
+                        .unwrap()
+                        .insert(
+                            "startingDeadlineSeconds".to_string(),
+                            json!(start_deadline_seconds),
+                        );
+                }
+                let path = manifest_dir.join(format!("cronjob.{}.json", cell.cell_key));
+                let _ = write_json(&path, &cronjob_doc)?;
+                paths.push(path);
             }
-        });
-        if let Some(class_name) = ingress_class_name.as_deref() {
-            ingress_doc
-                .get_mut("spec")
-                .and_then(Value::as_object_mut)
-                .unwrap()
-                .insert("ingressClassName".to_string(), json!(class_name));
-        }
-        for (prefix, doc) in [
-            ("deployment", deployment_doc),
-            ("service", service_doc),
-            ("ingress", ingress_doc),
-        ] {
-            let path = manifest_dir.join(format!("{prefix}.{}.json", cell.cell_key));
-            let _ = write_json(&path, &doc)?;
-            paths.push(path);
         }
     }
     Ok(paths)
+}
+
+fn workload_cell_annotations(cell: &K8sCellDeployment, public_base_url: &str) -> Value {
+    let mut annotations = serde_json::Map::new();
+    annotations.insert(
+        "x07.io/runtime-class".to_string(),
+        json!(cell.runtime_class),
+    );
+    annotations.insert("x07.io/scale-class".to_string(), json!(cell.scale_class));
+    annotations.insert(
+        "x07.io/topology-group".to_string(),
+        json!(cell.topology_group),
+    );
+    annotations.insert("x07.io/public-base-url".to_string(), json!(public_base_url));
+    if let Some(rollout) = cell.rollout.as_ref() {
+        annotations.insert(
+            "x07.io/rollout-strategy".to_string(),
+            json!(rollout.strategy),
+        );
+        if let Some(canary_percent) = rollout.canary_percent {
+            annotations.insert(
+                "x07.io/rollout-canary-percent".to_string(),
+                json!(canary_percent.to_string()),
+            );
+        }
+    }
+    if let Some(autoscaling) = cell.autoscaling.as_ref() {
+        annotations.insert(
+            "x07.io/autoscaling-min-replicas".to_string(),
+            json!(autoscaling.min_replicas.to_string()),
+        );
+        annotations.insert(
+            "x07.io/autoscaling-max-replicas".to_string(),
+            json!(autoscaling.max_replicas.to_string()),
+        );
+        if let Some(target_inflight) = autoscaling.target_inflight {
+            annotations.insert(
+                "x07.io/autoscaling-target-inflight".to_string(),
+                json!(target_inflight.to_string()),
+            );
+        }
+    }
+    if let Some(event) = cell.event.as_ref() {
+        annotations.insert(
+            "x07.io/event-binding-ref".to_string(),
+            json!(event.binding_ref),
+        );
+        annotations.insert("x07.io/event-topic".to_string(), json!(event.topic));
+        if let Some(group) = event.consumer_group.as_deref() {
+            annotations.insert("x07.io/event-consumer-group".to_string(), json!(group));
+        }
+    }
+    if let Some(schedule) = cell.schedule.as_ref() {
+        annotations.insert("x07.io/schedule-cron".to_string(), json!(schedule.cron));
+        if let Some(timezone) = schedule.timezone.as_deref() {
+            annotations.insert("x07.io/schedule-timezone".to_string(), json!(timezone));
+        }
+    }
+    Value::Object(annotations)
+}
+
+fn initial_replicas(cell: &K8sCellDeployment) -> u64 {
+    cell.autoscaling
+        .as_ref()
+        .map(|autoscaling| autoscaling.min_replicas.max(1))
+        .unwrap_or(1)
+}
+
+fn deployment_strategy_doc(cell: &K8sCellDeployment) -> Value {
+    let Some(rollout) = cell.rollout.as_ref() else {
+        return json!({"type": "RollingUpdate"});
+    };
+    match rollout.strategy.as_str() {
+        "recreate" => json!({"type": "Recreate"}),
+        _ => {
+            let mut doc = json!({
+                "type": "RollingUpdate",
+                "rollingUpdate": {}
+            });
+            if let Some(rolling_update) =
+                doc.get_mut("rollingUpdate").and_then(Value::as_object_mut)
+            {
+                if let Some(max_unavailable) = rollout.max_unavailable.as_deref() {
+                    rolling_update.insert("maxUnavailable".to_string(), json!(max_unavailable));
+                }
+                if let Some(max_surge) = rollout.max_surge.as_deref() {
+                    rolling_update.insert("maxSurge".to_string(), json!(max_surge));
+                }
+                if rollout.strategy == "canary-lite"
+                    && !rolling_update.contains_key("maxUnavailable")
+                {
+                    rolling_update.insert("maxUnavailable".to_string(), json!("0"));
+                }
+            }
+            doc
+        }
+    }
+}
+
+fn hpa_doc(namespace: &str, public_base_url: &str, cell: &K8sCellDeployment) -> Option<Value> {
+    let autoscaling = cell.autoscaling.as_ref()?;
+    let target_cpu = autoscaling.target_cpu_utilization?;
+    let deployment_name = cell.deployment_name.as_deref()?;
+    let hpa_name = cell.hpa_name.as_deref()?;
+    Some(json!({
+        "apiVersion": "autoscaling/v2",
+        "kind": "HorizontalPodAutoscaler",
+        "metadata": {
+            "name": hpa_name,
+            "namespace": namespace,
+            "labels": {
+                "x07.io/cell-key": cell.cell_key,
+                "x07.io/cell-kind": cell.cell_kind,
+            },
+            "annotations": workload_cell_annotations(cell, public_base_url),
+        },
+        "spec": {
+            "scaleTargetRef": {
+                "apiVersion": "apps/v1",
+                "kind": "Deployment",
+                "name": deployment_name,
+            },
+            "minReplicas": autoscaling.min_replicas,
+            "maxReplicas": autoscaling.max_replicas,
+            "metrics": [{
+                "type": "Resource",
+                "resource": {
+                    "name": "cpu",
+                    "target": {
+                        "type": "Utilization",
+                        "averageUtilization": target_cpu
+                    }
+                }
+            }]
+        }
+    }))
+}
+
+fn container_doc(cell: &K8sCellDeployment) -> Result<Value> {
+    let mut container = json!({
+        "name": sanitize_k8s_name(&cell.cell_key),
+        "image": cell.image,
+        "imagePullPolicy": "IfNotPresent",
+        "env": workload_cell_env(cell),
+    });
+    if let Some(container_port) = cell.container_port {
+        container["ports"] = json!([{
+            "name": "http",
+            "containerPort": container_port
+        }]);
+    }
+    if let Some(readiness) = probe_doc(cell.probes.readiness.as_ref())? {
+        container["readinessProbe"] = readiness;
+    }
+    if let Some(liveness) = probe_doc(cell.probes.liveness.as_ref())? {
+        container["livenessProbe"] = liveness;
+    }
+    if let Some(startup) = probe_doc(cell.probes.startup.as_ref())? {
+        container["startupProbe"] = startup;
+    }
+    Ok(container)
+}
+
+fn workload_cell_env(cell: &K8sCellDeployment) -> Vec<Value> {
+    let mut env = Vec::new();
+    env.push(json!({"name": "X07_WORKLOAD_CELL_KEY", "value": cell.cell_key}));
+    env.push(json!({"name": "X07_WORKLOAD_CELL_KIND", "value": cell.cell_kind}));
+    env.push(json!({"name": "X07_WORKLOAD_INGRESS_KIND", "value": cell.ingress_kind}));
+    env.push(json!({"name": "X07_WORKLOAD_RUNTIME_CLASS", "value": cell.runtime_class}));
+    env.push(json!({"name": "X07_WORKLOAD_SCALE_CLASS", "value": cell.scale_class}));
+    env.push(json!({"name": "X07_WORKLOAD_TOPOLOGY_GROUP", "value": cell.topology_group}));
+    if let Some(event) = cell.event.as_ref() {
+        env.push(json!({"name": "X07_EVENT_BINDING_REF", "value": event.binding_ref}));
+        env.push(json!({"name": "X07_EVENT_TOPIC", "value": event.topic}));
+        if let Some(group) = event.consumer_group.as_deref() {
+            env.push(json!({"name": "X07_EVENT_CONSUMER_GROUP", "value": group}));
+        }
+        if let Some(ack_mode) = event.ack_mode.as_deref() {
+            env.push(json!({"name": "X07_EVENT_ACK_MODE", "value": ack_mode}));
+        }
+        if let Some(max_in_flight) = event.max_in_flight {
+            env.push(
+                json!({"name": "X07_EVENT_MAX_IN_FLIGHT", "value": max_in_flight.to_string()}),
+            );
+        }
+        if let Some(drain_timeout_seconds) = event.drain_timeout_seconds {
+            env.push(json!({"name": "X07_EVENT_DRAIN_TIMEOUT_SECONDS", "value": drain_timeout_seconds.to_string()}));
+        }
+    }
+    if let Some(schedule) = cell.schedule.as_ref() {
+        env.push(json!({"name": "X07_SCHEDULE_CRON", "value": schedule.cron}));
+        if let Some(timezone) = schedule.timezone.as_deref() {
+            env.push(json!({"name": "X07_SCHEDULE_TIMEZONE", "value": timezone}));
+        }
+    }
+    env
+}
+
+fn probe_doc(probe: Option<&K8sProbe>) -> Result<Option<Value>> {
+    let Some(probe) = probe else {
+        return Ok(None);
+    };
+    let mut doc = serde_json::Map::new();
+    match probe.probe_kind.as_str() {
+        "http" => {
+            let port = probe
+                .port
+                .ok_or_else(|| anyhow!("http probe missing port"))?;
+            doc.insert(
+                "httpGet".to_string(),
+                json!({
+                    "path": probe.path.clone().unwrap_or_else(|| "/".to_string()),
+                    "port": port
+                }),
+            );
+        }
+        "exec" => {
+            doc.insert(
+                "exec".to_string(),
+                json!({
+                    "command": probe.command,
+                }),
+            );
+        }
+        other => bail!("unsupported probe_kind in runtime pack: {other}"),
+    }
+    insert_optional_probe_field(&mut doc, "initialDelaySeconds", probe.initial_delay_seconds);
+    insert_optional_probe_field(&mut doc, "periodSeconds", probe.period_seconds);
+    insert_optional_probe_field(&mut doc, "timeoutSeconds", probe.timeout_seconds);
+    insert_optional_probe_field(&mut doc, "successThreshold", probe.success_threshold);
+    insert_optional_probe_field(&mut doc, "failureThreshold", probe.failure_threshold);
+    Ok(Some(Value::Object(doc)))
+}
+
+fn insert_optional_probe_field(
+    doc: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: Option<u64>,
+) {
+    if let Some(value) = value {
+        doc.insert(key.to_string(), json!(value));
+    }
+}
+
+fn cronjob_concurrency_policy(value: Option<&str>) -> &str {
+    match value {
+        Some("forbid") => "Forbid",
+        Some("replace") => "Replace",
+        _ => "Allow",
+    }
 }
 
 fn live_deployment_doc(
@@ -892,72 +1594,30 @@ fn live_deployment_doc(
     cells: &[K8sCellDeployment],
 ) -> Result<Value> {
     let mut cell_docs = Vec::new();
-    let mut all_ready = true;
-    let mut any_failed = false;
     for cell in cells {
-        let status = kubectl_get_json(
+        cell_docs.push(refresh_cell_doc(
             target_profile,
             namespace,
-            &[
-                "get",
-                "deployment",
-                cell.deployment_name.as_str(),
-                "-o",
-                "json",
-            ],
-        )?;
-        let replicas = status
-            .get("status")
-            .and_then(|value| value.get("replicas"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let ready_replicas = status
-            .get("status")
-            .and_then(|value| value.get("readyReplicas"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let status_label = if ready_replicas >= replicas.max(1) {
-            "running"
-        } else if deployment_failed(&status) {
-            any_failed = true;
-            "failed"
-        } else {
-            all_ready = false;
-            "degraded"
-        };
-        if status_label != "running" {
-            all_ready = false;
-        }
-        cell_docs.push(json!({
-            "cell_key": cell.cell_key,
-            "deployment_name": cell.deployment_name,
-            "service_name": cell.service_name,
-            "ingress_name": cell.ingress_name,
-            "image": cell.image,
-            "container_port": cell.container_port,
-            "route_path": cell.route_path,
-            "route_url": format!("{}{}", public_base_url.trim_end_matches('/'), cell.route_path),
-            "replicas": replicas,
-            "ready_replicas": ready_replicas,
-            "status": status_label,
-        }));
+            public_base_url,
+            stored_cell_doc(cell, public_base_url),
+        )?);
     }
-    let health = if any_failed {
-        "failed"
-    } else if all_ready {
-        "healthy"
-    } else {
-        "degraded"
-    };
+    let desired_state = aggregate_desired_state(&cell_docs);
+    let observed_state = aggregate_observed_state(&cell_docs);
+    let observed_health = health_for_observed_state(&observed_state);
     Ok(json!({
         "schema_version": WORKLOAD_DEPLOYMENT_SCHEMA,
         "deployment_id": deployment_id,
         "workload_id": workload_id,
         "profile_id": profile_id,
         "namespace": namespace,
-        "status": if health == "failed" { "failed" } else { "running" },
-        "health": health,
+        "status": deployment_status_for_observed_state(&observed_state),
+        "health": observed_health,
+        "desired_state": desired_state,
+        "observed_state": observed_state,
+        "observed_health": observed_health,
         "public_base_url": public_base_url,
+        "active_target_id": active_target_id(None, Some(target_profile)),
         "target": target_summary(target_profile),
         "cells": cell_docs,
         "created_unix_ms": now_ms(),
@@ -973,8 +1633,12 @@ fn refresh_deployment_doc(target_profile: Option<&Value>, mut deployment: Value)
                 for cell in cells {
                     if let Some(cell_map) = cell.as_object_mut() {
                         cell_map.insert("status".to_string(), json!("stopped"));
+                        cell_map.insert("desired_state".to_string(), json!("stopped"));
+                        cell_map.insert("observed_state".to_string(), json!("stopped"));
+                        cell_map.insert("observed_health".to_string(), json!("unknown"));
                         cell_map.insert("replicas".to_string(), json!(0));
                         cell_map.insert("ready_replicas".to_string(), json!(0));
+                        cell_map.insert("active_jobs".to_string(), json!(0));
                     }
                 }
             }
@@ -989,37 +1653,182 @@ fn refresh_deployment_doc(target_profile: Option<&Value>, mut deployment: Value)
     let public_base_url = get_str(&deployment, &["public_base_url"])
         .unwrap_or_else(|| DEFAULT_K8S_PUBLIC_BASE_URL.to_string());
     let mut cell_docs = Vec::new();
-    let mut all_ready = true;
-    let mut any_failed = false;
     for cell in deployment
         .get("cells")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
     {
-        let deployment_name = cell
-            .get("deployment_name")
-            .and_then(Value::as_str)
-            .ok_or_else(|| anyhow!("deployment cell missing deployment_name"))?;
-        let status = match kubectl_get_json(
+        cell_docs.push(refresh_cell_doc(
             target_profile,
             &namespace,
+            &public_base_url,
+            cell.clone(),
+        )?);
+    }
+    let desired_state = aggregate_desired_state(&cell_docs);
+    let observed_state = aggregate_observed_state(&cell_docs);
+    let observed_health = health_for_observed_state(&observed_state);
+    if let Some(map) = deployment.as_object_mut() {
+        map.insert("cells".to_string(), Value::Array(cell_docs));
+        map.insert(
+            "status".to_string(),
+            json!(deployment_status_for_observed_state(&observed_state)),
+        );
+        map.insert("health".to_string(), json!(observed_health));
+        map.insert("desired_state".to_string(), json!(desired_state));
+        map.insert("observed_state".to_string(), json!(observed_state));
+        map.insert("observed_health".to_string(), json!(observed_health));
+        map.insert("updated_unix_ms".to_string(), json!(now_ms()));
+    }
+    Ok(deployment)
+}
+
+fn stored_cell_doc(cell: &K8sCellDeployment, public_base_url: &str) -> Value {
+    let mut doc = json!({
+        "cell_key": cell.cell_key,
+        "cell_kind": cell.cell_kind,
+        "ingress_kind": cell.ingress_kind,
+        "runtime_class": cell.runtime_class,
+        "scale_class": cell.scale_class,
+        "topology_group": cell.topology_group,
+        "binding_refs": cell.binding_refs,
+        "binding_probe_hints": cell.binding_probe_hints.iter().map(|hint| {
+            json!({
+                "binding_ref": hint.binding_ref,
+                "binding_kind": hint.binding_kind,
+            })
+        }).collect::<Vec<_>>(),
+        "desired_state": cell.desired_state(),
+        "observed_state": "pending",
+        "observed_health": "unknown",
+        "status": "pending",
+        "replicas": 0,
+        "ready_replicas": 0,
+        "active_jobs": 0,
+        "image": cell.image,
+        "container_port": cell.container_port,
+    });
+    if let Some(deployment_name) = cell.deployment_name.as_deref() {
+        doc["deployment_name"] = json!(deployment_name);
+    }
+    if let Some(service_name) = cell.service_name.as_deref() {
+        doc["service_name"] = json!(service_name);
+    }
+    if let Some(ingress_name) = cell.ingress_name.as_deref() {
+        doc["ingress_name"] = json!(ingress_name);
+    }
+    if let Some(cronjob_name) = cell.cronjob_name.as_deref() {
+        doc["cronjob_name"] = json!(cronjob_name);
+    }
+    if let Some(hpa_name) = cell.hpa_name.as_deref() {
+        doc["hpa_name"] = json!(hpa_name);
+    }
+    if let Some(route_path) = cell.route_path.as_deref() {
+        doc["route_path"] = json!(route_path);
+        doc["route_url"] = json!(format!(
+            "{}{}",
+            public_base_url.trim_end_matches('/'),
+            route_path
+        ));
+    }
+    if let Some(event) = cell.event.as_ref() {
+        doc["event"] = json!({
+            "binding_ref": event.binding_ref,
+            "topic": event.topic,
+            "consumer_group": event.consumer_group,
+            "ack_mode": event.ack_mode,
+            "max_in_flight": event.max_in_flight,
+            "drain_timeout_seconds": event.drain_timeout_seconds,
+        });
+    }
+    if let Some(schedule) = cell.schedule.as_ref() {
+        doc["schedule"] = json!({
+            "cron": schedule.cron,
+            "timezone": schedule.timezone,
+            "concurrency_policy": schedule.concurrency_policy,
+            "retry_limit": schedule.retry_limit,
+            "start_deadline_seconds": schedule.start_deadline_seconds,
+            "suspend": schedule.suspend,
+        });
+    }
+    if let Some(rollout) = cell.rollout.as_ref() {
+        doc["rollout"] = json!({
+            "strategy": rollout.strategy,
+            "max_unavailable": rollout.max_unavailable,
+            "max_surge": rollout.max_surge,
+            "canary_percent": rollout.canary_percent,
+        });
+    }
+    if let Some(autoscaling) = cell.autoscaling.as_ref() {
+        doc["autoscaling"] = json!({
+            "min_replicas": autoscaling.min_replicas,
+            "max_replicas": autoscaling.max_replicas,
+            "target_cpu_utilization": autoscaling.target_cpu_utilization,
+            "target_inflight": autoscaling.target_inflight,
+        });
+    }
+    let probes = json!({
+        "readiness": stored_probe_doc(cell.probes.readiness.as_ref()),
+        "liveness": stored_probe_doc(cell.probes.liveness.as_ref()),
+        "startup": stored_probe_doc(cell.probes.startup.as_ref()),
+    });
+    if probes
+        .as_object()
+        .is_some_and(|map| map.values().any(|value| !value.is_null()))
+    {
+        doc["probes"] = probes;
+    }
+    doc
+}
+
+fn stored_probe_doc(probe: Option<&K8sProbe>) -> Value {
+    let Some(probe) = probe else {
+        return Value::Null;
+    };
+    json!({
+        "probe_kind": probe.probe_kind,
+        "path": probe.path,
+        "port": probe.port,
+        "command": probe.command,
+        "initial_delay_seconds": probe.initial_delay_seconds,
+        "period_seconds": probe.period_seconds,
+        "timeout_seconds": probe.timeout_seconds,
+        "success_threshold": probe.success_threshold,
+        "failure_threshold": probe.failure_threshold,
+    })
+}
+
+fn refresh_cell_doc(
+    target_profile: &Value,
+    namespace: &str,
+    public_base_url: &str,
+    mut cell: Value,
+) -> Result<Value> {
+    if let Some(route_path) = cell.get("route_path").and_then(Value::as_str) {
+        cell["route_url"] = json!(format!(
+            "{}{}",
+            public_base_url.trim_end_matches('/'),
+            route_path
+        ));
+    }
+    if let Some(deployment_name) = cell.get("deployment_name").and_then(Value::as_str) {
+        let status = match kubectl_get_json(
+            target_profile,
+            namespace,
             &["get", "deployment", deployment_name, "-o", "json"],
         ) {
             Ok(status) => status,
             Err(err) if is_k8s_not_found(&err) => {
-                let mut refreshed = cell.clone();
-                if let Some(map) = refreshed.as_object_mut() {
-                    map.insert("replicas".to_string(), json!(0));
-                    map.insert("ready_replicas".to_string(), json!(0));
-                    map.insert("status".to_string(), json!("stopped"));
-                }
-                cell_docs.push(refreshed);
-                all_ready = false;
-                continue;
+                return Ok(mark_cell_stopped(cell));
             }
             Err(err) => return Err(err),
         };
+        let desired_replicas = status
+            .get("spec")
+            .and_then(|value| value.get("replicas"))
+            .and_then(Value::as_u64)
+            .unwrap_or(1);
         let replicas = status
             .get("status")
             .and_then(|value| value.get("replicas"))
@@ -1030,59 +1839,146 @@ fn refresh_deployment_doc(target_profile: Option<&Value>, mut deployment: Value)
             .and_then(|value| value.get("readyReplicas"))
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        let status_label = if ready_replicas >= replicas.max(1) {
+        let observed_state = if ready_replicas >= desired_replicas.max(1) {
             "running"
         } else if deployment_failed(&status) {
-            any_failed = true;
             "failed"
+        } else if ready_replicas == 0 {
+            "pending"
         } else {
-            all_ready = false;
             "degraded"
         };
-        if status_label != "running" {
-            all_ready = false;
-        }
-        let mut refreshed = cell.clone();
-        if let Some(map) = refreshed.as_object_mut() {
+        let observed_health = health_for_observed_state(observed_state);
+        if let Some(map) = cell.as_object_mut() {
             map.insert("replicas".to_string(), json!(replicas));
             map.insert("ready_replicas".to_string(), json!(ready_replicas));
-            map.insert("status".to_string(), json!(status_label));
-            if let Some(route_path) = map.get("route_path").and_then(Value::as_str) {
-                map.insert(
-                    "route_url".to_string(),
-                    json!(format!(
-                        "{}{}",
-                        public_base_url.trim_end_matches('/'),
-                        route_path
-                    )),
-                );
+            map.insert("status".to_string(), json!(observed_state));
+            map.insert("observed_state".to_string(), json!(observed_state));
+            map.insert("observed_health".to_string(), json!(observed_health));
+        }
+        return Ok(cell);
+    }
+    if let Some(cronjob_name) = cell.get("cronjob_name").and_then(Value::as_str) {
+        let status = match kubectl_get_json(
+            target_profile,
+            namespace,
+            &["get", "cronjob", cronjob_name, "-o", "json"],
+        ) {
+            Ok(status) => status,
+            Err(err) if is_k8s_not_found(&err) => {
+                return Ok(mark_cell_stopped(cell));
+            }
+            Err(err) => return Err(err),
+        };
+        let active_jobs = status
+            .get("status")
+            .and_then(|value| value.get("active"))
+            .and_then(Value::as_array)
+            .map(|items| items.len() as u64)
+            .unwrap_or(0);
+        let suspended = status
+            .get("spec")
+            .and_then(|value| value.get("suspend"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let observed_state = if suspended { "stopped" } else { "running" };
+        let observed_health = if suspended { "unknown" } else { "healthy" };
+        if let Some(map) = cell.as_object_mut() {
+            map.insert("active_jobs".to_string(), json!(active_jobs));
+            map.insert("status".to_string(), json!(observed_state));
+            map.insert("observed_state".to_string(), json!(observed_state));
+            map.insert("observed_health".to_string(), json!(observed_health));
+            if let Some(last_schedule_time) = status
+                .get("status")
+                .and_then(|value| value.get("lastScheduleTime"))
+                .cloned()
+            {
+                map.insert("last_schedule_time".to_string(), last_schedule_time);
             }
         }
-        cell_docs.push(refreshed);
+        return Ok(cell);
     }
-    let health = if any_failed {
-        "failed"
-    } else if all_ready {
-        "healthy"
-    } else {
-        "degraded"
-    };
-    if let Some(map) = deployment.as_object_mut() {
-        map.insert("cells".to_string(), Value::Array(cell_docs));
-        map.insert(
-            "status".to_string(),
-            json!(deployment_status_for_health(health)),
-        );
-        map.insert("health".to_string(), json!(health));
-        map.insert("updated_unix_ms".to_string(), json!(now_ms()));
-    }
-    Ok(deployment)
+    Ok(cell)
 }
 
-fn deployment_status_for_health(health: &str) -> &str {
-    match health {
+fn mark_cell_stopped(mut cell: Value) -> Value {
+    if let Some(map) = cell.as_object_mut() {
+        map.insert("replicas".to_string(), json!(0));
+        map.insert("ready_replicas".to_string(), json!(0));
+        map.insert("active_jobs".to_string(), json!(0));
+        map.insert("status".to_string(), json!("stopped"));
+        map.insert("observed_state".to_string(), json!("stopped"));
+        map.insert("observed_health".to_string(), json!("unknown"));
+    }
+    cell
+}
+
+fn aggregate_desired_state(cells: &[Value]) -> &'static str {
+    let states = cells
+        .iter()
+        .filter_map(|cell| cell.get("desired_state").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    if states.is_empty() || states.iter().all(|state| *state == "stopped") {
+        "stopped"
+    } else if states.iter().all(|state| *state == "paused") {
+        "paused"
+    } else {
+        "running"
+    }
+}
+
+fn aggregate_observed_state(cells: &[Value]) -> String {
+    let mut any_running = false;
+    let mut any_pending = false;
+    let mut any_degraded = false;
+    let mut any_failed = false;
+    let mut all_stopped = !cells.is_empty();
+    for state in cells
+        .iter()
+        .filter_map(|cell| cell.get("observed_state").and_then(Value::as_str))
+    {
+        match state {
+            "running" => any_running = true,
+            "pending" => any_pending = true,
+            "degraded" => any_degraded = true,
+            "failed" => any_failed = true,
+            "stopped" => {}
+            _ => all_stopped = false,
+        }
+        if state != "stopped" {
+            all_stopped = false;
+        }
+    }
+    if any_failed {
+        "failed".to_string()
+    } else if any_degraded {
+        "degraded".to_string()
+    } else if any_pending && !any_running {
+        "pending".to_string()
+    } else if any_pending {
+        "degraded".to_string()
+    } else if any_running {
+        "running".to_string()
+    } else if all_stopped || cells.is_empty() {
+        "stopped".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+fn health_for_observed_state(observed_state: &str) -> &str {
+    match observed_state {
+        "running" => "healthy",
         "failed" => "failed",
-        "unknown" => "stopped",
+        "pending" | "degraded" => "degraded",
+        _ => "unknown",
+    }
+}
+
+fn deployment_status_for_observed_state(observed_state: &str) -> &str {
+    match observed_state {
+        "failed" => "failed",
+        "stopped" | "unknown" => "stopped",
         _ => "running",
     }
 }
@@ -1103,6 +1999,126 @@ fn deployment_failed(status: &Value) -> bool {
             condition.get("type").and_then(Value::as_str) == Some("Progressing")
                 && condition.get("status").and_then(Value::as_str) == Some("False")
         })
+}
+
+fn render_workload_result_doc(
+    workload: &Value,
+    deployment: Option<&Value>,
+    target_profile: Option<&Value>,
+    view: &str,
+) -> Result<Value> {
+    let mut doc = workload.clone();
+    let active_target_id = active_target_id(
+        deployment.and_then(|item| item.get("target")),
+        target_profile,
+    );
+    let desired_state = desired_state_for_deployment(deployment);
+    let observed_state = observed_state_for_deployment(deployment);
+    let observed_health = observed_health_for_deployment(deployment);
+    if let Some(map) = doc.as_object_mut() {
+        if matches!(view, "summary" | "full") {
+            map.insert("view".to_string(), json!(view));
+        }
+        map.insert("active_target_id".to_string(), active_target_id);
+        map.insert("desired_state".to_string(), json!(desired_state));
+        map.insert("observed_state".to_string(), json!(observed_state));
+        map.insert("observed_health".to_string(), json!(observed_health));
+        if let Some(cells) = map.get_mut("cells").and_then(Value::as_array_mut) {
+            let by_key = deployment
+                .and_then(|item| item.get("cells"))
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|cell| {
+                            cell.get("cell_key")
+                                .and_then(Value::as_str)
+                                .map(|key| (key.to_string(), cell))
+                        })
+                        .collect::<std::collections::HashMap<_, _>>()
+                })
+                .unwrap_or_default();
+            for cell in cells {
+                let desired = cell
+                    .get("cell_key")
+                    .and_then(Value::as_str)
+                    .and_then(|key| by_key.get(key))
+                    .and_then(|item| item.get("desired_state"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("stopped");
+                let observed = cell
+                    .get("cell_key")
+                    .and_then(Value::as_str)
+                    .and_then(|key| by_key.get(key))
+                    .and_then(|item| item.get("observed_state"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("stopped");
+                let health = cell
+                    .get("cell_key")
+                    .and_then(Value::as_str)
+                    .and_then(|key| by_key.get(key))
+                    .and_then(|item| item.get("observed_health"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                if let Some(cell_map) = cell.as_object_mut() {
+                    cell_map.insert("desired_state".to_string(), json!(desired));
+                    cell_map.insert("observed_state".to_string(), json!(observed));
+                    cell_map.insert("observed_health".to_string(), json!(health));
+                }
+            }
+        }
+    }
+    Ok(doc)
+}
+
+fn active_target_id(deployment_target: Option<&Value>, target_profile: Option<&Value>) -> Value {
+    deployment_target
+        .and_then(|target| target.get("name"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            target_profile
+                .and_then(|profile| profile.get("name"))
+                .and_then(Value::as_str)
+        })
+        .map(|value| json!(value))
+        .unwrap_or(Value::Null)
+}
+
+fn desired_state_for_deployment(deployment: Option<&Value>) -> String {
+    deployment
+        .and_then(|item| item.get("desired_state"))
+        .and_then(Value::as_str)
+        .unwrap_or("stopped")
+        .to_string()
+}
+
+fn observed_state_for_deployment(deployment: Option<&Value>) -> String {
+    deployment
+        .and_then(|item| item.get("observed_state"))
+        .or_else(|| deployment.and_then(|item| item.get("status")))
+        .and_then(Value::as_str)
+        .unwrap_or("stopped")
+        .to_string()
+}
+
+fn observed_health_for_deployment(deployment: Option<&Value>) -> String {
+    deployment
+        .and_then(|item| item.get("observed_health"))
+        .or_else(|| deployment.and_then(|item| item.get("health")))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+struct BindingProbeStatus {
+    status: String,
+    provider_kind: Option<String>,
+    configured: bool,
+    target_id: Option<String>,
+    reason_code: Option<String>,
+    message: Option<String>,
+    last_checked_unix_ms: Option<u64>,
+    probe_result_id: Option<String>,
 }
 
 fn binding_status_doc(
@@ -1126,33 +2142,40 @@ fn binding_status_doc(
             .get("kind")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("binding requirement missing kind"))?;
-        let (status, provider_kind, message, last_checked_unix_ms) =
-            match (target_profile, namespace.as_deref()) {
-                (Some(profile), Some(namespace))
-                    if get_str(profile, &["kind"]).as_deref() == Some("k8s") =>
-                {
-                    k8s_binding_status(profile, namespace, name, kind)?
-                }
-                _ => (
-                    "pending".to_string(),
-                    None,
-                    Some("binding target not selected".to_string()),
-                    None,
-                ),
-            };
+        let probe = match (target_profile, namespace.as_deref()) {
+            (Some(profile), Some(namespace))
+                if get_str(profile, &["kind"]).as_deref() == Some("k8s") =>
+            {
+                k8s_binding_status(workload_id, profile, namespace, name, kind)?
+            }
+            _ => BindingProbeStatus {
+                status: "pending".to_string(),
+                provider_kind: None,
+                configured: false,
+                target_id: None,
+                reason_code: Some("binding_target_missing".to_string()),
+                message: Some("binding target not selected".to_string()),
+                last_checked_unix_ms: None,
+                probe_result_id: None,
+            },
+        };
         let mut item = json!({
             "binding_id": sanitize_binding_id(workload_id, name),
             "name": name,
             "kind": kind,
-            "status": status,
+            "status": probe.status,
+            "configured": probe.configured,
+            "target_id": probe.target_id,
+            "reason_code": probe.reason_code,
+            "probe_result_id": probe.probe_result_id,
         });
-        if let Some(provider_kind) = provider_kind {
+        if let Some(provider_kind) = probe.provider_kind {
             item["provider_kind"] = json!(provider_kind);
         }
-        if let Some(message) = message {
+        if let Some(message) = probe.message {
             item["message"] = json!(message);
         }
-        if let Some(last_checked_unix_ms) = last_checked_unix_ms {
+        if let Some(last_checked_unix_ms) = probe.last_checked_unix_ms {
             item["last_checked_unix_ms"] = json!(last_checked_unix_ms);
         }
         items.push(item);
@@ -1166,57 +2189,87 @@ fn binding_status_doc(
 }
 
 fn k8s_binding_status(
+    workload_id: &str,
     target_profile: &Value,
     namespace: &str,
     name: &str,
     kind: &str,
-) -> Result<(String, Option<String>, Option<String>, Option<u64>)> {
+) -> Result<BindingProbeStatus> {
     let provider_kind = Some("lp.impl.bindings.k8s_v1".to_string());
     let checked = Some(now_ms());
+    let target_id = get_str(target_profile, &["name"]);
+    let probe_result_id = checked.map(|checked| {
+        format!(
+            "bindprobe.{}.{}",
+            sanitize_binding_id(workload_id, name),
+            checked
+        )
+    });
     if kind == "otlp" {
         if get_str(target_profile, &["telemetry_collector_hint"]).is_some() {
-            return Ok((
-                "ready".to_string(),
+            return Ok(BindingProbeStatus {
+                status: "ready".to_string(),
                 provider_kind,
-                Some("telemetry collector hint present on target profile".to_string()),
-                checked,
-            ));
+                configured: true,
+                target_id,
+                reason_code: Some("telemetry_collector_hint_present".to_string()),
+                message: Some("telemetry collector hint present on target profile".to_string()),
+                last_checked_unix_ms: checked,
+                probe_result_id,
+            });
         }
-        return Ok((
-            "pending".to_string(),
+        return Ok(BindingProbeStatus {
+            status: "pending".to_string(),
             provider_kind,
-            Some("target profile does not advertise telemetry_collector_hint".to_string()),
-            checked,
-        ));
+            configured: true,
+            target_id,
+            reason_code: Some("telemetry_collector_hint_missing".to_string()),
+            message: Some("target profile does not advertise telemetry_collector_hint".to_string()),
+            last_checked_unix_ms: checked,
+            probe_result_id,
+        });
     }
     let object_name = sanitize_k8s_name(name);
-    let (resource_kind, exists_message, pending_message) = if kind == "secret" {
-        (
-            "secret",
-            "matching Kubernetes Secret is present",
-            "create a Kubernetes Secret to satisfy this binding",
-        )
-    } else {
-        (
-            "service",
-            "matching Kubernetes Service is present",
-            "create or attach a Kubernetes Service to satisfy this binding",
-        )
-    };
+    let (resource_kind, exists_message, pending_message, ready_reason, pending_reason) =
+        if kind == "secret" {
+            (
+                "secret",
+                "matching Kubernetes Secret is present",
+                "create a Kubernetes Secret to satisfy this binding",
+                "k8s_secret_present",
+                "k8s_secret_missing",
+            )
+        } else {
+            (
+                "service",
+                "matching Kubernetes Service is present",
+                "create or attach a Kubernetes Service to satisfy this binding",
+                "k8s_service_present",
+                "k8s_service_missing",
+            )
+        };
     if kubectl_exists(target_profile, namespace, resource_kind, &object_name)? {
-        Ok((
-            "ready".to_string(),
+        Ok(BindingProbeStatus {
+            status: "ready".to_string(),
             provider_kind,
-            Some(exists_message.to_string()),
-            checked,
-        ))
+            configured: true,
+            target_id,
+            reason_code: Some(ready_reason.to_string()),
+            message: Some(exists_message.to_string()),
+            last_checked_unix_ms: checked,
+            probe_result_id,
+        })
     } else {
-        Ok((
-            "pending".to_string(),
+        Ok(BindingProbeStatus {
+            status: "pending".to_string(),
             provider_kind,
-            Some(pending_message.to_string()),
-            checked,
-        ))
+            configured: true,
+            target_id,
+            reason_code: Some(pending_reason.to_string()),
+            message: Some(pending_message.to_string()),
+            last_checked_unix_ms: checked,
+            probe_result_id,
+        })
     }
 }
 
@@ -1442,7 +2495,16 @@ mod tests {
             "cells": [
                 {
                     "cell_key": "primary",
+                    "cell_kind": "api-cell",
                     "ingress_kind": "http",
+                    "runtime_class": "native-http",
+                    "scale_class": "replicated-http",
+                    "topology_group": "frontdoor",
+                    "binding_refs": ["db.primary"],
+                    "binding_probe_hints": [{
+                        "binding_ref": "db.primary",
+                        "binding_kind": "postgres"
+                    }],
                     "executable": {
                         "kind": "oci_image",
                         "image": "ghcr.io/example/api:1.0.0",
@@ -1452,7 +2514,16 @@ mod tests {
                 },
                 {
                     "cell_key": "worker",
+                    "cell_kind": "event-consumer",
                     "ingress_kind": "none",
+                    "runtime_class": "native-worker",
+                    "scale_class": "partitioned-consumer",
+                    "topology_group": "async",
+                    "binding_refs": ["msg.orders"],
+                    "binding_probe_hints": [{
+                        "binding_ref": "msg.orders",
+                        "binding_kind": "amqp"
+                    }],
                     "executable": {
                         "kind": "oci_image",
                         "image": "ghcr.io/example/worker:1.0.0",
@@ -1464,8 +2535,87 @@ mod tests {
         let cells = deployable_cells("svc.api", &runtime_pack).expect("cells");
         assert_eq!(cells.len(), 1);
         assert_eq!(cells[0].cell_key, "primary");
-        assert_eq!(cells[0].route_path, "/svc-api/primary");
-        assert_eq!(cells[0].container_port, 8080);
+        assert_eq!(cells[0].route_path.as_deref(), Some("/svc-api/primary"));
+        assert_eq!(cells[0].container_port, Some(8080));
+        assert_eq!(
+            cells[0].deployment_name.as_deref(),
+            Some("svc-api-primary-deploy")
+        );
+        assert_eq!(
+            cells[0].service_name.as_deref(),
+            Some("svc-api-primary-svc")
+        );
+    }
+
+    #[test]
+    fn deployable_cells_extract_event_and_schedule_shapes() {
+        let runtime_pack = json!({
+            "cells": [
+                {
+                    "cell_key": "events",
+                    "cell_kind": "event-consumer",
+                    "ingress_kind": "event",
+                    "runtime_class": "native-worker",
+                    "scale_class": "partitioned-consumer",
+                    "topology_group": "async",
+                    "binding_refs": ["msg.orders"],
+                    "binding_probe_hints": [{
+                        "binding_ref": "msg.orders",
+                        "binding_kind": "amqp"
+                    }],
+                    "event": {
+                        "binding_ref": "msg.orders",
+                        "topic": "orders.created",
+                        "consumer_group": "orders-workers"
+                    },
+                    "autoscaling": {
+                        "min_replicas": 1,
+                        "max_replicas": 4,
+                        "target_cpu_utilization": 70
+                    },
+                    "executable": {
+                        "kind": "oci_image",
+                        "image": "ghcr.io/example/worker:1.0.0",
+                        "container_port": null
+                    }
+                },
+                {
+                    "cell_key": "settlement",
+                    "cell_kind": "scheduled-job",
+                    "ingress_kind": "schedule",
+                    "runtime_class": "native-worker",
+                    "scale_class": "burst-batch",
+                    "topology_group": "async",
+                    "binding_refs": ["db.primary"],
+                    "binding_probe_hints": [{
+                        "binding_ref": "db.primary",
+                        "binding_kind": "postgres"
+                    }],
+                    "schedule": {
+                        "cron": "0 */6 * * *",
+                        "timezone": "UTC",
+                        "retry_limit": 3
+                    },
+                    "executable": {
+                        "kind": "oci_image",
+                        "image": "ghcr.io/example/job:1.0.0",
+                        "container_port": null
+                    }
+                }
+            ]
+        });
+        let cells = deployable_cells("svc.api", &runtime_pack).expect("cells");
+        assert_eq!(cells.len(), 2);
+        assert_eq!(
+            cells[0].deployment_name.as_deref(),
+            Some("svc-api-events-deploy")
+        );
+        assert_eq!(cells[0].hpa_name.as_deref(), Some("svc-api-events-hpa"));
+        assert_eq!(
+            cells[1].cronjob_name.as_deref(),
+            Some("svc-api-settlement-cron")
+        );
+        assert!(cells[1].deployment_name.is_none());
     }
 
     #[test]
@@ -1491,5 +2641,7 @@ mod tests {
         assert_eq!(items[0]["status"], "pending");
         assert_eq!(items[0]["message"], "binding target not selected");
         assert_eq!(items[0]["binding_id"], "binding.svc_api.db_primary");
+        assert_eq!(items[0]["configured"], false);
+        assert_eq!(items[0]["reason_code"], "binding_target_missing");
     }
 }
