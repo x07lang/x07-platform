@@ -2310,6 +2310,13 @@ fn read_json_from_report_stdout(stdout: &[u8]) -> Result<Value> {
     {
         return Ok(stdout_json.clone());
     }
+    if let Some(result_json) = get_path(&report, &["result"]).filter(|value| {
+        value.is_object()
+            && value.get("schema_version").is_some()
+            && !looks_like_cli_report(value)
+    }) {
+        return Ok(result_json.clone());
+    }
     if let Some(result_json) =
         get_path(&report, &["result"]).filter(|value| looks_like_cli_report(value))
     {
@@ -18083,6 +18090,29 @@ mod tests {
             local_remote_runtime_probe_host("http://127.0.0.1:8081"),
             None
         );
+    }
+
+    #[test]
+    fn read_json_from_report_stdout_accepts_direct_result_document() -> Result<()> {
+        let result_doc = json!({
+            "schema_version": "lp.deploy.accept.stage@0.1.0",
+            "run_id": "lprun_demo",
+            "exec_id": "lpexec_demo",
+            "decision_id": "lpdec_demo",
+        });
+        let report = json!({
+            "schema_version": "x07.tool.run.report@0.1.0",
+            "command": "x07 run",
+            "ok": true,
+            "exit_code": 0,
+            "meta": {},
+            "diagnostics": [],
+            "result": result_doc.clone(),
+        });
+
+        let parsed = read_json_from_report_stdout(&serde_json::to_vec(&report)?)?;
+        assert_eq!(parsed, result_doc);
+        Ok(())
     }
 
     #[test]
