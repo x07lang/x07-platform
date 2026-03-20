@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO_ROOT="$(cd "${ROOT_DIR}/.." && pwd)"
 source "$ROOT_DIR/scripts/ci/use_workspace_x07_bins.sh"
 DRIVER_MANIFEST="$ROOT_DIR/tools/x07lp-driver/Cargo.toml"
 DRIVER_BIN="$ROOT_DIR/tools/x07lp-driver/target/debug/x07lp-driver"
@@ -93,6 +94,7 @@ REMOTE_FIXTURE_INDEX="spec/fixtures/remote-oss/fixture_index.json"
 
 rm -rf "$TMP_DIR"
 mkdir -p "$TMP_DIR" "$TOKEN_DIR" "$OCI_CRED_DIR" "$OTLP_EXPORT_DIR"
+bash "$REPO_ROOT/scripts/ci/prepare_otlp_export_mount.sh" "$OTLP_EXPORT_DIR"
 
 PIDS=()
 DAEMON_PID=""
