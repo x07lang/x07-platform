@@ -2269,6 +2269,45 @@ fn looks_like_cli_report(value: &Value) -> bool {
     ) && value.get("command").is_some()
 }
 
+fn looks_like_direct_result_document(value: &Value) -> bool {
+    value.is_object()
+        && !looks_like_cli_report(value)
+        && ((value.get("run_id").is_some()
+            && value.get("exec_id").is_some()
+            && value.get("decision_id").is_some())
+            || (value.get("schema_version").is_some() && value.get("command").is_none()))
+}
+
+fn find_solve_output_b64(value: &Value) -> Option<String> {
+    if let Some(b64) = value.get("solve_output_b64").and_then(Value::as_str) {
+        return Some(b64.to_string());
+    }
+    if let Some(b64) = get_str(value, &["solve", "solve_output_b64"]) {
+        return Some(b64);
+    }
+    for key in ["stdout_json", "result", "report"] {
+        if let Some(found) = value.get(key).and_then(find_solve_output_b64) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn find_nested_result_document(value: &Value) -> Option<Value> {
+    for key in ["stdout_json", "result", "report"] {
+        let Some(child) = value.get(key) else {
+            continue;
+        };
+        if looks_like_cli_report(child) || looks_like_direct_result_document(child) {
+            return Some(child.clone());
+        }
+        if let Some(found) = find_nested_result_document(child) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 fn summarize_report_shape(report: &Value) -> String {
     let top_keys = report
         .as_object()
@@ -2289,49 +2328,20 @@ fn summarize_report_shape(report: &Value) -> String {
 
 fn read_json_from_report_stdout(stdout: &[u8]) -> Result<Value> {
     let report: Value = serde_json::from_slice(stdout).context("parse x07 run report")?;
-    let b64 = get_str(&report, &["solve", "solve_output_b64"])
-        .or_else(|| get_str(&report, &["result", "solve_output_b64"]))
-        .or_else(|| get_str(&report, &["result", "solve", "solve_output_b64"]))
-        .or_else(|| {
-            get_str(
-                &report,
-                &["result", "stdout_json", "solve", "solve_output_b64"],
-            )
-        })
-        .or_else(|| get_str(&report, &["report", "solve", "solve_output_b64"]));
+    let b64 = find_solve_output_b64(&report);
     if let Some(b64) = b64 {
         let bytes = BASE64
             .decode(b64.as_bytes())
             .context("decode solve_output_b64")?;
         return serde_json::from_slice(&bytes).context("parse decoded cli report");
     }
-    if let Some(stdout_json) =
-        get_path(&report, &["result", "stdout_json"]).filter(|value| looks_like_cli_report(value))
-    {
-        return Ok(stdout_json.clone());
-    }
-    if let Some(result_json) = get_path(&report, &["result"]).filter(|value| {
-        value.is_object()
-            && !looks_like_cli_report(value)
-            && value.get("run_id").is_some()
-            && value.get("exec_id").is_some()
-            && value.get("decision_id").is_some()
-    }) {
-        return Ok(result_json.clone());
-    }
-    if let Some(result_json) = get_path(&report, &["result"]).filter(|value| {
-        value.is_object()
-            && value.get("schema_version").is_some()
-            && !looks_like_cli_report(value)
-    }) {
-        return Ok(result_json.clone());
-    }
-    if let Some(result_json) =
-        get_path(&report, &["result"]).filter(|value| looks_like_cli_report(value))
-    {
-        return Ok(result_json.clone());
+    if let Some(result_json) = find_nested_result_document(&report) {
+        return Ok(result_json);
     }
     if looks_like_cli_report(&report) {
+        return Ok(report);
+    }
+    if looks_like_direct_result_document(&report) {
         return Ok(report);
     }
     bail!(
@@ -18140,6 +18150,38 @@ mod tests {
             "meta": {},
             "diagnostics": [],
             "result": result_doc.clone(),
+        });
+
+        let parsed = read_json_from_report_stdout(&serde_json::to_vec(&report)?)?;
+        assert_eq!(parsed, result_doc);
+        Ok(())
+    }
+
+    #[test]
+    fn read_json_from_report_stdout_accepts_nested_result_wrapper() -> Result<()> {
+        let result_doc = json!({
+            "schema_version": "lp.deploy.accept.stage@0.1.0",
+            "run_id": "lprun_nested",
+            "exec_id": "lpexec_nested",
+            "decision_id": "lpdec_nested",
+        });
+        let nested_report = json!({
+            "schema_version": "x07.tool.run.report@0.1.0",
+            "command": "x07 run",
+            "ok": true,
+            "exit_code": 0,
+            "meta": {},
+            "diagnostics": [],
+            "result": result_doc.clone(),
+        });
+        let report = json!({
+            "schema_version": "x07.tool.run.report@0.1.0",
+            "command": "x07 run",
+            "ok": true,
+            "exit_code": 0,
+            "meta": {},
+            "diagnostics": [],
+            "result": nested_report,
         });
 
         let parsed = read_json_from_report_stdout(&serde_json::to_vec(&report)?)?;
