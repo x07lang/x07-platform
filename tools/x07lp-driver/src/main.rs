@@ -2290,6 +2290,8 @@ fn summarize_report_shape(report: &Value) -> String {
 fn read_json_from_report_stdout(stdout: &[u8]) -> Result<Value> {
     let report: Value = serde_json::from_slice(stdout).context("parse x07 run report")?;
     let b64 = get_str(&report, &["solve", "solve_output_b64"])
+        .or_else(|| get_str(&report, &["result", "solve_output_b64"]))
+        .or_else(|| get_str(&report, &["result", "solve", "solve_output_b64"]))
         .or_else(|| {
             get_str(
                 &report,
@@ -2307,6 +2309,11 @@ fn read_json_from_report_stdout(stdout: &[u8]) -> Result<Value> {
         get_path(&report, &["result", "stdout_json"]).filter(|value| looks_like_cli_report(value))
     {
         return Ok(stdout_json.clone());
+    }
+    if let Some(result_json) =
+        get_path(&report, &["result"]).filter(|value| looks_like_cli_report(value))
+    {
+        return Ok(result_json.clone());
     }
     if looks_like_cli_report(&report) {
         return Ok(report);

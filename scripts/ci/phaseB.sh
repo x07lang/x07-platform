@@ -43,18 +43,21 @@ def find_solve_output_b64(doc):
         solve = doc.get('solve')
         if isinstance(solve, dict) and isinstance(solve.get('solve_output_b64'), str):
             return solve['solve_output_b64']
+        stdout_json = doc.get('stdout_json')
+        if isinstance(stdout_json, dict):
+            found = find_solve_output_b64(stdout_json)
+            if found:
+                return found
         result = doc.get('result')
         if isinstance(result, dict):
-            stdout_json = result.get('stdout_json')
-            if isinstance(stdout_json, dict):
-                solve = stdout_json.get('solve')
-                if isinstance(solve, dict) and isinstance(solve.get('solve_output_b64'), str):
-                    return solve['solve_output_b64']
+            found = find_solve_output_b64(result)
+            if found:
+                return found
         report2 = doc.get('report')
         if isinstance(report2, dict):
-            solve = report2.get('solve')
-            if isinstance(solve, dict) and isinstance(solve.get('solve_output_b64'), str):
-                return solve['solve_output_b64']
+            found = find_solve_output_b64(report2)
+            if found:
+                return found
     return ''
 
 b64 = find_solve_output_b64(doc)
