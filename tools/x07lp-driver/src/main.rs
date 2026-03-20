@@ -2312,6 +2312,15 @@ fn read_json_from_report_stdout(stdout: &[u8]) -> Result<Value> {
     }
     if let Some(result_json) = get_path(&report, &["result"]).filter(|value| {
         value.is_object()
+            && !looks_like_cli_report(value)
+            && value.get("run_id").is_some()
+            && value.get("exec_id").is_some()
+            && value.get("decision_id").is_some()
+    }) {
+        return Ok(result_json.clone());
+    }
+    if let Some(result_json) = get_path(&report, &["result"]).filter(|value| {
+        value.is_object()
             && value.get("schema_version").is_some()
             && !looks_like_cli_report(value)
     }) {
@@ -18099,6 +18108,29 @@ mod tests {
             "run_id": "lprun_demo",
             "exec_id": "lpexec_demo",
             "decision_id": "lpdec_demo",
+        });
+        let report = json!({
+            "schema_version": "x07.tool.run.report@0.1.0",
+            "command": "x07 run",
+            "ok": true,
+            "exit_code": 0,
+            "meta": {},
+            "diagnostics": [],
+            "result": result_doc.clone(),
+        });
+
+        let parsed = read_json_from_report_stdout(&serde_json::to_vec(&report)?)?;
+        assert_eq!(parsed, result_doc);
+        Ok(())
+    }
+
+    #[test]
+    fn read_json_from_report_stdout_accepts_legacy_direct_result_document() -> Result<()> {
+        let result_doc = json!({
+            "run_id": "lprun_demo",
+            "exec_id": "lpexec_demo",
+            "decision_id": "lpdec_demo",
+            "outcome": "allow",
         });
         let report = json!({
             "schema_version": "x07.tool.run.report@0.1.0",
