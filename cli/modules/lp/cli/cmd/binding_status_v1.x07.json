@@ -1,0 +1,1 @@
+{"decls":[{"kind":"export","names":["lp.cli.cmd.binding_status_v1.run_v1"]},{"body":["lp.cli.driver_v1.binding_status_v1","doc"],"kind":"defn","name":"lp.cli.cmd.binding_status_v1.run_v1","params":[{"name":"doc","ty":"bytes_view"}],"result":"bytes"}],"imports":["lp.cli.driver_v1"],"kind":"module","module_id":"lp.cli.cmd.binding_status_v1","schema_version":"x07.x07ast@0.5.0"}

@@ -51,7 +51,7 @@ That makes `x07-platform` the production operations part of the language ecosyst
 | **Regression generation** | Generates automated test fixtures from incidents via `x07-wasm app regress from-incident`. |
 | **Operator controls** | Pause, rerun, rollback, stop, app kill/unkill, and platform kill/unkill from CLI, UI, or MCP tools. |
 | **Self-hosted remote targets** | Onboard wasmCloud-based self-hosted targets and deploy the same sealed artifacts remotely. |
-| **Workload and release draft surfaces** | Carry workload-pack inventory, topology preview, binding status, and release-review documents alongside the existing deploy and device-release loop. |
+| **Workload and release surfaces** | Carry workload-pack inventory, topology preview, binding status, hosted release-review documents, and a local Kubernetes workload lane alongside the existing deploy and device-release loop. |
 | **Device release orchestration** | Create staged iOS and Android release plans and supervise rollout through App Store Connect and Google Play mock providers. |
 | **Command Center UI** | Dark-themed web dashboard for real-time monitoring of apps, deployments, incidents, regressions, and device releases. |
 | **MCP tool integration** | Expose all surfaces (deploy, incident, regression, app, platform, device release) as MCP tools for agent consumption. |
@@ -169,6 +169,35 @@ Generate richer state for the UI:
 ```
 
 Phase C state covers app, deployment, incident, and regression flows. Device-release state covers staged store rollout and release controls.
+
+### Local K3s workload smoke
+
+The OSS platform now has a dedicated workload lane for `x07.workload.pack@0.1.0` artifacts on Kubernetes. The fastest end-to-end verification path is the bundled K3s smoke:
+
+```bash
+cd x07-platform
+bash scripts/ci/workload-k3s-smoke.sh
+```
+
+That smoke:
+
+- creates or reuses a local K3s cluster through `k3d`
+- packs `x07/docs/examples/service_api_cell_v1` with `traefik/whoami`
+- adds a `k8s` target profile to `x07lp`
+- runs `x07lp workload accept`, `workload run`, `workload query`, `workload bindings`, and `workload stop`
+- verifies the ingress route from the host before and after teardown
+
+Use `bash scripts/ci/target-conformance.sh k8s` when you want the stable target-suite entrypoint for the same local lane. The same entrypoint also carries `local`, `wasmcloud`, and `all` so target conformance is no longer a Kubernetes-only one-off.
+
+For manual use, the workload CLI is:
+
+```bash
+./scripts/x07lp-driver workload accept --pack-manifest /path/to/workload.pack.json --target k3s-local --state-dir /tmp/x07lp-state
+./scripts/x07lp-driver workload run --workload svc_api_cell_v1 --target k3s-local --profile prod --state-dir /tmp/x07lp-state
+./scripts/x07lp-driver workload query --workload svc_api_cell_v1 --target k3s-local --state-dir /tmp/x07lp-state
+./scripts/x07lp-driver workload bindings --workload svc_api_cell_v1 --target k3s-local --state-dir /tmp/x07lp-state
+./scripts/x07lp-driver workload stop --workload svc_api_cell_v1 --target k3s-local --state-dir /tmp/x07lp-state
+```
 
 ## User Flows
 

@@ -24,10 +24,11 @@
 Current surface:
 
 - public `lp.*` JSON Schemas consumed from `contracts/spec/schemas/` with `x07-platform-contracts` as the authority
-- `x07lp` CLI for local and remote `change`, `deploy`, `target`, `adapter`, `incident`, `regress`, `app`, `platform`, `ui`, and `schema` flows plus hosted `login`, `whoami`, `logout`, `org`, `project`, `env`, `context`, `release-*`, and `binding-status`
+- `x07lp` CLI for local and remote `change`, `deploy`, `target`, `adapter`, `incident`, `regress`, `app`, `platform`, `ui`, `workload`, and `schema` flows plus hosted `login`, `whoami`, `logout`, `org`, `project`, `env`, `context`, `release-*`, and `binding-status`
 - Local filesystem content-addressed store (`--state-dir`, default `.x07lp/`)
 - Hosted session document under `~/.config/x07lp/session.json` (or `X07LP_CONFIG_DIR` / `XDG_CONFIG_HOME`)
 - Local runtime and routing for `x07.app.pack@0.1.0`
+- Local Kubernetes runtime, ingress, query, and binding-status flow for `x07.workload.pack@0.1.0`
 - Remote target selection, CAS push, remote query/control parity, and adapter conformance for self-hosted targets
 - Additive target-profile kinds: `oss_remote`, `hosted`, `k8s`, and `wasmcloud`
 - Public draft schemas for `lp.workload.*`, `lp.topology.preview.result@0.1.0`, `lp.binding.*`, `lp.scale.profile@0.1.0`, and `lp.release.*`
@@ -36,3 +37,5 @@ Current surface:
 - CI gates for accept, local deploy execution, query, and MCP coverage
 
 For an end-to-end check, run `./scripts/ci/check_all.sh`.
+
+For the target matrix, run `bash scripts/ci/target-conformance.sh` with `local`, `wasmcloud`, `k8s`, or `all`. The Kubernetes workload lane is still available directly as `bash scripts/ci/workload-k3s-smoke.sh`.

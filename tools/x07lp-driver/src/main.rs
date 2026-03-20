@@ -46,6 +46,7 @@ use x509_parser::prelude::*;
 mod device_release_provider;
 mod device_release_telemetry;
 mod remote_fixture_manifest;
+mod workload_runtime;
 
 const DEFAULT_STATE_DIR: &str = "out/x07lp_state";
 const DEFAULT_UI_ADDR: &str = "127.0.0.1:17090";
@@ -218,6 +219,7 @@ enum Commands {
     ReleaseExplain(ReleaseExplainArgs),
     ReleaseRollback(ReleaseRollbackArgs),
     BindingStatus(BindingStatusArgs),
+    Workload(workload_runtime::WorkloadArgs),
     Accept(DeployAcceptArgs),
     Run(DeployRunArgs),
     Query(DeployQueryArgs),
@@ -856,6 +858,7 @@ fn real_main() -> Result<i32> {
         Commands::ReleaseExplain(args) => command_release_explain(args)?,
         Commands::ReleaseRollback(args) => command_release_rollback(args)?,
         Commands::BindingStatus(args) => command_binding_status(args)?,
+        Commands::Workload(args) => workload_runtime::command_workload(args)?,
         Commands::UiServe(args) => return command_ui_serve(args),
         Commands::Accept(args) => command_accept(args)?,
         Commands::Run(args) => command_run(args)?,
@@ -1306,7 +1309,8 @@ fn validate_target_profile_doc(doc: &Value) -> Result<()> {
 }
 
 fn profile_supports_remote_probe(profile: &Value) -> bool {
-    get_str(profile, &["base_url"]).is_some()
+    get_str(profile, &["kind"]).as_deref() != Some("k8s")
+        && get_str(profile, &["base_url"]).is_some()
         && get_str(profile, &["api_version"]).as_deref() == Some("v1")
         && get_str(profile, &["auth", "kind"]).as_deref() == Some("static_bearer")
 }
@@ -1378,20 +1382,26 @@ fn load_json(path: &Path) -> Result<Value> {
     serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))
 }
 
-fn write_json(path: &Path, value: &Value) -> Result<Vec<u8>> {
-    let bytes = canon_json_bytes(value);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
-    }
-    let temp_path = path.with_extension(format!(
+fn temp_sibling_path(path: &Path, default_ext: &str) -> PathBuf {
+    path.with_extension(format!(
         "{}.tmp.{}.{}",
-        path.extension().and_then(OsStr::to_str).unwrap_or("json"),
+        path.extension()
+            .and_then(OsStr::to_str)
+            .unwrap_or(default_ext),
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|value| value.as_nanos())
             .unwrap_or_default()
-    ));
+    ))
+}
+
+fn write_json(path: &Path, value: &Value) -> Result<Vec<u8>> {
+    let bytes = canon_json_bytes(value);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
+    }
+    let temp_path = temp_sibling_path(path, "json");
     {
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -1412,15 +1422,7 @@ fn write_bytes_600(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
     }
-    let temp_path = path.with_extension(format!(
-        "{}.tmp.{}.{}",
-        path.extension().and_then(OsStr::to_str).unwrap_or("bin"),
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|value| value.as_nanos())
-            .unwrap_or_default()
-    ));
+    let temp_path = temp_sibling_path(path, "bin");
     {
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -5789,12 +5791,8 @@ fn rebuild_indexes(state_dir: &Path) -> Result<(PathBuf, PathBuf)> {
     fs::create_dir_all(&index_dir)?;
     let phaseb_path = index_dir.join("phaseb.sqlite");
     let phasec_path = index_dir.join("phasec.sqlite");
-    if phaseb_path.exists() {
-        fs::remove_file(&phaseb_path)?;
-    }
-    if phasec_path.exists() {
-        fs::remove_file(&phasec_path)?;
-    }
+    let phaseb_temp = temp_sibling_path(&phaseb_path, "sqlite");
+    let phasec_temp = temp_sibling_path(&phasec_path, "sqlite");
     let phaseb_sql = fs::read_to_string(
         root_dir()
             .join("adapters")
@@ -5808,17 +5806,31 @@ fn rebuild_indexes(state_dir: &Path) -> Result<(PathBuf, PathBuf)> {
             .join("phaseC_index.sqlite.sql"),
     )?;
     let mut latest_heads: BTreeMap<(String, String), (String, u64)> = BTreeMap::new();
-    for db_path in [&phaseb_path, &phasec_path] {
+    for db_path in [&phaseb_temp, &phasec_temp] {
         let conn = Connection::open(db_path)?;
         conn.execute_batch(&phaseb_sql)?;
-        if db_path == &phasec_path {
+        if db_path == &phasec_temp {
             conn.execute_batch(&phasec_sql)?;
         }
         insert_execution_rows(&conn, state_dir, &mut latest_heads)?;
-        if db_path == &phasec_path {
+        if db_path == &phasec_temp {
             insert_phasec_rows(&conn, state_dir, &latest_heads)?;
         }
     }
+    fs::rename(&phaseb_temp, &phaseb_path).with_context(|| {
+        format!(
+            "rename {} -> {}",
+            phaseb_temp.display(),
+            phaseb_path.display()
+        )
+    })?;
+    fs::rename(&phasec_temp, &phasec_path).with_context(|| {
+        format!(
+            "rename {} -> {}",
+            phasec_temp.display(),
+            phasec_path.display()
+        )
+    })?;
     Ok((phaseb_path, phasec_path))
 }
 
@@ -8379,7 +8391,9 @@ fn build_target_list_item(
     last_checked_unix_ms: u64,
 ) -> Value {
     let name = get_str(doc, &["name"]).unwrap_or_default();
-    let reachable = if profile_supports_remote_probe(doc) {
+    let reachable = if get_str(doc, &["kind"]).as_deref() == Some("k8s") {
+        workload_runtime::k8s_target_reachable(doc)
+    } else if profile_supports_remote_probe(doc) {
         match resolve_remote_target(Some(&name)) {
             Ok(Some(target)) => remote_health_check(&target),
             _ => false,
@@ -8482,6 +8496,8 @@ fn command_target_add(args: TargetAddArgs) -> Result<Value> {
                 ));
             }
         }
+    } else if get_str(&doc, &["kind"]).as_deref() == Some("k8s") {
+        workload_runtime::k8s_target_reachable(&doc)
     } else {
         false
     };

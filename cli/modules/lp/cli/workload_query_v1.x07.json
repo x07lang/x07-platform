@@ -1,0 +1,1 @@
+{"decls":[{"kind":"export","names":["lp.cli.workload_query_v1.query_v1"]},{"body":["lp.engine.workload_query_v1.query_v1","doc"],"kind":"defn","name":"lp.cli.workload_query_v1.query_v1","params":[{"name":"doc","ty":"bytes_view"}],"result":"bytes"}],"imports":["lp.engine.workload_query_v1"],"kind":"module","module_id":"lp.cli.workload_query_v1","schema_version":"x07.x07ast@0.5.0"}
