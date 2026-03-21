@@ -195,15 +195,24 @@ The workload driver now keeps the richer `x07.workload.pack@0.1.0` cell hints in
 
 Use `bash scripts/ci/target-conformance.sh k8s` when you want the stable target-suite entrypoint for the same local lane. The same entrypoint also carries `local`, `wasmcloud`, and `all` so target conformance is no longer a Kubernetes-only one-off.
 
+For longer-running controller and failure-injection coverage, the repo now also carries:
+
+- `bash scripts/ci/workload-k3s-soak.sh`
+- `bash scripts/ci/workload-k3s-chaos.sh`
+- `bash scripts/ci/target-conformance.sh k8s-extended`
+
 For manual use, the workload CLI is:
 
 ```bash
 ./scripts/x07lp-driver workload accept --pack-manifest /path/to/workload.pack.json --target k3s-local --state-dir /tmp/x07lp-state
 ./scripts/x07lp-driver workload run --workload svc_api_cell_v1 --target k3s-local --profile prod --state-dir /tmp/x07lp-state
 ./scripts/x07lp-driver workload query --workload svc_api_cell_v1 --target k3s-local --state-dir /tmp/x07lp-state
+./scripts/x07lp-driver workload reconcile --workload svc_api_cell_v1 --target k3s-local --cycles 5 --interval-seconds 5 --state-dir /tmp/x07lp-state
 ./scripts/x07lp-driver workload bindings --workload svc_api_cell_v1 --target k3s-local --state-dir /tmp/x07lp-state
 ./scripts/x07lp-driver workload stop --workload svc_api_cell_v1 --target k3s-local --state-dir /tmp/x07lp-state
 ```
+
+`workload reconcile` is the controller loop for the Kubernetes lane. It re-applies the rendered manifests from the accepted deployment state, waits for deployment-backed cells to settle, refreshes the live desired versus observed state, and writes the reconciled deployment record back into the state directory.
 
 ## User Flows
 

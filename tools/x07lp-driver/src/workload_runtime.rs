@@ -29,6 +29,7 @@ enum WorkloadCommand {
     Accept(WorkloadAcceptArgs),
     Run(WorkloadRunArgs),
     Query(WorkloadQueryArgs),
+    Reconcile(WorkloadReconcileArgs),
     Stop(WorkloadStopArgs),
     Bindings(WorkloadBindingsArgs),
 }
@@ -69,6 +70,20 @@ struct WorkloadQueryArgs {
     target: Option<String>,
     #[arg(long, default_value = "summary")]
     view: String,
+    #[command(flatten)]
+    common: CommonStateArgs,
+}
+
+#[derive(Args, Debug)]
+struct WorkloadReconcileArgs {
+    #[arg(long)]
+    workload: String,
+    #[arg(long)]
+    target: Option<String>,
+    #[arg(long, default_value_t = 1)]
+    cycles: u64,
+    #[arg(long, default_value_t = 5)]
+    interval_seconds: u64,
     #[command(flatten)]
     common: CommonStateArgs,
 }
@@ -226,6 +241,7 @@ pub(crate) fn command_workload(args: WorkloadArgs) -> Result<Value> {
         WorkloadCommand::Accept(args) => command_accept(args),
         WorkloadCommand::Run(args) => command_run(args),
         WorkloadCommand::Query(args) => command_query(args),
+        WorkloadCommand::Reconcile(args) => command_reconcile(args),
         WorkloadCommand::Stop(args) => command_stop(args),
         WorkloadCommand::Bindings(args) => command_bindings(args),
     }
@@ -505,6 +521,26 @@ fn command_query(args: WorkloadQueryArgs) -> Result<Value> {
     ))
 }
 
+fn command_reconcile(args: WorkloadReconcileArgs) -> Result<Value> {
+    let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
+    let cycles = args.cycles.max(1);
+    let mut state_doc = Value::Null;
+    for cycle in 0..cycles {
+        state_doc = reconcile_workload_once(&state_dir, &args.workload, args.target.as_deref())?;
+        if cycle + 1 < cycles {
+            std::thread::sleep(std::time::Duration::from_secs(args.interval_seconds.max(1)));
+        }
+    }
+    Ok(cli_report(
+        "workload reconcile",
+        true,
+        0,
+        state_doc,
+        None,
+        Vec::new(),
+    ))
+}
+
 fn command_stop(args: WorkloadStopArgs) -> Result<Value> {
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let deployment = current_deployment_doc(&state_dir, &args.workload)?
@@ -569,6 +605,62 @@ fn command_stop(args: WorkloadStopArgs) -> Result<Value> {
         None,
         Vec::new(),
     ))
+}
+
+fn reconcile_workload_once(
+    state_dir: &Path,
+    workload_id: &str,
+    target_override: Option<&str>,
+) -> Result<Value> {
+    let accepted = load_accepted_doc(state_dir, workload_id)?;
+    let target_profile = resolve_k8s_target_for_workload(
+        target_override,
+        accepted.get("target").and_then(Value::as_object),
+    )
+    .ok();
+    let refreshed = match current_deployment_doc(state_dir, workload_id)? {
+        Some(deployment) => Some(reconcile_deployment_doc(
+            state_dir,
+            target_profile.as_ref(),
+            deployment,
+        )?),
+        None => None,
+    };
+    workload_state_result_doc(workload_id, target_profile.as_ref(), refreshed.as_ref())
+}
+
+fn reconcile_deployment_doc(
+    state_dir: &Path,
+    target_profile: Option<&Value>,
+    deployment: Value,
+) -> Result<Value> {
+    let Some(target_profile) = target_profile else {
+        return Ok(deployment);
+    };
+    if get_str(&deployment, &["status"]).as_deref() == Some("stopped") {
+        return Ok(deployment);
+    }
+    let namespace =
+        get_str(&deployment, &["namespace"]).ok_or_else(|| anyhow!("missing namespace"))?;
+    ensure_k8s_namespace(target_profile, &namespace)?;
+    let deployment_id =
+        get_str(&deployment, &["deployment_id"]).ok_or_else(|| anyhow!("missing deployment_id"))?;
+    for path in manifest_paths(&manifests_dir(state_dir, &deployment_id))? {
+        kubectl_apply_path(target_profile, &path)?;
+    }
+    for cell in deployment
+        .get("cells")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(deployment_name) = cell.get("deployment_name").and_then(Value::as_str) {
+            kubectl_rollout_status(target_profile, &namespace, deployment_name)?;
+        }
+    }
+    let refreshed = refresh_deployment_doc(Some(target_profile), deployment)?;
+    let _ = write_json(&deployment_path(state_dir, &deployment_id), &refreshed)?;
+    Ok(refreshed)
 }
 
 fn command_bindings(args: WorkloadBindingsArgs) -> Result<Value> {
@@ -658,6 +750,25 @@ fn accepted_docs(state_dir: &Path) -> Result<Vec<PathBuf>> {
         if path.extension().and_then(OsStr::to_str) == Some("json") {
             paths.push(path);
         }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+fn manifest_paths(dir: &Path) -> Result<Vec<PathBuf>> {
+    if !dir.exists() {
+        bail!("missing workload manifest directory: {}", dir.display());
+    }
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(OsStr::to_str) == Some("json") {
+            paths.push(path);
+        }
+    }
+    if paths.is_empty() {
+        bail!("no workload manifests found in {}", dir.display());
     }
     paths.sort();
     Ok(paths)
@@ -2071,6 +2182,72 @@ fn render_workload_result_doc(
     Ok(doc)
 }
 
+fn workload_state_result_doc(
+    workload_id: &str,
+    target_profile: Option<&Value>,
+    deployment: Option<&Value>,
+) -> Result<Value> {
+    let desired_state = desired_state_for_deployment(deployment);
+    let observed_state = observed_state_for_deployment(deployment);
+    let observed_health = observed_health_for_deployment(deployment);
+    let updated_unix_ms = deployment
+        .and_then(|item| item.get("updated_unix_ms"))
+        .and_then(Value::as_u64)
+        .unwrap_or_else(now_ms);
+    let deployment_id = deployment
+        .and_then(|item| item.get("deployment_id"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let target_id = active_target_id(
+        deployment.and_then(|item| item.get("target")),
+        target_profile,
+    );
+    let cells = deployment
+        .and_then(|item| item.get("cells"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|cell| {
+                    json!({
+                        "cell_key": cell.get("cell_key").cloned().unwrap_or_else(|| json!("unknown")),
+                        "state": cell.get("observed_state").cloned().unwrap_or_else(|| json!("unknown")),
+                        "health": cell.get("observed_health").cloned().unwrap_or_else(|| json!("unknown")),
+                        "desired_replicas": Value::Null,
+                        "ready_replicas": cell.get("ready_replicas").cloned().unwrap_or(Value::Null),
+                        "route_url": cell.get("route_url").cloned().unwrap_or(Value::Null),
+                        "last_run_unix_ms": Value::Null,
+                        "next_run_unix_ms": Value::Null,
+                        "message": Value::Null,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(json!({
+        "schema_version": "lp.workload.state.result@0.1.0",
+        "workload_id": workload_id,
+        "target_id": target_id,
+        "desired": {
+            "state": desired_state,
+            "release_id": Value::Null,
+            "deployment_id": deployment_id.clone(),
+            "rollout_strategy": Value::Null,
+            "updated_unix_ms": updated_unix_ms,
+        },
+        "observed": {
+            "state": observed_state,
+            "health": observed_health,
+            "release_id": Value::Null,
+            "deployment_id": deployment_id,
+            "message": Value::Null,
+            "cells": cells,
+            "updated_unix_ms": updated_unix_ms,
+        },
+        "generated_unix_ms": now_ms(),
+    }))
+}
+
 fn active_target_id(deployment_target: Option<&Value>, target_profile: Option<&Value>) -> Value {
     deployment_target
         .and_then(|target| target.get("name"))
@@ -2471,7 +2648,10 @@ fn resolve_kubectl_command() -> (String, Vec<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{binding_status_doc, deployable_cells, sanitize_k8s_name, sanitize_route_path};
+    use super::{
+        binding_status_doc, deployable_cells, sanitize_k8s_name, sanitize_route_path,
+        workload_state_result_doc,
+    };
     use serde_json::json;
 
     #[test]
@@ -2643,5 +2823,43 @@ mod tests {
         assert_eq!(items[0]["binding_id"], "binding.svc_api.db_primary");
         assert_eq!(items[0]["configured"], false);
         assert_eq!(items[0]["reason_code"], "binding_target_missing");
+    }
+
+    #[test]
+    fn workload_state_result_rolls_up_reconciler_view() {
+        let deployment = json!({
+            "deployment_id": "wlrun_demo",
+            "updated_unix_ms": 12345,
+            "target": { "name": "k3s-local" },
+            "cells": [
+                {
+                    "cell_key": "api",
+                    "observed_state": "running",
+                    "observed_health": "healthy",
+                    "ready_replicas": 1,
+                    "route_url": "http://127.0.0.1/demo"
+                },
+                {
+                    "cell_key": "worker",
+                    "observed_state": "running",
+                    "observed_health": "healthy",
+                    "ready_replicas": 1
+                }
+            ],
+            "desired_state": "running",
+            "observed_state": "running",
+            "observed_health": "healthy"
+        });
+        let state = workload_state_result_doc("svc.demo", None, Some(&deployment)).expect("state");
+        assert_eq!(state["schema_version"], "lp.workload.state.result@0.1.0");
+        assert_eq!(state["workload_id"], "svc.demo");
+        assert_eq!(state["target_id"], "k3s-local");
+        assert_eq!(state["desired"]["state"], "running");
+        assert_eq!(state["observed"]["state"], "running");
+        assert_eq!(state["observed"]["health"], "healthy");
+        assert_eq!(
+            state["observed"]["cells"][0]["route_url"],
+            "http://127.0.0.1/demo"
+        );
     }
 }

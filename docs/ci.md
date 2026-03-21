@@ -23,6 +23,9 @@ The stable cross-target conformance entrypoint is `./scripts/ci/target-conforman
 - `local` runs the local accept/deploy/control suite
 - `wasmcloud` runs the self-hosted remote target suite
 - `k8s` runs the local K3s workload lane
+- `k8s-soak` runs the longer-running reconciler stability lane for the local K3s workload target
+- `k8s-chaos` runs the failure-injection lane by deleting live Kubernetes resources and requiring `workload reconcile` to restore them
+- `k8s-extended` runs smoke, soak, and chaos in sequence
 - `all` executes the full matrix in sequence
 
 Manual device-store smoke coverage is intentionally separate from the default gate. Use `./scripts/ci/device-release-live-smoke.sh` only with real App Store Connect or Google Play credentials loaded into the encrypted secret store and `X07LP_DEVICE_PROVIDER_LIVE=1`.

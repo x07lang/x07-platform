@@ -56,10 +56,18 @@ Then run the local workload smoke:
 bash scripts/ci/workload-k3s-smoke.sh
 ```
 
+For controller and failure-injection coverage, also run:
+
+```bash
+bash scripts/ci/workload-k3s-soak.sh
+bash scripts/ci/workload-k3s-chaos.sh
+```
+
 Or use the target-suite entrypoint:
 
 ```bash
 bash scripts/ci/target-conformance.sh k8s
+bash scripts/ci/target-conformance.sh k8s-extended
 ```
 
 Or drive it manually:
@@ -70,5 +78,6 @@ Or drive it manually:
 ./scripts/x07lp-driver workload accept --pack-manifest /tmp/workload/workload.pack.json --target k3s-local --state-dir /tmp/x07lp-state
 ./scripts/x07lp-driver workload run --workload svc_api_cell_v1 --target k3s-local --profile prod --state-dir /tmp/x07lp-state
 ./scripts/x07lp-driver workload query --workload svc_api_cell_v1 --target k3s-local --state-dir /tmp/x07lp-state
+./scripts/x07lp-driver workload reconcile --workload svc_api_cell_v1 --target k3s-local --cycles 3 --interval-seconds 5 --state-dir /tmp/x07lp-state
 ./scripts/x07lp-driver workload stop --workload svc_api_cell_v1 --target k3s-local --state-dir /tmp/x07lp-state
 ```

@@ -38,4 +38,4 @@ Current surface:
 
 For an end-to-end check, run `./scripts/ci/check_all.sh`.
 
-For the target matrix, run `bash scripts/ci/target-conformance.sh` with `local`, `wasmcloud`, `k8s`, or `all`. The Kubernetes workload lane is still available directly as `bash scripts/ci/workload-k3s-smoke.sh`.
+For the target matrix, run `bash scripts/ci/target-conformance.sh` with `local`, `wasmcloud`, `k8s`, `k8s-soak`, `k8s-chaos`, `k8s-extended`, or `all`. The Kubernetes workload lane is also available directly as `bash scripts/ci/workload-k3s-smoke.sh`, `bash scripts/ci/workload-k3s-soak.sh`, and `bash scripts/ci/workload-k3s-chaos.sh`.
