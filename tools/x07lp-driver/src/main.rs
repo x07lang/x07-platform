@@ -4128,14 +4128,23 @@ fn read_remote_otlp_snapshot(
     let mut last = None;
     for line in BufReader::new(file).lines() {
         let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let doc: Value = serde_json::from_str(&line).context("parse otlp export line")?;
-        if let Some(snapshot) =
-            remote_metrics_snapshot_from_otlp_export(&doc, context, analysis_seq, telemetry_source)
-        {
-            last = Some(snapshot);
+        for chunk in line.split('\0') {
+            let chunk = chunk.trim();
+            if chunk.is_empty() {
+                continue;
+            }
+            let doc: Value = match serde_json::from_str(chunk) {
+                Ok(doc) => doc,
+                Err(_) => continue,
+            };
+            if let Some(snapshot) = remote_metrics_snapshot_from_otlp_export(
+                &doc,
+                context,
+                analysis_seq,
+                telemetry_source,
+            ) {
+                last = Some(snapshot);
+            }
         }
     }
     Ok(last)
@@ -17993,6 +18002,75 @@ mod tests {
             .expect("lock env");
         let _host = ScopedEnvVar::set("X07LP_REMOTE_RUNTIME_HOST", "wasmcloud");
         assert_eq!(remote_runtime_host(), "wasmcloud");
+    }
+
+    #[test]
+    fn read_remote_otlp_snapshot_ignores_nul_padding() -> Result<()> {
+        let tmp = TempDir::new("otlp-nul-padding")?;
+        let telemetry_dir = tmp.path.join(".x07lp").join("telemetry");
+        fs::create_dir_all(&telemetry_dir)?;
+        let export_path = telemetry_dir.join(DEFAULT_REMOTE_OTLP_EXPORT_FILE);
+
+        let context = RemoteTelemetryContext {
+            exec_id: "lpexec_test".to_string(),
+            run_id: "lprun_test".to_string(),
+            pack_sha256: "deadbeef".to_string(),
+            slot: "candidate".to_string(),
+            app_id: "app_min".to_string(),
+            environment: "staging".to_string(),
+            service: "app_min".to_string(),
+        };
+        let attrs = json!([
+            otlp_string_attr("x07.exec_id", &context.exec_id),
+            otlp_string_attr("x07.run_id", &context.run_id),
+            otlp_string_attr("x07.pack_sha256", &context.pack_sha256),
+            otlp_string_attr("x07.slot", &context.slot),
+            otlp_string_attr("x07.app_id", &context.app_id),
+            otlp_string_attr("x07.environment", &context.environment),
+            otlp_string_attr("x07.telemetry_source", "remote_runtime_probe"),
+            otlp_int_attr("x07.analysis_seq", 1),
+        ]);
+        let export_doc = json!({
+            "resourceMetrics": [{
+                "resource": {
+                    "attributes": [otlp_string_attr("service.name", &context.service)]
+                },
+                "scopeMetrics": [{
+                    "scope": { "name": "x07lp-driver", "version": "test" },
+                    "metrics": [
+                        {
+                            "name": "http_error_rate",
+                            "unit": "ratio",
+                            "gauge": { "dataPoints": [{ "attributes": attrs.clone(), "timeUnixNano": "1", "asDouble": 0.0 }] }
+                        },
+                        {
+                            "name": "http_latency_p95_ms",
+                            "unit": "ms",
+                            "gauge": { "dataPoints": [{ "attributes": attrs.clone(), "timeUnixNano": "1", "asDouble": 12.0 }] }
+                        },
+                        {
+                            "name": "http_availability",
+                            "unit": "ratio",
+                            "gauge": { "dataPoints": [{ "attributes": attrs, "timeUnixNano": "1", "asDouble": 1.0 }] }
+                        }
+                    ]
+                }]
+            }]
+        });
+
+        let json_line = serde_json::to_string(&export_doc)?;
+        let mut bytes = vec![0u8; 1024];
+        bytes.extend_from_slice(json_line.as_bytes());
+        bytes.push(b'\n');
+        fs::write(&export_path, bytes)?;
+
+        let snapshot = read_remote_otlp_snapshot(&tmp.path, &context, 1, "remote_runtime_probe")?
+            .expect("snapshot");
+        assert_eq!(
+            get_str(&snapshot, &["schema_version"]).as_deref(),
+            Some("x07.metrics.snapshot@0.1.0")
+        );
+        Ok(())
     }
 
     #[test]
