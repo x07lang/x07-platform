@@ -383,6 +383,8 @@ fn command_run(args: WorkloadRunArgs) -> Result<Value> {
         &namespace,
         &public_base_url,
         &target_profile,
+        accepted.get("binding_requirements").unwrap_or(&Value::Null),
+        &binding_status,
         &cells,
     )?;
     let deployment_path = deployment_path(&state_dir, &deployment_id);
@@ -431,7 +433,14 @@ fn command_query(args: WorkloadQueryArgs) -> Result<Value> {
             accepted.get("binding_probe_results"),
         )?;
         let deployment = current_deployment_doc(&state_dir, workload_id)?
-            .map(|doc| refresh_deployment_doc(target_profile.as_ref(), doc))
+            .map(|doc| {
+                refresh_deployment_doc(
+                    target_profile.as_ref(),
+                    accepted.get("binding_requirements").unwrap_or(&Value::Null),
+                    &bindings,
+                    doc,
+                )
+            })
             .transpose()?;
         let workload_doc = render_workload_result_doc(
             accepted.get("workload").unwrap_or(&Value::Null),
@@ -474,7 +483,20 @@ fn command_query(args: WorkloadQueryArgs) -> Result<Value> {
             .map(|items| items.len())
             .unwrap_or(0);
         let deployment = current_deployment_doc(&state_dir, &workload_id)?
-            .map(|doc| refresh_deployment_doc(target_profile.as_ref(), doc))
+            .map(|doc| {
+                let bindings = binding_status_doc(
+                    &workload_id,
+                    accepted.get("binding_requirements").unwrap_or(&Value::Null),
+                    target_profile.as_ref(),
+                    accepted.get("binding_probe_results"),
+                )?;
+                refresh_deployment_doc(
+                    target_profile.as_ref(),
+                    accepted.get("binding_requirements").unwrap_or(&Value::Null),
+                    &bindings,
+                    doc,
+                )
+            })
             .transpose()?;
         let health = deployment
             .as_ref()
@@ -622,10 +644,18 @@ fn reconcile_workload_once(
         accepted.get("target").and_then(Value::as_object),
     )
     .ok();
+    let bindings = binding_status_doc(
+        workload_id,
+        accepted.get("binding_requirements").unwrap_or(&Value::Null),
+        target_profile.as_ref(),
+        accepted.get("binding_probe_results"),
+    )?;
     let refreshed = match current_deployment_doc(state_dir, workload_id)? {
         Some(deployment) => Some(reconcile_deployment_doc(
             state_dir,
             target_profile.as_ref(),
+            accepted.get("binding_requirements").unwrap_or(&Value::Null),
+            &bindings,
             deployment,
         )?),
         None => None,
@@ -636,6 +666,8 @@ fn reconcile_workload_once(
 fn reconcile_deployment_doc(
     state_dir: &Path,
     target_profile: Option<&Value>,
+    binding_requirements: &Value,
+    binding_status: &Value,
     deployment: Value,
 ) -> Result<Value> {
     let Some(target_profile) = target_profile else {
@@ -662,7 +694,12 @@ fn reconcile_deployment_doc(
             kubectl_rollout_status(target_profile, &namespace, deployment_name)?;
         }
     }
-    let refreshed = refresh_deployment_doc(Some(target_profile), deployment)?;
+    let refreshed = refresh_deployment_doc(
+        Some(target_profile),
+        binding_requirements,
+        binding_status,
+        deployment,
+    )?;
     let _ = write_json(&deployment_path(state_dir, &deployment_id), &refreshed)?;
     Ok(refreshed)
 }
@@ -1708,6 +1745,8 @@ fn live_deployment_doc(
     namespace: &str,
     public_base_url: &str,
     target_profile: &Value,
+    binding_requirements: &Value,
+    binding_status: &Value,
     cells: &[K8sCellDeployment],
 ) -> Result<Value> {
     let mut cell_docs = Vec::new();
@@ -1720,7 +1759,10 @@ fn live_deployment_doc(
         )?);
     }
     let desired_state = aggregate_desired_state(&cell_docs);
-    let observed_state = aggregate_observed_state(&cell_docs);
+    let observed_state = merge_observed_state_with_binding_health(
+        &aggregate_observed_state(&cell_docs),
+        binding_health_rollup(binding_requirements, binding_status),
+    );
     let observed_health = health_for_observed_state(&observed_state);
     Ok(json!({
         "schema_version": WORKLOAD_DEPLOYMENT_SCHEMA,
@@ -1742,7 +1784,12 @@ fn live_deployment_doc(
     }))
 }
 
-fn refresh_deployment_doc(target_profile: Option<&Value>, mut deployment: Value) -> Result<Value> {
+fn refresh_deployment_doc(
+    target_profile: Option<&Value>,
+    binding_requirements: &Value,
+    binding_status: &Value,
+    mut deployment: Value,
+) -> Result<Value> {
     if get_str(&deployment, &["status"]).as_deref() == Some("stopped") {
         if let Some(map) = deployment.as_object_mut() {
             map.insert("updated_unix_ms".to_string(), json!(now_ms()));
@@ -1762,29 +1809,41 @@ fn refresh_deployment_doc(target_profile: Option<&Value>, mut deployment: Value)
         }
         return Ok(deployment);
     }
-    let Some(target_profile) = target_profile else {
-        return Ok(deployment);
-    };
-    let namespace =
-        get_str(&deployment, &["namespace"]).ok_or_else(|| anyhow!("missing namespace"))?;
-    let public_base_url = get_str(&deployment, &["public_base_url"])
-        .unwrap_or_else(|| DEFAULT_K8S_PUBLIC_BASE_URL.to_string());
+
     let mut cell_docs = Vec::new();
-    for cell in deployment
-        .get("cells")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        cell_docs.push(refresh_cell_doc(
-            target_profile,
-            &namespace,
-            &public_base_url,
-            cell.clone(),
-        )?);
+    match target_profile {
+        Some(target_profile) => {
+            let namespace =
+                get_str(&deployment, &["namespace"]).ok_or_else(|| anyhow!("missing namespace"))?;
+            let public_base_url = get_str(&deployment, &["public_base_url"])
+                .unwrap_or_else(|| DEFAULT_K8S_PUBLIC_BASE_URL.to_string());
+            for cell in deployment
+                .get("cells")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                cell_docs.push(refresh_cell_doc(
+                    target_profile,
+                    &namespace,
+                    &public_base_url,
+                    cell.clone(),
+                )?);
+            }
+        }
+        None => {
+            cell_docs = deployment
+                .get("cells")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+        }
     }
     let desired_state = aggregate_desired_state(&cell_docs);
-    let observed_state = aggregate_observed_state(&cell_docs);
+    let observed_state = merge_observed_state_with_binding_health(
+        &aggregate_observed_state(&cell_docs),
+        binding_health_rollup(binding_requirements, binding_status),
+    );
     let observed_health = health_for_observed_state(&observed_state);
     if let Some(map) = deployment.as_object_mut() {
         map.insert("cells".to_string(), Value::Array(cell_docs));
@@ -2089,6 +2148,97 @@ fn health_for_observed_state(observed_state: &str) -> &str {
         "failed" => "failed",
         "pending" | "degraded" => "degraded",
         _ => "unknown",
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BindingHealthRollup {
+    Healthy,
+    Degraded,
+    Failed,
+}
+
+fn binding_health_rollup(
+    binding_requirements: &Value,
+    binding_status: &Value,
+) -> BindingHealthRollup {
+    let mut required_by_name = HashMap::new();
+    for binding in binding_requirements
+        .get("bindings")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(name) = binding.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let required = binding
+            .get("required")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        required_by_name.insert(name.to_string(), required);
+    }
+
+    let mut any_pending = false;
+    let mut any_error = false;
+    for item in binding_status
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(name) = item.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        if !required_by_name.get(name).copied().unwrap_or(true) {
+            continue;
+        }
+        let status = item
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("pending");
+        match status {
+            "ready" | "disabled" => {}
+            "error" => any_error = true,
+            _ => any_pending = true,
+        }
+    }
+    if any_error {
+        BindingHealthRollup::Failed
+    } else if any_pending {
+        BindingHealthRollup::Degraded
+    } else {
+        BindingHealthRollup::Healthy
+    }
+}
+
+fn merge_observed_state_with_binding_health(
+    observed_state: &str,
+    binding_health: BindingHealthRollup,
+) -> String {
+    match observed_state {
+        "stopped" => "stopped".to_string(),
+        "failed" => "failed".to_string(),
+        "degraded" => "degraded".to_string(),
+        "pending" => {
+            if binding_health == BindingHealthRollup::Failed {
+                "failed".to_string()
+            } else {
+                "pending".to_string()
+            }
+        }
+        "running" => match binding_health {
+            BindingHealthRollup::Healthy => "running".to_string(),
+            BindingHealthRollup::Degraded => "degraded".to_string(),
+            BindingHealthRollup::Failed => "failed".to_string(),
+        },
+        other => {
+            if binding_health == BindingHealthRollup::Failed {
+                "failed".to_string()
+            } else {
+                other.to_string()
+            }
+        }
     }
 }
 
@@ -2529,12 +2679,14 @@ fn k8s_binding_status_advisory(
             provider_kind,
             configured,
             target_id,
-            reason_code: Some(if configured {
-                "telemetry_collector_hint_present"
-            } else {
-                "telemetry_collector_hint_missing"
-            }
-            .to_string()),
+            reason_code: Some(
+                if configured {
+                    "telemetry_collector_hint_present"
+                } else {
+                    "telemetry_collector_hint_missing"
+                }
+                .to_string(),
+            ),
             message: Some(if configured {
                 "telemetry collector hint present; awaiting probe-backed validation".to_string()
             } else {
@@ -2592,7 +2744,9 @@ fn k8s_binding_status_advisory(
             configured: true,
             target_id,
             reason_code: Some("k8s_service_missing".to_string()),
-            message: Some("create or attach a Kubernetes Service to satisfy this binding".to_string()),
+            message: Some(
+                "create or attach a Kubernetes Service to satisfy this binding".to_string(),
+            ),
             last_checked_unix_ms: checked,
             probe_result_id,
         });
@@ -2811,8 +2965,9 @@ fn resolve_kubectl_command() -> (String, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        binding_status_doc, deployable_cells, sanitize_k8s_name, sanitize_route_path,
-        workload_state_result_doc,
+        BindingHealthRollup, binding_health_rollup, binding_status_doc, deployable_cells,
+        health_for_observed_state, merge_observed_state_with_binding_health, sanitize_k8s_name,
+        sanitize_route_path, workload_state_result_doc,
     };
     use serde_json::json;
 
@@ -2961,170 +3116,165 @@ mod tests {
     }
 
     #[test]
-	    fn binding_status_without_target_stays_pending() {
-	        let bindings = json!({
-	            "bindings": [
-	                {
+    fn binding_status_without_target_stays_pending() {
+        let bindings = json!({
+            "bindings": [
+                {
+                "name": "db.primary",
+                "kind": "postgres"
+            },
+            {
+                "name": "obj.documents",
+                "kind": "s3"
+                }
+            ]
+        });
+        let status = binding_status_doc("svc.api", &bindings, None, None).expect("status");
+        let items = status
+            .get("items")
+            .and_then(|value| value.as_array())
+            .expect("items");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["status"], "pending");
+        assert_eq!(items[0]["message"], "binding target not selected");
+        assert_eq!(items[0]["binding_id"], "binding.svc_api.db_primary");
+        assert_eq!(items[0]["configured"], false);
+        assert_eq!(items[0]["reason_code"], "binding_target_missing");
+    }
+
+    #[test]
+    fn binding_status_prefers_external_probe_results() {
+        let bindings = json!({
+            "bindings": [
+                {
                     "name": "db.primary",
                     "kind": "postgres"
-                },
+                }
+            ]
+        });
+        let probes = json!([
+            {
+                "schema_version": "lp.binding.probe.result@0.1.0",
+                "binding_id": "binding.svc_api.db_primary",
+                "name": "db.primary",
+                "kind": "postgres",
+                "status": "error",
+                "configured": true,
+                "provider_kind": "lp.impl.bindings.k8s_v1",
+                "target_id": "target_k3s_local",
+                "checks": [
+                    {
+                        "name": "configuration",
+                        "status": "ready",
+                        "message": "configuration looks good",
+                        "observed_unix_ms": 1000
+                    },
+                    {
+                        "name": "connectivity",
+                        "status": "error",
+                        "message": "dial tcp: refused",
+                        "observed_unix_ms": 1100
+                    }
+                ],
+                "observed_unix_ms": 1100
+            }
+        ]);
+        let status = binding_status_doc("svc.api", &bindings, None, Some(&probes)).expect("status");
+        let items = status
+            .get("items")
+            .and_then(|value| value.as_array())
+            .expect("items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["binding_id"], "binding.svc_api.db_primary");
+        assert_eq!(items[0]["status"], "error");
+        assert_eq!(items[0]["configured"], true);
+        assert_eq!(items[0]["target_id"], "target_k3s_local");
+        assert_eq!(items[0]["reason_code"], "probe_connectivity");
+        assert_eq!(items[0]["message"], "dial tcp: refused");
+        assert_eq!(items[0]["last_checked_unix_ms"], 1100);
+    }
+
+    #[test]
+    fn binding_status_matches_external_probe_by_name_when_binding_id_differs() {
+        let bindings = json!({
+            "bindings": [
                 {
                     "name": "obj.documents",
                     "kind": "s3"
-	                }
-	            ]
-	        });
-	        let status = binding_status_doc("svc.api", &bindings, None, None).expect("status");
-	        let items = status
-	            .get("items")
-	            .and_then(|value| value.as_array())
-	            .expect("items");
-	        assert_eq!(items.len(), 2);
-	        assert_eq!(items[0]["status"], "pending");
-	        assert_eq!(items[0]["message"], "binding target not selected");
-	        assert_eq!(items[0]["binding_id"], "binding.svc_api.db_primary");
-	        assert_eq!(items[0]["configured"], false);
-	        assert_eq!(items[0]["reason_code"], "binding_target_missing");
-	    }
+                }
+            ]
+        });
+        let probes = json!([
+            {
+                "schema_version": "lp.binding.probe.result@0.1.0",
+                "binding_id": "binding_obj_documents",
+                "name": "obj.documents",
+                "kind": "s3",
+                "status": "ready",
+                "configured": true,
+                "provider_kind": "lp.impl.bindings.k8s_v1",
+                "target_id": "target_k3s_local",
+                "checks": [
+                    {
+                        "name": "connectivity",
+                        "status": "ready",
+                        "message": "bucket head ok",
+                        "observed_unix_ms": 1200
+                    }
+                ],
+                "observed_unix_ms": 1200
+            }
+        ]);
+        let status = binding_status_doc("svc.api", &bindings, None, Some(&probes)).expect("status");
+        let items = status
+            .get("items")
+            .and_then(|value| value.as_array())
+            .expect("items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["binding_id"], "binding.svc_api.obj_documents");
+        assert_eq!(items[0]["status"], "ready");
+        assert_eq!(items[0]["configured"], true);
+        assert_eq!(items[0]["message"], "bucket head ok");
+        assert_eq!(items[0]["last_checked_unix_ms"], 1200);
+    }
 
-	    #[test]
-	    fn binding_status_prefers_external_probe_results() {
-	        let bindings = json!({
-	            "bindings": [
-	                {
-	                    "name": "db.primary",
-	                    "kind": "postgres"
-	                }
-	            ]
-	        });
-	        let probes = json!([
-	            {
-	                "schema_version": "lp.binding.probe.result@0.1.0",
-	                "binding_id": "binding.svc_api.db_primary",
-	                "name": "db.primary",
-	                "kind": "postgres",
-	                "status": "error",
-	                "configured": true,
-	                "provider_kind": "lp.impl.bindings.k8s_v1",
-	                "target_id": "target_k3s_local",
-	                "checks": [
-	                    {
-	                        "name": "configuration",
-	                        "status": "ready",
-	                        "message": "configuration looks good",
-	                        "observed_unix_ms": 1000
-	                    },
-	                    {
-	                        "name": "connectivity",
-	                        "status": "error",
-	                        "message": "dial tcp: refused",
-	                        "observed_unix_ms": 1100
-	                    }
-	                ],
-	                "observed_unix_ms": 1100
-	            }
-	        ]);
-	        let status =
-	            binding_status_doc("svc.api", &bindings, None, Some(&probes)).expect("status");
-	        let items = status
-	            .get("items")
-	            .and_then(|value| value.as_array())
-	            .expect("items");
-	        assert_eq!(items.len(), 1);
-	        assert_eq!(items[0]["binding_id"], "binding.svc_api.db_primary");
-	        assert_eq!(items[0]["status"], "error");
-	        assert_eq!(items[0]["configured"], true);
-	        assert_eq!(items[0]["target_id"], "target_k3s_local");
-	        assert_eq!(items[0]["reason_code"], "probe_connectivity");
-	        assert_eq!(items[0]["message"], "dial tcp: refused");
-	        assert_eq!(items[0]["last_checked_unix_ms"], 1100);
-	    }
+    #[test]
+    fn binding_status_with_target_and_no_probes_reports_probe_missing() {
+        let bindings = json!({
+            "bindings": [
+                {
+                    "name": "db.primary",
+                    "kind": "postgres"
+                }
+            ]
+        });
+        let target_profile = json!({
+            "name": "target.remote",
+            "kind": "remote"
+        });
+        let status =
+            binding_status_doc("svc.api", &bindings, Some(&target_profile), None).expect("status");
+        let items = status
+            .get("items")
+            .and_then(|value| value.as_array())
+            .expect("items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["status"], "pending");
+        assert_eq!(items[0]["target_id"], "target.remote");
+        assert_eq!(items[0]["reason_code"], "binding_probe_missing");
+        assert_eq!(items[0]["message"], "binding probe results not available");
+        assert!(
+            items[0]
+                .get("last_checked_unix_ms")
+                .and_then(|value| value.as_u64())
+                .is_some()
+        );
+    }
 
-	    #[test]
-	    fn binding_status_matches_external_probe_by_name_when_binding_id_differs() {
-	        let bindings = json!({
-	            "bindings": [
-	                {
-	                    "name": "obj.documents",
-	                    "kind": "s3"
-	                }
-	            ]
-	        });
-	        let probes = json!([
-	            {
-	                "schema_version": "lp.binding.probe.result@0.1.0",
-	                "binding_id": "binding_obj_documents",
-	                "name": "obj.documents",
-	                "kind": "s3",
-	                "status": "ready",
-	                "configured": true,
-	                "provider_kind": "lp.impl.bindings.k8s_v1",
-	                "target_id": "target_k3s_local",
-	                "checks": [
-	                    {
-	                        "name": "connectivity",
-	                        "status": "ready",
-	                        "message": "bucket head ok",
-	                        "observed_unix_ms": 1200
-	                    }
-	                ],
-	                "observed_unix_ms": 1200
-	            }
-	        ]);
-	        let status =
-	            binding_status_doc("svc.api", &bindings, None, Some(&probes)).expect("status");
-	        let items = status
-	            .get("items")
-	            .and_then(|value| value.as_array())
-	            .expect("items");
-	        assert_eq!(items.len(), 1);
-	        assert_eq!(items[0]["binding_id"], "binding.svc_api.obj_documents");
-	        assert_eq!(items[0]["status"], "ready");
-	        assert_eq!(items[0]["configured"], true);
-	        assert_eq!(items[0]["message"], "bucket head ok");
-	        assert_eq!(items[0]["last_checked_unix_ms"], 1200);
-	    }
-
-	    #[test]
-	    fn binding_status_with_target_and_no_probes_reports_probe_missing() {
-	        let bindings = json!({
-	            "bindings": [
-	                {
-	                    "name": "db.primary",
-	                    "kind": "postgres"
-	                }
-	            ]
-	        });
-	        let target_profile = json!({
-	            "name": "target.remote",
-	            "kind": "remote"
-	        });
-	        let status = binding_status_doc(
-	            "svc.api",
-	            &bindings,
-	            Some(&target_profile),
-	            None,
-	        )
-	        .expect("status");
-	        let items = status
-	            .get("items")
-	            .and_then(|value| value.as_array())
-	            .expect("items");
-	        assert_eq!(items.len(), 1);
-	        assert_eq!(items[0]["status"], "pending");
-	        assert_eq!(items[0]["target_id"], "target.remote");
-	        assert_eq!(items[0]["reason_code"], "binding_probe_missing");
-	        assert_eq!(items[0]["message"], "binding probe results not available");
-	        assert!(items[0]
-	            .get("last_checked_unix_ms")
-	            .and_then(|value| value.as_u64())
-	            .is_some());
-	    }
-
-	    #[test]
-	    fn workload_state_result_rolls_up_reconciler_view() {
-	        let deployment = json!({
-	            "deployment_id": "wlrun_demo",
+    #[test]
+    fn workload_state_result_rolls_up_reconciler_view() {
+        let deployment = json!({
+                "deployment_id": "wlrun_demo",
             "updated_unix_ms": 12345,
             "target": { "name": "k3s-local" },
             "cells": [
@@ -3157,5 +3307,61 @@ mod tests {
             state["observed"]["cells"][0]["route_url"],
             "http://127.0.0.1/demo"
         );
+    }
+
+    #[test]
+    fn binding_health_rollup_ignores_optional_bindings() {
+        let requirements = json!({
+            "bindings": [
+                {"name": "db.primary", "kind": "postgres", "required": true, "required_by_cells": ["api"]},
+                {"name": "obj.optional", "kind": "s3", "required": false, "required_by_cells": ["api"]}
+            ]
+        });
+        let status = json!({
+            "items": [
+                {"name": "db.primary", "status": "ready"},
+                {"name": "obj.optional", "status": "error"}
+            ]
+        });
+        assert_eq!(
+            binding_health_rollup(&requirements, &status),
+            BindingHealthRollup::Healthy
+        );
+    }
+
+    #[test]
+    fn workload_observed_state_degrades_when_required_bindings_pending() {
+        let requirements = json!({
+            "bindings": [
+                {"name": "db.primary", "kind": "postgres", "required": true, "required_by_cells": ["api"]}
+            ]
+        });
+        let status = json!({
+            "items": [{"name": "db.primary", "status": "pending"}]
+        });
+        let merged = merge_observed_state_with_binding_health(
+            "running",
+            binding_health_rollup(&requirements, &status),
+        );
+        assert_eq!(merged, "degraded");
+        assert_eq!(health_for_observed_state(&merged), "degraded");
+    }
+
+    #[test]
+    fn workload_observed_state_fails_when_required_bindings_error() {
+        let requirements = json!({
+            "bindings": [
+                {"name": "db.primary", "kind": "postgres", "required": true, "required_by_cells": ["api"]}
+            ]
+        });
+        let status = json!({
+            "items": [{"name": "db.primary", "status": "error"}]
+        });
+        let merged = merge_observed_state_with_binding_health(
+            "running",
+            binding_health_rollup(&requirements, &status),
+        );
+        assert_eq!(merged, "failed");
+        assert_eq!(health_for_observed_state(&merged), "failed");
     }
 }
