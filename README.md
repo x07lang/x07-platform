@@ -214,6 +214,8 @@ For manual use, the workload CLI is:
 
 `workload reconcile` is the controller loop for the Kubernetes lane. It re-applies the rendered manifests from the accepted deployment state, waits for deployment-backed cells to settle, refreshes the live desired versus observed state, and writes the reconciled deployment record back into the state directory.
 
+Binding readiness is probe-backed when connector-aware probe results are available, and otherwise falls back to local advisory wiring checks (for example Kubernetes Secret or Service presence). The advisory checks are not treated as authoritative dependency readiness for connector bindings.
+
 ## User Flows
 
 ### 1. Deploy a sealed app pack locally

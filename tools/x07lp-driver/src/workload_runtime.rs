@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -272,6 +273,7 @@ fn command_accept(args: WorkloadAcceptArgs) -> Result<Value> {
         &workload_id,
         &loaded.binding_requirements,
         target_profile.as_ref(),
+        None,
     )?;
     let accepted_doc = accepted_doc(&loaded, target_profile.as_ref(), &binding_status)?;
     let accepted_path = accepted_path(&state_dir, &workload_id);
@@ -335,6 +337,7 @@ fn command_run(args: WorkloadRunArgs) -> Result<Value> {
         &workload_id,
         accepted.get("binding_requirements").unwrap_or(&Value::Null),
         Some(&target_profile),
+        accepted.get("binding_probe_results"),
     )?;
     for item in binding_status
         .get("items")
@@ -425,6 +428,7 @@ fn command_query(args: WorkloadQueryArgs) -> Result<Value> {
             workload_id,
             accepted.get("binding_requirements").unwrap_or(&Value::Null),
             target_profile.as_ref(),
+            accepted.get("binding_probe_results"),
         )?;
         let deployment = current_deployment_doc(&state_dir, workload_id)?
             .map(|doc| refresh_deployment_doc(target_profile.as_ref(), doc))
@@ -679,6 +683,7 @@ fn command_bindings(args: WorkloadBindingsArgs) -> Result<Value> {
             &args.workload,
             accepted.get("binding_requirements").unwrap_or(&Value::Null),
             target_profile.as_ref(),
+            accepted.get("binding_probe_results"),
         )?,
         None,
         Vec::new(),
@@ -793,6 +798,7 @@ fn load_or_accept_workload_for_run(state_dir: &Path, args: &WorkloadRunArgs) -> 
         &workload_id,
         &loaded.binding_requirements,
         target_profile.as_ref(),
+        None,
     )?;
     let accepted = accepted_doc(&loaded, target_profile.as_ref(), &bindings)?;
     let _ = write_json(&accepted_path(state_dir, &workload_id), &accepted)?;
@@ -2287,6 +2293,7 @@ fn observed_health_for_deployment(deployment: Option<&Value>) -> String {
         .to_string()
 }
 
+#[derive(Clone, Debug)]
 struct BindingProbeStatus {
     status: String,
     provider_kind: Option<String>,
@@ -2298,12 +2305,113 @@ struct BindingProbeStatus {
     probe_result_id: Option<String>,
 }
 
+#[derive(Default)]
+struct ExternalBindingProbeIndex {
+    by_binding_id: HashMap<String, BindingProbeStatus>,
+    by_name: HashMap<String, BindingProbeStatus>,
+}
+
+impl ExternalBindingProbeIndex {
+    fn from_json(value: Option<&Value>) -> Self {
+        let mut index = ExternalBindingProbeIndex::default();
+        let Some(value) = value else {
+            return index;
+        };
+        let docs: Vec<&Value> = if let Some(items) = value.as_array() {
+            items.iter().collect()
+        } else if value
+            .get("schema_version")
+            .and_then(Value::as_str)
+            .is_some_and(|schema| schema == "lp.binding.probe.result@0.1.0")
+        {
+            vec![value]
+        } else if let Some(items) = value.get("items").and_then(Value::as_array) {
+            items.iter().collect()
+        } else {
+            Vec::new()
+        };
+        for doc in docs {
+            if doc
+                .get("schema_version")
+                .and_then(Value::as_str)
+                .is_some_and(|schema| schema != "lp.binding.probe.result@0.1.0")
+            {
+                continue;
+            }
+            let Some(binding_id) = doc.get("binding_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(name) = doc.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let status = doc
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("pending")
+                .to_string();
+            let provider_kind = doc
+                .get("provider_kind")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            let configured = doc
+                .get("configured")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let target_id = doc
+                .get("target_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+            let last_checked_unix_ms = doc.get("observed_unix_ms").and_then(Value::as_u64);
+            let probe_result_id = doc
+                .get("probe_result_id")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
+
+            let mut reason_code = None;
+            let mut message = None;
+            if let Some(checks) = doc.get("checks").and_then(Value::as_array) {
+                if let Some(check) = checks
+                    .iter()
+                    .find(|check| check.get("status").and_then(Value::as_str) != Some("ready"))
+                    .or_else(|| checks.first())
+                {
+                    if let Some(check_message) = check.get("message").and_then(Value::as_str) {
+                        message = Some(check_message.to_string());
+                    }
+                    if let Some(check_name) = check.get("name").and_then(Value::as_str) {
+                        reason_code =
+                            Some(format!("probe_{}", check_name.replace([' ', '.'], "_")));
+                    }
+                }
+            }
+
+            let probe = BindingProbeStatus {
+                status,
+                provider_kind,
+                configured,
+                target_id,
+                reason_code,
+                message,
+                last_checked_unix_ms,
+                probe_result_id,
+            };
+            index
+                .by_binding_id
+                .insert(binding_id.to_string(), probe.clone());
+            index.by_name.insert(name.to_string(), probe);
+        }
+        index
+    }
+}
+
 fn binding_status_doc(
     workload_id: &str,
     binding_requirements: &Value,
     target_profile: Option<&Value>,
+    binding_probe_results: Option<&Value>,
 ) -> Result<Value> {
     let namespace = target_profile.and_then(|profile| get_str(profile, &["default_namespace"]));
+    let external = ExternalBindingProbeIndex::from_json(binding_probe_results);
     let mut items = Vec::new();
     for binding in binding_requirements
         .get("bindings")
@@ -2319,25 +2427,57 @@ fn binding_status_doc(
             .get("kind")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("binding requirement missing kind"))?;
-        let probe = match (target_profile, namespace.as_deref()) {
-            (Some(profile), Some(namespace))
-                if get_str(profile, &["kind"]).as_deref() == Some("k8s") =>
-            {
-                k8s_binding_status(workload_id, profile, namespace, name, kind)?
-            }
-            _ => BindingProbeStatus {
-                status: "pending".to_string(),
-                provider_kind: None,
-                configured: false,
-                target_id: None,
-                reason_code: Some("binding_target_missing".to_string()),
-                message: Some("binding target not selected".to_string()),
-                last_checked_unix_ms: None,
-                probe_result_id: None,
-            },
-        };
+        let binding_id = sanitize_binding_id(workload_id, name);
+        let mut probe = external
+            .by_binding_id
+            .get(&binding_id)
+            .cloned()
+            .or_else(|| external.by_name.get(name).cloned())
+            .unwrap_or_else(|| match (target_profile, namespace.as_deref()) {
+                (Some(profile), Some(namespace))
+                    if get_str(profile, &["kind"]).as_deref() == Some("k8s") =>
+                {
+                    k8s_binding_status_advisory(workload_id, profile, namespace, name, kind)
+                        .unwrap_or_else(|_| BindingProbeStatus {
+                            status: "pending".to_string(),
+                            provider_kind: Some("lp.impl.bindings.k8s_advisory_v1".to_string()),
+                            configured: false,
+                            target_id: get_str(profile, &["name"]),
+                            reason_code: Some("binding_probe_missing".to_string()),
+                            message: Some(
+                                "binding probe results unavailable and advisory lookup failed"
+                                    .to_string(),
+                            ),
+                            last_checked_unix_ms: Some(now_ms()),
+                            probe_result_id: None,
+                        })
+                }
+                (Some(profile), _) => BindingProbeStatus {
+                    status: "pending".to_string(),
+                    provider_kind: None,
+                    configured: false,
+                    target_id: get_str(profile, &["name"]),
+                    reason_code: Some("binding_probe_missing".to_string()),
+                    message: Some("binding probe results not available".to_string()),
+                    last_checked_unix_ms: Some(now_ms()),
+                    probe_result_id: None,
+                },
+                _ => BindingProbeStatus {
+                    status: "pending".to_string(),
+                    provider_kind: None,
+                    configured: false,
+                    target_id: None,
+                    reason_code: Some("binding_target_missing".to_string()),
+                    message: Some("binding target not selected".to_string()),
+                    last_checked_unix_ms: None,
+                    probe_result_id: None,
+                },
+            });
+        if probe.target_id.is_none() {
+            probe.target_id = target_profile.and_then(|profile| get_str(profile, &["name"]));
+        }
         let mut item = json!({
-            "binding_id": sanitize_binding_id(workload_id, name),
+            "binding_id": binding_id,
             "name": name,
             "kind": kind,
             "status": probe.status,
@@ -2365,32 +2505,55 @@ fn binding_status_doc(
     }))
 }
 
-fn k8s_binding_status(
+fn k8s_binding_status_advisory(
     workload_id: &str,
     target_profile: &Value,
     namespace: &str,
     name: &str,
     kind: &str,
 ) -> Result<BindingProbeStatus> {
-    let provider_kind = Some("lp.impl.bindings.k8s_v1".to_string());
+    let provider_kind = Some("lp.impl.bindings.k8s_advisory_v1".to_string());
     let checked = Some(now_ms());
     let target_id = get_str(target_profile, &["name"]);
     let probe_result_id = checked.map(|checked| {
         format!(
-            "bindprobe.{}.{}",
+            "bindadvisory.{}.{}",
             sanitize_binding_id(workload_id, name),
             checked
         )
     });
     if kind == "otlp" {
-        if get_str(target_profile, &["telemetry_collector_hint"]).is_some() {
+        let configured = get_str(target_profile, &["telemetry_collector_hint"]).is_some();
+        return Ok(BindingProbeStatus {
+            status: "pending".to_string(),
+            provider_kind,
+            configured,
+            target_id,
+            reason_code: Some(if configured {
+                "telemetry_collector_hint_present"
+            } else {
+                "telemetry_collector_hint_missing"
+            }
+            .to_string()),
+            message: Some(if configured {
+                "telemetry collector hint present; awaiting probe-backed validation".to_string()
+            } else {
+                "target profile does not advertise telemetry_collector_hint".to_string()
+            }),
+            last_checked_unix_ms: checked,
+            probe_result_id,
+        });
+    }
+    let object_name = sanitize_k8s_name(name);
+    if kind == "secret" {
+        if kubectl_exists(target_profile, namespace, "secret", &object_name)? {
             return Ok(BindingProbeStatus {
                 status: "ready".to_string(),
                 provider_kind,
                 configured: true,
                 target_id,
-                reason_code: Some("telemetry_collector_hint_present".to_string()),
-                message: Some("telemetry collector hint present on target profile".to_string()),
+                reason_code: Some("k8s_secret_present".to_string()),
+                message: Some("matching Kubernetes Secret is present".to_string()),
                 last_checked_unix_ms: checked,
                 probe_result_id,
             });
@@ -2398,56 +2561,55 @@ fn k8s_binding_status(
         return Ok(BindingProbeStatus {
             status: "pending".to_string(),
             provider_kind,
-            configured: true,
+            configured: false,
             target_id,
-            reason_code: Some("telemetry_collector_hint_missing".to_string()),
-            message: Some("target profile does not advertise telemetry_collector_hint".to_string()),
+            reason_code: Some("k8s_secret_missing".to_string()),
+            message: Some("create a Kubernetes Secret to satisfy this binding".to_string()),
             last_checked_unix_ms: checked,
             probe_result_id,
         });
     }
-    let object_name = sanitize_k8s_name(name);
-    let (resource_kind, exists_message, pending_message, ready_reason, pending_reason) =
-        if kind == "secret" {
-            (
-                "secret",
-                "matching Kubernetes Secret is present",
-                "create a Kubernetes Secret to satisfy this binding",
-                "k8s_secret_present",
-                "k8s_secret_missing",
-            )
-        } else {
-            (
-                "service",
-                "matching Kubernetes Service is present",
-                "create or attach a Kubernetes Service to satisfy this binding",
-                "k8s_service_present",
-                "k8s_service_missing",
-            )
-        };
-    if kubectl_exists(target_profile, namespace, resource_kind, &object_name)? {
-        Ok(BindingProbeStatus {
-            status: "ready".to_string(),
+
+    let secret_exists = kubectl_exists(target_profile, namespace, "secret", &object_name)?;
+    if !secret_exists {
+        return Ok(BindingProbeStatus {
+            status: "pending".to_string(),
             provider_kind,
-            configured: true,
+            configured: false,
             target_id,
-            reason_code: Some(ready_reason.to_string()),
-            message: Some(exists_message.to_string()),
+            reason_code: Some("k8s_secret_missing".to_string()),
+            message: Some("create a Kubernetes Secret to satisfy this binding".to_string()),
             last_checked_unix_ms: checked,
             probe_result_id,
-        })
-    } else {
-        Ok(BindingProbeStatus {
+        });
+    }
+
+    let service_required = matches!(kind, "postgres" | "mysql" | "redis" | "kafka" | "amqp");
+    if service_required && !kubectl_exists(target_profile, namespace, "service", &object_name)? {
+        return Ok(BindingProbeStatus {
             status: "pending".to_string(),
             provider_kind,
             configured: true,
             target_id,
-            reason_code: Some(pending_reason.to_string()),
-            message: Some(pending_message.to_string()),
+            reason_code: Some("k8s_service_missing".to_string()),
+            message: Some("create or attach a Kubernetes Service to satisfy this binding".to_string()),
             last_checked_unix_ms: checked,
             probe_result_id,
-        })
+        });
     }
+
+    Ok(BindingProbeStatus {
+        status: "pending".to_string(),
+        provider_kind,
+        configured: true,
+        target_id,
+        reason_code: Some("binding_probe_missing".to_string()),
+        message: Some(
+            "binding configuration present; awaiting probe-backed validation".to_string(),
+        ),
+        last_checked_unix_ms: checked,
+        probe_result_id,
+    })
 }
 
 fn sanitize_binding_id(workload_id: &str, name: &str) -> String {
@@ -2799,36 +2961,170 @@ mod tests {
     }
 
     #[test]
-    fn binding_status_without_target_stays_pending() {
-        let bindings = json!({
-            "bindings": [
-                {
+	    fn binding_status_without_target_stays_pending() {
+	        let bindings = json!({
+	            "bindings": [
+	                {
                     "name": "db.primary",
                     "kind": "postgres"
                 },
                 {
                     "name": "obj.documents",
                     "kind": "s3"
-                }
-            ]
-        });
-        let status = binding_status_doc("svc.api", &bindings, None).expect("status");
-        let items = status
-            .get("items")
-            .and_then(|value| value.as_array())
-            .expect("items");
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0]["status"], "pending");
-        assert_eq!(items[0]["message"], "binding target not selected");
-        assert_eq!(items[0]["binding_id"], "binding.svc_api.db_primary");
-        assert_eq!(items[0]["configured"], false);
-        assert_eq!(items[0]["reason_code"], "binding_target_missing");
-    }
+	                }
+	            ]
+	        });
+	        let status = binding_status_doc("svc.api", &bindings, None, None).expect("status");
+	        let items = status
+	            .get("items")
+	            .and_then(|value| value.as_array())
+	            .expect("items");
+	        assert_eq!(items.len(), 2);
+	        assert_eq!(items[0]["status"], "pending");
+	        assert_eq!(items[0]["message"], "binding target not selected");
+	        assert_eq!(items[0]["binding_id"], "binding.svc_api.db_primary");
+	        assert_eq!(items[0]["configured"], false);
+	        assert_eq!(items[0]["reason_code"], "binding_target_missing");
+	    }
 
-    #[test]
-    fn workload_state_result_rolls_up_reconciler_view() {
-        let deployment = json!({
-            "deployment_id": "wlrun_demo",
+	    #[test]
+	    fn binding_status_prefers_external_probe_results() {
+	        let bindings = json!({
+	            "bindings": [
+	                {
+	                    "name": "db.primary",
+	                    "kind": "postgres"
+	                }
+	            ]
+	        });
+	        let probes = json!([
+	            {
+	                "schema_version": "lp.binding.probe.result@0.1.0",
+	                "binding_id": "binding.svc_api.db_primary",
+	                "name": "db.primary",
+	                "kind": "postgres",
+	                "status": "error",
+	                "configured": true,
+	                "provider_kind": "lp.impl.bindings.k8s_v1",
+	                "target_id": "target_k3s_local",
+	                "checks": [
+	                    {
+	                        "name": "configuration",
+	                        "status": "ready",
+	                        "message": "configuration looks good",
+	                        "observed_unix_ms": 1000
+	                    },
+	                    {
+	                        "name": "connectivity",
+	                        "status": "error",
+	                        "message": "dial tcp: refused",
+	                        "observed_unix_ms": 1100
+	                    }
+	                ],
+	                "observed_unix_ms": 1100
+	            }
+	        ]);
+	        let status =
+	            binding_status_doc("svc.api", &bindings, None, Some(&probes)).expect("status");
+	        let items = status
+	            .get("items")
+	            .and_then(|value| value.as_array())
+	            .expect("items");
+	        assert_eq!(items.len(), 1);
+	        assert_eq!(items[0]["binding_id"], "binding.svc_api.db_primary");
+	        assert_eq!(items[0]["status"], "error");
+	        assert_eq!(items[0]["configured"], true);
+	        assert_eq!(items[0]["target_id"], "target_k3s_local");
+	        assert_eq!(items[0]["reason_code"], "probe_connectivity");
+	        assert_eq!(items[0]["message"], "dial tcp: refused");
+	        assert_eq!(items[0]["last_checked_unix_ms"], 1100);
+	    }
+
+	    #[test]
+	    fn binding_status_matches_external_probe_by_name_when_binding_id_differs() {
+	        let bindings = json!({
+	            "bindings": [
+	                {
+	                    "name": "obj.documents",
+	                    "kind": "s3"
+	                }
+	            ]
+	        });
+	        let probes = json!([
+	            {
+	                "schema_version": "lp.binding.probe.result@0.1.0",
+	                "binding_id": "binding_obj_documents",
+	                "name": "obj.documents",
+	                "kind": "s3",
+	                "status": "ready",
+	                "configured": true,
+	                "provider_kind": "lp.impl.bindings.k8s_v1",
+	                "target_id": "target_k3s_local",
+	                "checks": [
+	                    {
+	                        "name": "connectivity",
+	                        "status": "ready",
+	                        "message": "bucket head ok",
+	                        "observed_unix_ms": 1200
+	                    }
+	                ],
+	                "observed_unix_ms": 1200
+	            }
+	        ]);
+	        let status =
+	            binding_status_doc("svc.api", &bindings, None, Some(&probes)).expect("status");
+	        let items = status
+	            .get("items")
+	            .and_then(|value| value.as_array())
+	            .expect("items");
+	        assert_eq!(items.len(), 1);
+	        assert_eq!(items[0]["binding_id"], "binding.svc_api.obj_documents");
+	        assert_eq!(items[0]["status"], "ready");
+	        assert_eq!(items[0]["configured"], true);
+	        assert_eq!(items[0]["message"], "bucket head ok");
+	        assert_eq!(items[0]["last_checked_unix_ms"], 1200);
+	    }
+
+	    #[test]
+	    fn binding_status_with_target_and_no_probes_reports_probe_missing() {
+	        let bindings = json!({
+	            "bindings": [
+	                {
+	                    "name": "db.primary",
+	                    "kind": "postgres"
+	                }
+	            ]
+	        });
+	        let target_profile = json!({
+	            "name": "target.remote",
+	            "kind": "remote"
+	        });
+	        let status = binding_status_doc(
+	            "svc.api",
+	            &bindings,
+	            Some(&target_profile),
+	            None,
+	        )
+	        .expect("status");
+	        let items = status
+	            .get("items")
+	            .and_then(|value| value.as_array())
+	            .expect("items");
+	        assert_eq!(items.len(), 1);
+	        assert_eq!(items[0]["status"], "pending");
+	        assert_eq!(items[0]["target_id"], "target.remote");
+	        assert_eq!(items[0]["reason_code"], "binding_probe_missing");
+	        assert_eq!(items[0]["message"], "binding probe results not available");
+	        assert!(items[0]
+	            .get("last_checked_unix_ms")
+	            .and_then(|value| value.as_u64())
+	            .is_some());
+	    }
+
+	    #[test]
+	    fn workload_state_result_rolls_up_reconciler_view() {
+	        let deployment = json!({
+	            "deployment_id": "wlrun_demo",
             "updated_unix_ms": 12345,
             "target": { "name": "k3s-local" },
             "cells": [
