@@ -17,6 +17,7 @@ x07lp_k3s_run_api_workload
 
 route_url="$(x07lp_k3s_route_url_from_report "$OUT_DIR/workload.run.json")"
 x07lp_k3s_wait_for_route "$route_url" 30 "$OUT_DIR/curl.response.initial.txt"
+x07lp_k3s_seed_example_bindings
 
 for cycle in $(seq 1 "$SOAK_CYCLES"); do
   x07lp_k3s_reconcile_api_workload "$OUT_DIR/workload.reconcile.${cycle}.json"

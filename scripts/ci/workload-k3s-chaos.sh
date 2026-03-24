@@ -18,6 +18,7 @@ deployment_name="$(x07lp_k3s_resource_name_from_report "$OUT_DIR/workload.run.js
 service_name="$(x07lp_k3s_resource_name_from_report "$OUT_DIR/workload.run.json" service_name)"
 
 x07lp_k3s_wait_for_route "$route_url" 30 "$OUT_DIR/curl.response.initial.txt"
+x07lp_k3s_seed_example_bindings
 
 kubectl --context "$CLUSTER_CONTEXT" -n "$NAMESPACE" delete deployment "$deployment_name"
 x07lp_k3s_wait_for_resource_absent deployment "$deployment_name" 30

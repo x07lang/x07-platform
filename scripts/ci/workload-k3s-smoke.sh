@@ -11,6 +11,7 @@ trap x07lp_k3s_cleanup EXIT
 x07lp_k3s_prepare_target
 x07lp_k3s_pack_api_example
 x07lp_k3s_accept_api_workload
+x07lp_k3s_seed_example_bindings
 x07lp_k3s_run_api_workload
 
 route_url="$(x07lp_k3s_route_url_from_report "$OUT_DIR/workload.run.json")"

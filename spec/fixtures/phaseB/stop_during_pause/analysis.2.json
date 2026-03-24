@@ -1,0 +1,24 @@
+{
+  "schema_version": "x07.metrics.snapshot@0.1.0",
+  "service": "app_min",
+  "taken_at_utc": "2026-02-27T00:00:00Z",
+  "v": 1,
+  "labels": {},
+  "metrics": [
+    {
+      "name": "http_error_rate",
+      "unit": "ratio",
+      "value": 0.005
+    },
+    {
+      "name": "http_latency_p95_ms",
+      "unit": "ms",
+      "value": 120
+    },
+    {
+      "name": "http_availability",
+      "unit": "ratio",
+      "value": 0.995
+    }
+  ]
+}

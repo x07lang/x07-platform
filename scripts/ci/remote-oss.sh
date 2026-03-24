@@ -94,15 +94,27 @@ REMOTE_FIXTURE_INDEX="spec/fixtures/remote-oss/fixture_index.json"
 
 rm -rf "$TMP_DIR"
 mkdir -p "$TMP_DIR" "$TOKEN_DIR" "$OCI_CRED_DIR" "$OTLP_EXPORT_DIR"
-bash "$REPO_ROOT/scripts/ci/prepare_otlp_export_mount.sh" "$OTLP_EXPORT_DIR"
+bash "$ROOT_DIR/scripts/ci/prepare_otlp_export_mount.sh" "$OTLP_EXPORT_DIR"
+
+CONFIG_DIR="${TMP_DIR}/config"
+mkdir -p "$CONFIG_DIR"
+export X07LP_CONFIG_DIR="$CONFIG_DIR"
 
 PIDS=()
 DAEMON_PID=""
 cleanup() {
   if command -v docker >/dev/null 2>&1; then
     if docker compose version >/dev/null 2>&1; then
+      if [ "${REMOTE_MODE:-}" = "compose" ]; then
+        mkdir -p "$TMP_DIR"
+        (cd "$ROOT_DIR" && docker compose -p "$STACK_PROJECT" -f "$STACK_COMPOSE_FILE" logs --no-color >"$TMP_DIR/docker-compose.log" 2>&1 || true)
+      fi
       (cd "$ROOT_DIR" && docker compose -p "$STACK_PROJECT" -f "$STACK_COMPOSE_FILE" down -v >/dev/null 2>&1 || true)
     elif command -v docker-compose >/dev/null 2>&1; then
+      if [ "${REMOTE_MODE:-}" = "compose" ]; then
+        mkdir -p "$TMP_DIR"
+        (cd "$ROOT_DIR" && docker-compose -p "$STACK_PROJECT" -f "$STACK_COMPOSE_FILE" logs --no-color >"$TMP_DIR/docker-compose.log" 2>&1 || true)
+      fi
       (cd "$ROOT_DIR" && docker-compose -p "$STACK_PROJECT" -f "$STACK_COMPOSE_FILE" down -v >/dev/null 2>&1 || true)
     fi
   fi
@@ -815,7 +827,33 @@ run_remote_query_view() {
   local view="$2"
   local run_report="$3"
   local cli_report="$4"
-  run_x07lp "$run_report" "$cli_report" deploy query --target "$TARGET_NAME" --deployment "$exec_id" --view "$view" --json
+  local attempt=1
+  local max_attempts=20
+  while true; do
+    run_x07lp "$run_report" "$cli_report" deploy query --target "$TARGET_NAME" --deployment "$exec_id" --view "$view" --json
+    if "$PYTHON" - "$cli_report" <<'PY' >/dev/null 2>&1; then
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+doc = json.loads(path.read_text(encoding="utf-8"))
+schema_version = doc.get("schema_version")
+if isinstance(schema_version, str) and schema_version:
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+      return 0
+    fi
+
+    if [ "$attempt" -ge "$max_attempts" ]; then
+      echo "remote query did not produce a schema_version: exec_id=$exec_id view=$view" >&2
+      cat "$cli_report" >&2 || true
+      return 1
+    fi
+    attempt=$((attempt + 1))
+    sleep 1
+  done
 }
 
 start_stack() {

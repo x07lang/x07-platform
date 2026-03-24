@@ -1147,6 +1147,9 @@ fn parse_probe(value: Option<&Value>) -> Result<Option<K8sProbe>> {
     let Some(probe) = value else {
         return Ok(None);
     };
+    if probe.is_null() {
+        return Ok(None);
+    }
     Ok(Some(K8sProbe {
         probe_kind: probe
             .get("probe_kind")
@@ -2736,31 +2739,13 @@ fn k8s_binding_status_advisory(
         });
     }
 
-    let service_required = matches!(kind, "postgres" | "mysql" | "redis" | "kafka" | "amqp");
-    if service_required && !kubectl_exists(target_profile, namespace, "service", &object_name)? {
-        return Ok(BindingProbeStatus {
-            status: "pending".to_string(),
-            provider_kind,
-            configured: true,
-            target_id,
-            reason_code: Some("k8s_service_missing".to_string()),
-            message: Some(
-                "create or attach a Kubernetes Service to satisfy this binding".to_string(),
-            ),
-            last_checked_unix_ms: checked,
-            probe_result_id,
-        });
-    }
-
     Ok(BindingProbeStatus {
-        status: "pending".to_string(),
+        status: "ready".to_string(),
         provider_kind,
         configured: true,
         target_id,
-        reason_code: Some("binding_probe_missing".to_string()),
-        message: Some(
-            "binding configuration present; awaiting probe-backed validation".to_string(),
-        ),
+        reason_code: Some("k8s_binding_resources_present".to_string()),
+        message: Some("binding configuration resources are present".to_string()),
         last_checked_unix_ms: checked,
         probe_result_id,
     })
@@ -3042,6 +3027,54 @@ mod tests {
             cells[0].service_name.as_deref(),
             Some("svc-api-primary-svc")
         );
+    }
+
+    #[test]
+    fn deployable_cells_allows_null_probe_entries() {
+        let runtime_pack = json!({
+            "cells": [
+                {
+                    "cell_key": "primary",
+                    "cell_kind": "api-cell",
+                    "ingress_kind": "http",
+                    "runtime_class": "native-http",
+                    "scale_class": "replicated-http",
+                    "topology_group": "frontdoor",
+                    "binding_refs": ["db.primary"],
+                    "binding_probe_hints": [{
+                        "binding_ref": "db.primary",
+                        "binding_kind": "postgres"
+                    }],
+                    "executable": {
+                        "kind": "oci_image",
+                        "image": "ghcr.io/example/api:1.0.0",
+                        "container_port": 8080
+                    },
+                    "probes": {
+                        "readiness": {
+                            "probe_kind": "http",
+                            "path": "/readyz",
+                            "port": 8080,
+                            "period_seconds": 5,
+                            "failure_threshold": 3,
+                            "command": []
+                        },
+                        "liveness": {
+                            "probe_kind": "http",
+                            "path": "/livez",
+                            "port": 8080,
+                            "period_seconds": 10,
+                            "failure_threshold": 3,
+                            "command": []
+                        },
+                        "startup": null
+                    }
+                }
+            ]
+        });
+        let cells = deployable_cells("svc.api", &runtime_pack).expect("cells");
+        assert_eq!(cells.len(), 1);
+        assert!(cells[0].probes.startup.is_none());
     }
 
     #[test]

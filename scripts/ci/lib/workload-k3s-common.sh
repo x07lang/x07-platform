@@ -231,6 +231,21 @@ x07lp_k3s_wait_for_stop() {
   fi
 }
 
+x07lp_k3s_seed_example_bindings() {
+  kubectl --context "$CLUSTER_CONTEXT" get namespace "$NAMESPACE" >/dev/null 2>&1 || {
+    kubectl create namespace "$NAMESPACE" >/dev/null
+  }
+
+  kubectl --context "$CLUSTER_CONTEXT" -n "$NAMESPACE" create secret generic db-primary \
+    --from-literal=dsn='postgres://example.invalid/placeholder' \
+    --dry-run=client -o yaml | kubectl --context "$CLUSTER_CONTEXT" -n "$NAMESPACE" apply -f - >/dev/null
+
+  kubectl --context "$CLUSTER_CONTEXT" -n "$NAMESPACE" create secret generic obj-documents \
+    --from-literal=bucket='example-bucket' \
+    --from-literal=region='us-east-1' \
+    --dry-run=client -o yaml | kubectl --context "$CLUSTER_CONTEXT" -n "$NAMESPACE" apply -f - >/dev/null
+}
+
 x07lp_k3s_assert_query_running() {
   local report_path="$1"
   python3 - <<'PY' "$report_path"

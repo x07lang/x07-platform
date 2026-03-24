@@ -11,3 +11,5 @@
 - [Contracts](contracts.md)
 - [MCP gateway](mcp.md)
 - [CI gates](ci.md)
+- [Pre-prod E2E test plan](preprod_e2e_test_plan.md)
+- [Pre-prod issue log](preprod_issue_log.md)

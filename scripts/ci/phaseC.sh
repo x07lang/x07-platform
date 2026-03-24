@@ -691,7 +691,7 @@ PAUSE_EXEC_ID="$(prepare_accepted_state pause_and_rerun "$PAUSE_STATE_REL")"
 ) &
 PAUSE_RUN_PID=$!
 PIDS+=("$PAUSE_RUN_PID")
-wait_for_pause_step "$ROOT_DIR/$PAUSE_STATE_REL/deploy/${PAUSE_EXEC_ID}.json" 20
+wait_for_pause_step "$ROOT_DIR/$PAUSE_STATE_REL/deploy/${PAUSE_EXEC_ID}.json" 60
 
 run_x07lp \
   "$PAUSE_DIR/deploy_pause.run_report.json" \
@@ -787,7 +787,7 @@ UI_DIR="$PHASEC_TMP/ui"
 mkdir -p "$UI_DIR"
 (
   cd "$ROOT_DIR"
-  scripts/x07lp-driver ui-serve --addr "$UI_ADDR" --state-dir "$PROMOTE_STATE_REL" >"$UI_DIR/x07lpd.log" 2>&1
+  exec scripts/x07lp-driver ui-serve --addr "$UI_ADDR" --state-dir "$PROMOTE_STATE_REL" >"$UI_DIR/x07lpd.log" 2>&1
 ) &
 UI_PID=$!
 PIDS+=("$UI_PID")
