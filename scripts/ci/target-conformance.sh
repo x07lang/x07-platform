@@ -6,9 +6,9 @@ KIND="${1:-k8s}"
 
 case "$KIND" in
   local)
-    bash "$ROOT_DIR/scripts/ci/check_phaseA_golden.sh"
-    bash "$ROOT_DIR/scripts/ci/phaseB.sh"
-    exec bash "$ROOT_DIR/scripts/ci/phaseC.sh"
+    bash "$ROOT_DIR/scripts/ci/check_golden.sh"
+    bash "$ROOT_DIR/scripts/ci/deploy_loop.sh"
+    exec bash "$ROOT_DIR/scripts/ci/control_plane.sh"
     ;;
   wasmcloud|remote-oss)
     exec bash "$ROOT_DIR/scripts/ci/remote-oss.sh"

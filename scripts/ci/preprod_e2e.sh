@@ -26,25 +26,25 @@ source "$ROOT_DIR/scripts/ci/use_workspace_x07_bins.sh"
 note "==> x07-platform check_all"
 ./scripts/ci/check_all.sh 2>&1 | tee "$RUN_DIR/check_all.log"
 
-note "==> UI screenshots (Phase C promote_state)"
-mkdir -p "$RUN_DIR/ui/phaseC"
+note "==> UI screenshots (control-plane promote_state)"
+mkdir -p "$RUN_DIR/ui/control_plane"
 ./scripts/ci/ui-screenshot-smoke.sh \
-  --state-dir "$ROOT_DIR/_tmp/ci_phaseC/promote_state" \
-  --out-dir "$RUN_DIR/ui/phaseC" \
+  --state-dir "$ROOT_DIR/_tmp/ci_control_plane/promote_state" \
+  --out-dir "$RUN_DIR/ui/control_plane" \
   --addr 127.0.0.1:17090
 
-note "==> DB index snapshot (Phase C promote_state)"
-STATE_DIR="$ROOT_DIR/_tmp/ci_phaseC/promote_state"
+note "==> DB index snapshot (control-plane promote_state)"
+STATE_DIR="$ROOT_DIR/_tmp/ci_control_plane/promote_state"
 mkdir -p "$RUN_DIR/db"
 {
-  echo "== phaseb meta ==";
-  sqlite3 "$STATE_DIR/index/phaseb.sqlite" "select k,v from meta order by k;";
-  echo "== phaseb counts ==";
-  sqlite3 "$STATE_DIR/index/phaseb.sqlite" "select count(*) as executions from executions;";
-  echo "== phasec meta ==";
-  sqlite3 "$STATE_DIR/index/phasec.sqlite" "select k,v from meta order by k;";
-  echo "== phasec counts ==";
-  sqlite3 "$STATE_DIR/index/phasec.sqlite" "select count(*) as incidents from incidents;";
+  echo "== deploy_loop meta ==";
+  sqlite3 "$STATE_DIR/index/deploy_loop.sqlite" "select k,v from meta order by k;";
+  echo "== deploy_loop counts ==";
+  sqlite3 "$STATE_DIR/index/deploy_loop.sqlite" "select count(*) as executions from executions;";
+  echo "== control_plane meta ==";
+  sqlite3 "$STATE_DIR/index/control_plane.sqlite" "select k,v from meta order by k;";
+  echo "== control_plane counts ==";
+  sqlite3 "$STATE_DIR/index/control_plane.sqlite" "select count(*) as incidents from incidents;";
 } 2>&1 | tee "$RUN_DIR/db/index_checks.txt"
 
 note "==> UI screenshots (device release state)"

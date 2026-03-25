@@ -3,9 +3,9 @@
 This directory contains only the **expected outputs** used by the addendum CI script.
 
 The actual scenario inputs continue to come from:
-- the existing baseline pack fixture under `spec/fixtures/phaseA/pack_min/`
+- the existing baseline pack fixture under `spec/fixtures/baseline/pack_min/`
 - the unhealthy rollback pack fixture under `spec/fixtures/remote-oss/common/pack_app_min_spin/`
-- the existing baseline change request fixture under `spec/fixtures/phaseB/common/change_request.app_min.json`
+- the existing baseline change request fixture under `spec/fixtures/deploy_loop/common/change_request.app_min.json`
 - the live compose-backed wasmCloud stack plus OTLP collector export
 
 ## Parity cases

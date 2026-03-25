@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, anyhow, bail};
+use base64::Engine as _;
 use clap::{Args, Subcommand};
 use serde_json::{Value, json};
 use sha2::Digest as _;
@@ -176,11 +177,23 @@ struct K8sRollout {
 }
 
 #[derive(Debug, Clone)]
+struct K8sConsumerLagScaling {
+    lag_threshold: u64,
+    activation_lag_threshold: Option<u64>,
+    polling_interval_seconds: Option<u64>,
+    cooldown_period_seconds: Option<u64>,
+    scale_to_zero: bool,
+}
+
+#[derive(Debug, Clone)]
 struct K8sAutoscaling {
     min_replicas: u64,
     max_replicas: u64,
     target_cpu_utilization: Option<u64>,
     target_inflight: Option<u64>,
+    scale_up_stabilization_seconds: Option<u64>,
+    scale_down_stabilization_seconds: Option<u64>,
+    consumer_lag: Option<K8sConsumerLagScaling>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,6 +219,12 @@ struct K8sCellDeployment {
     ingress_name: Option<String>,
     cronjob_name: Option<String>,
     hpa_name: Option<String>,
+    keda_scaledobject_name: Option<String>,
+    keda_trigger_auth_name: Option<String>,
+    service_account_name: Option<String>,
+    role_name: Option<String>,
+    role_binding_name: Option<String>,
+    lease_names: Vec<String>,
     route_path: Option<String>,
     probes: K8sProbeSet,
     event: Option<K8sEventRuntime>,
@@ -362,6 +381,9 @@ fn command_run(args: WorkloadRunArgs) -> Result<Value> {
         }
     }
 
+    let keda_bootstrap_servers =
+        resolve_keda_bootstrap_servers(&target_profile, &namespace, &cells)?;
+
     let manifest_paths = write_k8s_manifests(
         &manifest_dir,
         &namespace,
@@ -371,6 +393,7 @@ fn command_run(args: WorkloadRunArgs) -> Result<Value> {
         &public_base_url,
         &cells,
         accepted.get("binding_requirements").unwrap_or(&Value::Null),
+        &keda_bootstrap_servers,
     )?;
     for path in &manifest_paths {
         kubectl_apply_path(&target_profile, path)?;
@@ -589,14 +612,23 @@ fn command_stop(args: WorkloadStopArgs) -> Result<Value> {
         .unwrap_or_default();
     for cell in &cells {
         for (kind, key) in [
+            ("scaledobject", "keda_scaledobject_name"),
             ("ingress", "ingress_name"),
             ("service", "service_name"),
             ("horizontalpodautoscaler", "hpa_name"),
             ("cronjob", "cronjob_name"),
             ("deployment", "deployment_name"),
+            ("serviceaccount", "service_account_name"),
+            ("rolebinding", "role_binding_name"),
+            ("role", "role_name"),
         ] {
             if let Some(name) = cell.get(key).and_then(Value::as_str) {
                 let _ = kubectl_delete_named(&target_profile, &namespace, kind, name);
+            }
+        }
+        if let Some(lease_names) = cell.get("lease_names").and_then(Value::as_array) {
+            for name in lease_names.iter().filter_map(Value::as_str) {
+                let _ = kubectl_delete_named(&target_profile, &namespace, "lease", name);
             }
         }
     }
@@ -1022,14 +1054,59 @@ fn deployable_cells(workload_id: &str, runtime_pack: &Value) -> Result<Vec<K8sCe
         if ingress_kind == "http" && container_port.is_none() {
             bail!("http deployable runtime pack cell missing executable.container_port");
         }
+        let scale_class = required_cell_string(cell, "scale_class")?;
         let stem = sanitize_k8s_name(&format!("{workload_id}-{cell_key}"));
         let autoscaling = parse_autoscaling(cell)?;
+        let uses_keda = autoscaling
+            .as_ref()
+            .and_then(|autoscaling| autoscaling.consumer_lag.as_ref())
+            .is_some();
+        if uses_keda
+            && autoscaling
+                .as_ref()
+                .and_then(|autoscaling| autoscaling.target_cpu_utilization)
+                .is_some()
+        {
+            bail!(
+                "cell {cell_key} cannot set both autoscaling.target_cpu_utilization and autoscaling.consumer_lag"
+            );
+        }
+        let wants_lease_rbac = matches!(
+            scale_class.as_str(),
+            "singleton-orchestrator" | "leased-worker"
+        );
+        let (service_account_name, role_name, role_binding_name) = if wants_lease_rbac {
+            (
+                Some(k8s_name_with_suffix(&stem, "sa")),
+                Some(k8s_name_with_suffix(&stem, "role")),
+                Some(k8s_name_with_suffix(&stem, "rb")),
+            )
+        } else {
+            (None, None, None)
+        };
+        let lease_names = match scale_class.as_str() {
+            "singleton-orchestrator" => vec![k8s_name_with_suffix(&stem, "lease")],
+            "leased-worker" => {
+                let lease_count = cell
+                    .get("leases")
+                    .and_then(Value::as_object)
+                    .and_then(|leases| leases.get("count"))
+                    .and_then(Value::as_u64)
+                    .or_else(|| autoscaling.as_ref().map(|autoscaling| autoscaling.max_replicas))
+                    .unwrap_or(1)
+                    .max(1);
+                (0..lease_count)
+                    .map(|idx| k8s_name_with_suffix(&stem, &format!("lease-{idx}")))
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
         cells.push(K8sCellDeployment {
             cell_key: cell_key.clone(),
             cell_kind: required_cell_string(cell, "cell_kind")?,
             ingress_kind: ingress_kind.clone(),
             runtime_class: required_cell_string(cell, "runtime_class")?,
-            scale_class: required_cell_string(cell, "scale_class")?,
+            scale_class: scale_class.clone(),
             topology_group: required_cell_string(cell, "topology_group")?,
             binding_refs: parse_string_array(cell.get("binding_refs")),
             binding_probe_hints: parse_binding_probe_hints(cell)?,
@@ -1038,20 +1115,20 @@ fn deployable_cells(workload_id: &str, runtime_pack: &Value) -> Result<Vec<K8sCe
             deployment_name: if ingress_kind == "schedule" {
                 None
             } else {
-                Some(format!("{stem}-deploy"))
+                Some(k8s_name_with_suffix(&stem, "deploy"))
             },
             service_name: if ingress_kind == "http" {
-                Some(format!("{stem}-svc"))
+                Some(k8s_name_with_suffix(&stem, "svc"))
             } else {
                 None
             },
             ingress_name: if ingress_kind == "http" {
-                Some(format!("{stem}-ing"))
+                Some(k8s_name_with_suffix(&stem, "ing"))
             } else {
                 None
             },
             cronjob_name: if ingress_kind == "schedule" {
-                Some(format!("{stem}-cron"))
+                Some(k8s_name_with_suffix(&stem, "cron"))
             } else {
                 None
             },
@@ -1060,11 +1137,26 @@ fn deployable_cells(workload_id: &str, runtime_pack: &Value) -> Result<Vec<K8sCe
                     .as_ref()
                     .and_then(|item| item.target_cpu_utilization)
                     .is_some()
+                && !uses_keda
             {
-                Some(format!("{stem}-hpa"))
+                Some(k8s_name_with_suffix(&stem, "hpa"))
             } else {
                 None
             },
+            keda_scaledobject_name: if uses_keda {
+                Some(k8s_name_with_suffix(&stem, "keda"))
+            } else {
+                None
+            },
+            keda_trigger_auth_name: if uses_keda {
+                None
+            } else {
+                None
+            },
+            service_account_name,
+            role_name,
+            role_binding_name,
+            lease_names,
             route_path: if ingress_kind == "http" {
                 Some(format!(
                     "/{}",
@@ -1258,6 +1350,10 @@ fn parse_autoscaling(cell: &Value) -> Result<Option<K8sAutoscaling>> {
     let Some(autoscaling) = cell.get("autoscaling") else {
         return Ok(None);
     };
+    if autoscaling.is_null() {
+        return Ok(None);
+    }
+    let consumer_lag = parse_consumer_lag_scaling(autoscaling.get("consumer_lag"))?;
     Ok(Some(K8sAutoscaling {
         min_replicas: autoscaling
             .get("min_replicas")
@@ -1271,7 +1367,132 @@ fn parse_autoscaling(cell: &Value) -> Result<Option<K8sAutoscaling>> {
             .get("target_cpu_utilization")
             .and_then(Value::as_u64),
         target_inflight: autoscaling.get("target_inflight").and_then(Value::as_u64),
+        scale_up_stabilization_seconds: autoscaling
+            .get("scale_up_stabilization_seconds")
+            .and_then(Value::as_u64),
+        scale_down_stabilization_seconds: autoscaling
+            .get("scale_down_stabilization_seconds")
+            .and_then(Value::as_u64),
+        consumer_lag,
     }))
+}
+
+fn parse_consumer_lag_scaling(value: Option<&Value>) -> Result<Option<K8sConsumerLagScaling>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let lag_threshold = value
+        .get("lag_threshold")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| anyhow!("consumer_lag missing lag_threshold"))?;
+    Ok(Some(K8sConsumerLagScaling {
+        lag_threshold,
+        activation_lag_threshold: value
+            .get("activation_lag_threshold")
+            .and_then(Value::as_u64),
+        polling_interval_seconds: value
+            .get("polling_interval_seconds")
+            .and_then(Value::as_u64),
+        cooldown_period_seconds: value
+            .get("cooldown_period_seconds")
+            .and_then(Value::as_u64),
+        scale_to_zero: value
+            .get("scale_to_zero")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    }))
+}
+
+fn resolve_keda_bootstrap_servers(
+    target_profile: &Value,
+    namespace: &str,
+    cells: &[K8sCellDeployment],
+) -> Result<HashMap<String, String>> {
+    let mut needed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for cell in cells {
+        if cell.keda_scaledobject_name.is_none() {
+            continue;
+        }
+        let event = cell
+            .event
+            .as_ref()
+            .ok_or_else(|| anyhow!("keda scaling requires event runtime"))?;
+        let kind = cell
+            .binding_probe_hints
+            .iter()
+            .find(|hint| hint.binding_ref == event.binding_ref)
+            .map(|hint| hint.binding_kind.as_str())
+            .unwrap_or("unknown");
+        if kind != "kafka" {
+            bail!(
+                "keda consumer lag scaling is only supported for kafka bindings (binding_ref={}, kind={kind})",
+                event.binding_ref
+            );
+        }
+        needed.insert(event.binding_ref.clone());
+    }
+
+    if !needed.is_empty()
+        && kubectl_get_json(
+            target_profile,
+            "",
+            &["get", "crd", "scaledobjects.keda.sh", "-o", "json"],
+        )
+        .is_err()
+    {
+        bail!("keda scaling requested but keda is not installed (missing CRD scaledobjects.keda.sh)");
+    }
+
+    let mut resolved = HashMap::new();
+    for binding_ref in needed {
+        let bootstrap = required_kafka_bootstrap_servers(target_profile, namespace, &binding_ref)?;
+        resolved.insert(binding_ref, bootstrap);
+    }
+    Ok(resolved)
+}
+
+fn required_kafka_bootstrap_servers(
+    target_profile: &Value,
+    namespace: &str,
+    binding_ref: &str,
+) -> Result<String> {
+    let secret_name = sanitize_k8s_name(binding_ref);
+    let secret = kubectl_get_json(
+        target_profile,
+        namespace,
+        &["get", "secret", &secret_name, "-o", "json"],
+    )
+    .with_context(|| format!("read kafka binding secret {secret_name}"))?;
+    let data = secret
+        .get("data")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("kafka binding secret {secret_name} missing data map"))?;
+    let mut value_b64 = None;
+    for key in ["bootstrap_servers", "bootstrapServers", "bootstrap.servers"] {
+        if let Some(value) = data.get(key).and_then(Value::as_str) {
+            value_b64 = Some(value);
+            break;
+        }
+    }
+    let Some(value_b64) = value_b64 else {
+        bail!(
+            "kafka binding secret {secret_name} is missing bootstrap servers; expected one of: bootstrap_servers, bootstrapServers, bootstrap.servers"
+        );
+    };
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(value_b64.as_bytes())
+        .context("decode bootstrap servers base64")?;
+    let bootstrap = String::from_utf8(decoded)
+        .context("bootstrap servers must be utf-8")?
+        .trim()
+        .to_string();
+    if bootstrap.is_empty() {
+        bail!("kafka binding secret {secret_name} bootstrap servers is empty");
+    }
+    Ok(bootstrap)
 }
 
 fn write_k8s_manifests(
@@ -1283,6 +1504,7 @@ fn write_k8s_manifests(
     public_base_url: &str,
     cells: &[K8sCellDeployment],
     binding_requirements: &Value,
+    keda_bootstrap_servers: &HashMap<String, String>,
 ) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     let ingress_class_name = std::env::var("X07LP_K8S_INGRESS_CLASS")
@@ -1296,7 +1518,84 @@ fn write_k8s_manifests(
                     .deployment_name
                     .as_deref()
                     .ok_or_else(|| anyhow!("deployment-backed cell missing deployment_name"))?;
-                let deployment_doc = json!({
+                if let (Some(service_account), Some(role_name), Some(role_binding)) = (
+                    cell.service_account_name.as_deref(),
+                    cell.role_name.as_deref(),
+                    cell.role_binding_name.as_deref(),
+                ) {
+                    let sa_doc = json!({
+                        "apiVersion": "v1",
+                        "kind": "ServiceAccount",
+                        "metadata": {
+                            "name": service_account,
+                            "namespace": namespace,
+                            "labels": labels.clone(),
+                        }
+                    });
+                    let role_doc = json!({
+                        "apiVersion": "rbac.authorization.k8s.io/v1",
+                        "kind": "Role",
+                        "metadata": {
+                            "name": role_name,
+                            "namespace": namespace,
+                            "labels": labels.clone(),
+                        },
+                        "rules": [{
+                            "apiGroups": ["coordination.k8s.io"],
+                            "resources": ["leases"],
+                            "verbs": ["get", "list", "watch", "create", "update", "patch"],
+                        }]
+                    });
+                    let role_binding_doc = json!({
+                        "apiVersion": "rbac.authorization.k8s.io/v1",
+                        "kind": "RoleBinding",
+                        "metadata": {
+                            "name": role_binding,
+                            "namespace": namespace,
+                            "labels": labels.clone(),
+                        },
+                        "roleRef": {
+                            "apiGroup": "rbac.authorization.k8s.io",
+                            "kind": "Role",
+                            "name": role_name,
+                        },
+                        "subjects": [{
+                            "kind": "ServiceAccount",
+                            "name": service_account,
+                            "namespace": namespace,
+                        }]
+                    });
+                    for (prefix, doc) in [
+                        ("serviceaccount", sa_doc),
+                        ("role", role_doc),
+                        ("rolebinding", role_binding_doc),
+                    ] {
+                        let path = manifest_dir.join(format!("{prefix}.{}.json", cell.cell_key));
+                        let _ = write_json(&path, &doc)?;
+                        paths.push(path);
+                    }
+                }
+
+                if !cell.lease_names.is_empty() {
+                    for (idx, lease_name) in cell.lease_names.iter().enumerate() {
+                        let lease_doc = json!({
+                            "apiVersion": "coordination.k8s.io/v1",
+                            "kind": "Lease",
+                            "metadata": {
+                                "name": lease_name,
+                                "namespace": namespace,
+                                "labels": labels.clone(),
+                                "annotations": workload_cell_annotations(cell, public_base_url),
+                            },
+                            "spec": {}
+                        });
+                        let path = manifest_dir.join(format!("lease.{}.{}.json", cell.cell_key, idx));
+                        let _ = write_json(&path, &lease_doc)?;
+                        paths.push(path);
+                    }
+                }
+
+                let mut deployment_doc = json!({
                     "apiVersion": "apps/v1",
                     "kind": "Deployment",
                     "metadata": {
@@ -1325,6 +1624,17 @@ fn write_k8s_manifests(
                         }
                     }
                 });
+                if let Some(service_account) = cell.service_account_name.as_deref() {
+                    deployment_doc
+                        .get_mut("spec")
+                        .and_then(Value::as_object_mut)
+                        .and_then(|spec| spec.get_mut("template"))
+                        .and_then(Value::as_object_mut)
+                        .and_then(|template| template.get_mut("spec"))
+                        .and_then(Value::as_object_mut)
+                        .unwrap()
+                        .insert("serviceAccountName".to_string(), json!(service_account));
+                }
                 let path = manifest_dir.join(format!("deployment.{}.json", cell.cell_key));
                 let _ = write_json(&path, &deployment_doc)?;
                 paths.push(path);
@@ -1333,6 +1643,96 @@ fn write_k8s_manifests(
                     let path = manifest_dir.join(format!("hpa.{}.json", cell.cell_key));
                     let _ = write_json(&path, &hpa_doc)?;
                     paths.push(path);
+                }
+
+                if let Some(scaledobject_name) = cell.keda_scaledobject_name.as_deref() {
+                    let autoscaling = cell.autoscaling.as_ref();
+                    let consumer_lag =
+                        autoscaling.and_then(|autoscaling| autoscaling.consumer_lag.as_ref());
+                    if let Some(consumer_lag) = consumer_lag {
+                        let event = cell
+                            .event
+                            .as_ref()
+                            .ok_or_else(|| anyhow!("keda scaling requires event runtime"))?;
+                        let consumer_group = event
+                            .consumer_group
+                            .as_deref()
+                            .ok_or_else(|| anyhow!("keda scaling requires event.consumer_group"))?;
+                        let bootstrap_servers = keda_bootstrap_servers
+                            .get(&event.binding_ref)
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "missing kafka bootstrap servers for binding_ref {}",
+                                    event.binding_ref
+                                )
+                            })?;
+                        let mut spec = serde_json::Map::new();
+                        spec.insert(
+                            "scaleTargetRef".to_string(),
+                            json!({ "name": deployment_name }),
+                        );
+                        if let Some(autoscaling) = autoscaling {
+                            let min_replicas = if consumer_lag.scale_to_zero {
+                                autoscaling.min_replicas
+                            } else {
+                                autoscaling.min_replicas.max(1)
+                            };
+                            spec.insert("minReplicaCount".to_string(), json!(min_replicas));
+                            spec.insert(
+                                "maxReplicaCount".to_string(),
+                                json!(autoscaling.max_replicas),
+                            );
+                        }
+                        if let Some(polling) = consumer_lag.polling_interval_seconds {
+                            spec.insert("pollingInterval".to_string(), json!(polling));
+                        }
+                        let cooldown = consumer_lag.cooldown_period_seconds.or_else(|| {
+                            if cell.scale_class == "partitioned-consumer" {
+                                Some(300)
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(cooldown) = cooldown {
+                            spec.insert("cooldownPeriod".to_string(), json!(cooldown));
+                        }
+                        let mut trigger = serde_json::Map::new();
+                        trigger.insert("type".to_string(), json!("kafka"));
+                        let mut metadata = serde_json::Map::new();
+                        metadata.insert("bootstrapServers".to_string(), json!(bootstrap_servers));
+                        metadata.insert("topic".to_string(), json!(event.topic));
+                        metadata.insert("consumerGroup".to_string(), json!(consumer_group));
+                        metadata.insert(
+                            "lagThreshold".to_string(),
+                            json!(consumer_lag.lag_threshold.to_string()),
+                        );
+                        if let Some(value) = consumer_lag.activation_lag_threshold {
+                            metadata.insert(
+                                "activationLagThreshold".to_string(),
+                                json!(value.to_string()),
+                            );
+                        }
+                        trigger.insert("metadata".to_string(), Value::Object(metadata));
+                        spec.insert(
+                            "triggers".to_string(),
+                            Value::Array(vec![Value::Object(trigger)]),
+                        );
+
+                        let scaledobject_doc = json!({
+                            "apiVersion": "keda.sh/v1alpha1",
+                            "kind": "ScaledObject",
+                            "metadata": {
+                                "name": scaledobject_name,
+                                "namespace": namespace,
+                                "labels": labels.clone(),
+                                "annotations": workload_cell_annotations(cell, public_base_url),
+                            },
+                            "spec": Value::Object(spec),
+                        });
+                        let path = manifest_dir.join(format!("keda.{}.json", cell.cell_key));
+                        let _ = write_json(&path, &scaledobject_doc)?;
+                        paths.push(path);
+                    }
                 }
 
                 if cell.ingress_kind == "http" {
@@ -1537,6 +1937,36 @@ fn workload_cell_annotations(cell: &K8sCellDeployment, public_base_url: &str) ->
                 json!(target_inflight.to_string()),
             );
         }
+        if let Some(scale_up) = autoscaling.scale_up_stabilization_seconds {
+            annotations.insert(
+                "x07.io/autoscaling-scale-up-stabilization-seconds".to_string(),
+                json!(scale_up.to_string()),
+            );
+        }
+        if let Some(scale_down) = autoscaling.scale_down_stabilization_seconds {
+            annotations.insert(
+                "x07.io/autoscaling-scale-down-stabilization-seconds".to_string(),
+                json!(scale_down.to_string()),
+            );
+        }
+        if let Some(consumer_lag) = autoscaling.consumer_lag.as_ref() {
+            annotations.insert(
+                "x07.io/autoscaling-consumer-lag-threshold".to_string(),
+                json!(consumer_lag.lag_threshold.to_string()),
+            );
+            if let Some(value) = consumer_lag.activation_lag_threshold {
+                annotations.insert(
+                    "x07.io/autoscaling-consumer-lag-activation-threshold".to_string(),
+                    json!(value.to_string()),
+                );
+            }
+            if consumer_lag.scale_to_zero {
+                annotations.insert(
+                    "x07.io/autoscaling-scale-to-zero".to_string(),
+                    json!("true"),
+                );
+            }
+        }
     }
     if let Some(event) = cell.event.as_ref() {
         annotations.insert(
@@ -1558,10 +1988,17 @@ fn workload_cell_annotations(cell: &K8sCellDeployment, public_base_url: &str) ->
 }
 
 fn initial_replicas(cell: &K8sCellDeployment) -> u64 {
-    cell.autoscaling
+    let base = cell
+        .autoscaling
         .as_ref()
         .map(|autoscaling| autoscaling.min_replicas.max(1))
         .unwrap_or(1)
+        .max(1);
+    if cell.scale_class == "singleton-orchestrator" {
+        base.max(2)
+    } else {
+        base
+    }
 }
 
 fn deployment_strategy_doc(cell: &K8sCellDeployment) -> Value {
@@ -1614,7 +2051,17 @@ fn hpa_doc(namespace: &str, public_base_url: &str, cell: &K8sCellDeployment) -> 
     let target_cpu = autoscaling.target_cpu_utilization?;
     let deployment_name = cell.deployment_name.as_deref()?;
     let hpa_name = cell.hpa_name.as_deref()?;
-    Some(json!({
+    let scale_down_stabilization_seconds = autoscaling.scale_down_stabilization_seconds.or_else(
+        || {
+            if cell.scale_class == "partitioned-consumer" {
+                Some(300)
+            } else {
+                None
+            }
+        },
+    );
+    let scale_up_stabilization_seconds = autoscaling.scale_up_stabilization_seconds;
+    let mut doc = json!({
         "apiVersion": "autoscaling/v2",
         "kind": "HorizontalPodAutoscaler",
         "metadata": {
@@ -1645,7 +2092,27 @@ fn hpa_doc(namespace: &str, public_base_url: &str, cell: &K8sCellDeployment) -> 
                 }
             }]
         }
-    }))
+    });
+    if scale_down_stabilization_seconds.is_some() || scale_up_stabilization_seconds.is_some() {
+        let mut behavior = serde_json::Map::new();
+        if let Some(value) = scale_up_stabilization_seconds {
+            behavior.insert(
+                "scaleUp".to_string(),
+                json!({ "stabilizationWindowSeconds": value }),
+            );
+        }
+        if let Some(value) = scale_down_stabilization_seconds {
+            behavior.insert(
+                "scaleDown".to_string(),
+                json!({ "stabilizationWindowSeconds": value }),
+            );
+        }
+        doc.get_mut("spec")
+            .and_then(Value::as_object_mut)
+            .unwrap()
+            .insert("behavior".to_string(), Value::Object(behavior));
+    }
+    Some(doc)
 }
 
 fn container_doc(cell: &K8sCellDeployment, binding_requirements: &Value) -> Result<Value> {
@@ -1782,6 +2249,33 @@ fn workload_cell_env(cell: &K8sCellDeployment) -> Vec<Value> {
         env.push(json!({"name": "X07_SCHEDULE_CRON", "value": schedule.cron}));
         if let Some(timezone) = schedule.timezone.as_deref() {
             env.push(json!({"name": "X07_SCHEDULE_TIMEZONE", "value": timezone}));
+        }
+        env.push(json!({
+            "name": "X07_JOB_RUN_ID",
+            "valueFrom": { "fieldRef": { "fieldPath": "metadata.labels['job-name']" } }
+        }));
+        env.push(json!({
+            "name": "X07_JOB_CHECKPOINT_KEY",
+            "value": "$(LP_DEPLOYMENT_ID):$(X07_JOB_RUN_ID)",
+        }));
+    }
+    if !cell.lease_names.is_empty() {
+        env.push(json!({
+            "name": "X07_K8S_LEASE_NAMESPACE",
+            "valueFrom": { "fieldRef": { "fieldPath": "metadata.namespace" } }
+        }));
+        match cell.scale_class.as_str() {
+            "singleton-orchestrator" => {
+                if let Some(lease_name) = cell.lease_names.first() {
+                    env.push(json!({"name": "X07_LEADER_ELECTION_ENABLED", "value": "true"}));
+                    env.push(json!({"name": "X07_LEADER_ELECTION_LEASE_NAME", "value": lease_name}));
+                }
+            }
+            "leased-worker" => {
+                env.push(json!({"name": "X07_WORK_LEASES_ENABLED", "value": "true"}));
+                env.push(json!({"name": "X07_WORK_LEASE_NAMES", "value": cell.lease_names.join(",")}));
+            }
+            _ => {}
         }
     }
     env
@@ -2003,6 +2497,24 @@ fn stored_cell_doc(cell: &K8sCellDeployment, public_base_url: &str) -> Value {
     if let Some(hpa_name) = cell.hpa_name.as_deref() {
         doc["hpa_name"] = json!(hpa_name);
     }
+    if let Some(name) = cell.keda_scaledobject_name.as_deref() {
+        doc["keda_scaledobject_name"] = json!(name);
+    }
+    if let Some(name) = cell.keda_trigger_auth_name.as_deref() {
+        doc["keda_trigger_auth_name"] = json!(name);
+    }
+    if let Some(name) = cell.service_account_name.as_deref() {
+        doc["service_account_name"] = json!(name);
+    }
+    if let Some(name) = cell.role_name.as_deref() {
+        doc["role_name"] = json!(name);
+    }
+    if let Some(name) = cell.role_binding_name.as_deref() {
+        doc["role_binding_name"] = json!(name);
+    }
+    if !cell.lease_names.is_empty() {
+        doc["lease_names"] = json!(cell.lease_names);
+    }
     if let Some(route_path) = cell.route_path.as_deref() {
         doc["route_path"] = json!(route_path);
         doc["route_url"] = json!(format!(
@@ -2040,12 +2552,24 @@ fn stored_cell_doc(cell: &K8sCellDeployment, public_base_url: &str) -> Value {
         });
     }
     if let Some(autoscaling) = cell.autoscaling.as_ref() {
-        doc["autoscaling"] = json!({
+        let mut autoscaling_doc = json!({
             "min_replicas": autoscaling.min_replicas,
             "max_replicas": autoscaling.max_replicas,
             "target_cpu_utilization": autoscaling.target_cpu_utilization,
             "target_inflight": autoscaling.target_inflight,
+            "scale_up_stabilization_seconds": autoscaling.scale_up_stabilization_seconds,
+            "scale_down_stabilization_seconds": autoscaling.scale_down_stabilization_seconds,
         });
+        if let Some(consumer_lag) = autoscaling.consumer_lag.as_ref() {
+            autoscaling_doc["consumer_lag"] = json!({
+                "lag_threshold": consumer_lag.lag_threshold,
+                "activation_lag_threshold": consumer_lag.activation_lag_threshold,
+                "polling_interval_seconds": consumer_lag.polling_interval_seconds,
+                "cooldown_period_seconds": consumer_lag.cooldown_period_seconds,
+                "scale_to_zero": consumer_lag.scale_to_zero,
+            });
+        }
+        doc["autoscaling"] = autoscaling_doc;
     }
     let probes = json!({
         "readiness": stored_probe_doc(cell.probes.readiness.as_ref()),
@@ -2076,6 +2600,119 @@ fn stored_probe_doc(probe: Option<&K8sProbe>) -> Value {
         "success_threshold": probe.success_threshold,
         "failure_threshold": probe.failure_threshold,
     })
+}
+
+fn refresh_cell_leases(target_profile: &Value, namespace: &str, cell: &mut Value) -> Result<()> {
+    let lease_names = cell
+        .get("lease_names")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToOwned::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if lease_names.is_empty() {
+        return Ok(());
+    }
+
+    let scale_class = cell
+        .get("scale_class")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let mut previous_holders = cell
+        .get("lease_holders")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut holder_index = serde_json::Map::new();
+    let mut leases_out = Vec::new();
+    let mut active_count = 0u64;
+    let mut reclaim_count = cell
+        .get("lease_reclaim_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+
+    for lease_name in &lease_names {
+        let lease = match kubectl_get_json(
+            target_profile,
+            namespace,
+            &["get", "lease", lease_name, "-o", "json"],
+        ) {
+            Ok(doc) => doc,
+            Err(err) if is_k8s_not_found(&err) => continue,
+            Err(err) => return Err(err),
+        };
+        let holder = lease
+            .get("spec")
+            .and_then(|value| value.get("holderIdentity"))
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned);
+        let renew_time = lease
+            .get("spec")
+            .and_then(|value| value.get("renewTime"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let lease_doc = json!({
+            "name": lease_name,
+            "holder_identity": holder,
+            "renew_time": renew_time,
+        });
+        if let Some(holder) = holder.as_deref() {
+            if !holder.is_empty() {
+                active_count += 1;
+                holder_index.insert(lease_name.to_string(), json!(holder));
+                let prev_holder = previous_holders
+                    .get(lease_name)
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if !prev_holder.is_empty() && prev_holder != holder {
+                    reclaim_count += 1;
+                }
+                previous_holders.insert(lease_name.to_string(), json!(holder));
+            }
+        }
+        leases_out.push(lease_doc);
+    }
+
+    let leader_renew_time = if scale_class == "singleton-orchestrator" {
+        lease_names
+            .first()
+            .and_then(|leader_lease| {
+                leases_out.iter().find(|doc| {
+                    doc.get("name").and_then(Value::as_str) == Some(leader_lease.as_str())
+                })
+            })
+            .and_then(|doc| doc.get("renew_time").cloned())
+            .unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+
+    if let Some(map) = cell.as_object_mut() {
+        map.insert(
+            "lease_status".to_string(),
+            json!({
+                "active_count": active_count,
+                "reclaim_count": reclaim_count,
+                "leases": leases_out,
+            }),
+        );
+        map.insert("lease_holders".to_string(), Value::Object(previous_holders));
+        map.insert("lease_reclaim_count".to_string(), json!(reclaim_count));
+        if scale_class == "singleton-orchestrator" {
+            if let Some((_, leader)) = holder_index.iter().next() {
+                map.insert("leader_identity".to_string(), leader.clone());
+            }
+            if !leader_renew_time.is_null() {
+                map.insert("leader_renew_time".to_string(), leader_renew_time);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn refresh_cell_doc(
@@ -2135,6 +2772,7 @@ fn refresh_cell_doc(
             map.insert("observed_state".to_string(), json!(observed_state));
             map.insert("observed_health".to_string(), json!(observed_health));
         }
+        refresh_cell_leases(target_profile, namespace, &mut cell)?;
         return Ok(cell);
     }
     if let Some(cronjob_name) = cell.get("cronjob_name").and_then(Value::as_str) {
@@ -2906,6 +3544,10 @@ fn sanitize_k8s_name(value: &str) -> String {
     out
 }
 
+fn k8s_name_with_suffix(stem: &str, suffix: &str) -> String {
+    sanitize_k8s_name(&format!("{stem}-{suffix}"))
+}
+
 fn sanitize_route_path(value: &str) -> String {
     value
         .split('/')
@@ -3335,6 +3977,215 @@ mod tests {
             labels.get("lp.service_id").and_then(serde_json::Value::as_str),
             Some("svc.api")
         );
+    }
+
+    #[test]
+    fn deployable_cells_supports_singleton_orchestrator_leader_election_wiring() {
+        let runtime_pack = json!({
+            "cells": [
+                {
+                    "cell_key": "orchestrator",
+                    "cell_kind": "api-cell",
+                    "ingress_kind": "http",
+                    "runtime_class": "native-http",
+                    "scale_class": "singleton-orchestrator",
+                    "topology_group": "control",
+                    "binding_refs": [],
+                    "binding_probe_hints": [],
+                    "executable": {
+                        "kind": "oci_image",
+                        "image": "ghcr.io/example/orchestrator:1.0.0",
+                        "container_port": 8080
+                    }
+                }
+            ]
+        });
+        let cells = deployable_cells("svc.api", &runtime_pack).expect("cells");
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].lease_names.len(), 1);
+        assert!(cells[0].service_account_name.is_some());
+        assert!(cells[0].role_name.is_some());
+        assert!(cells[0].role_binding_name.is_some());
+
+        let env = workload_cell_env(&cells[0]);
+        assert!(env.iter().any(|item| {
+            item.get("name").and_then(serde_json::Value::as_str)
+                == Some("X07_LEADER_ELECTION_ENABLED")
+                && item.get("value").and_then(serde_json::Value::as_str) == Some("true")
+        }));
+        assert!(env.iter().any(|item| {
+            item.get("name").and_then(serde_json::Value::as_str)
+                == Some("X07_LEADER_ELECTION_LEASE_NAME")
+        }));
+    }
+
+    #[test]
+    fn deployable_cells_supports_leased_worker_lease_pool_wiring() {
+        let runtime_pack = json!({
+            "cells": [
+                {
+                    "cell_key": "workers",
+                    "cell_kind": "event-consumer",
+                    "ingress_kind": "event",
+                    "runtime_class": "native-worker",
+                    "scale_class": "leased-worker",
+                    "topology_group": "async",
+                    "binding_refs": [],
+                    "binding_probe_hints": [],
+                    "leases": {
+                        "count": 3
+                    },
+                    "event": {
+                        "binding_ref": "msg.orders",
+                        "topic": "orders.created",
+                        "consumer_group": "orders-workers"
+                    },
+                    "executable": {
+                        "kind": "oci_image",
+                        "image": "ghcr.io/example/worker:1.0.0",
+                        "container_port": null
+                    }
+                }
+            ]
+        });
+        let cells = deployable_cells("svc.api", &runtime_pack).expect("cells");
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].lease_names.len(), 3);
+        assert!(cells[0].service_account_name.is_some());
+        assert!(cells[0].role_name.is_some());
+        assert!(cells[0].role_binding_name.is_some());
+
+        let env = workload_cell_env(&cells[0]);
+        assert!(env.iter().any(|item| {
+            item.get("name").and_then(serde_json::Value::as_str)
+                == Some("X07_WORK_LEASES_ENABLED")
+                && item.get("value").and_then(serde_json::Value::as_str) == Some("true")
+        }));
+        assert!(env.iter().any(|item| {
+            item.get("name").and_then(serde_json::Value::as_str)
+                == Some("X07_WORK_LEASE_NAMES")
+                && item.get("value").and_then(serde_json::Value::as_str).is_some()
+        }));
+    }
+
+    #[test]
+    fn deployable_cells_supports_partitioned_consumer_lag_scaling_via_keda() {
+        let runtime_pack = json!({
+            "cells": [
+                {
+                    "cell_key": "events",
+                    "cell_kind": "event-consumer",
+                    "ingress_kind": "event",
+                    "runtime_class": "native-worker",
+                    "scale_class": "partitioned-consumer",
+                    "topology_group": "async",
+                    "binding_refs": [],
+                    "binding_probe_hints": [],
+                    "event": {
+                        "binding_ref": "msg.orders",
+                        "topic": "orders.created",
+                        "consumer_group": "orders-workers"
+                    },
+                    "autoscaling": {
+                        "min_replicas": 0,
+                        "max_replicas": 5,
+                        "consumer_lag": {
+                            "lag_threshold": 250,
+                            "scale_to_zero": true
+                        }
+                    },
+                    "executable": {
+                        "kind": "oci_image",
+                        "image": "ghcr.io/example/worker:1.0.0",
+                        "container_port": null
+                    }
+                }
+            ]
+        });
+        let cells = deployable_cells("svc.api", &runtime_pack).expect("cells");
+        assert_eq!(cells.len(), 1);
+        assert!(cells[0].keda_scaledobject_name.is_some());
+        assert!(cells[0].hpa_name.is_none());
+    }
+
+    #[test]
+    fn deployable_cells_rejects_conflicting_cpu_and_lag_autoscaling() {
+        let runtime_pack = json!({
+            "cells": [
+                {
+                    "cell_key": "events",
+                    "cell_kind": "event-consumer",
+                    "ingress_kind": "event",
+                    "runtime_class": "native-worker",
+                    "scale_class": "partitioned-consumer",
+                    "topology_group": "async",
+                    "binding_refs": [],
+                    "binding_probe_hints": [],
+                    "autoscaling": {
+                        "min_replicas": 1,
+                        "max_replicas": 4,
+                        "target_cpu_utilization": 70,
+                        "consumer_lag": {
+                            "lag_threshold": 250
+                        }
+                    },
+                    "executable": {
+                        "kind": "oci_image",
+                        "image": "ghcr.io/example/worker:1.0.0",
+                        "container_port": null
+                    }
+                }
+            ]
+        });
+        let err = deployable_cells("svc.api", &runtime_pack).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("cannot set both autoscaling.target_cpu_utilization and autoscaling.consumer_lag"));
+    }
+
+    #[test]
+    fn schedule_cells_receive_run_and_checkpoint_identity() {
+        let runtime_pack = json!({
+            "cells": [
+                {
+                    "cell_key": "settlement",
+                    "cell_kind": "scheduled-job",
+                    "ingress_kind": "schedule",
+                    "runtime_class": "native-worker",
+                    "scale_class": "burst-batch",
+                    "topology_group": "async",
+                    "binding_refs": [],
+                    "binding_probe_hints": [],
+                    "schedule": {
+                        "cron": "0 */6 * * *"
+                    },
+                    "executable": {
+                        "kind": "oci_image",
+                        "image": "ghcr.io/example/job:1.0.0",
+                        "container_port": null
+                    }
+                }
+            ]
+        });
+        let cells = deployable_cells("svc.api", &runtime_pack).expect("cells");
+        assert_eq!(cells.len(), 1);
+
+        let env = workload_cell_env(&cells[0]);
+        let run_id = env
+            .iter()
+            .find(|item| item.get("name").and_then(serde_json::Value::as_str) == Some("X07_JOB_RUN_ID"))
+            .and_then(|item| item.get("valueFrom"))
+            .and_then(|item| item.get("fieldRef"))
+            .and_then(|item| item.get("fieldPath"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(run_id, Some("metadata.labels['job-name']"));
+
+        let checkpoint_key = env
+            .iter()
+            .find(|item| item.get("name").and_then(serde_json::Value::as_str) == Some("X07_JOB_CHECKPOINT_KEY"))
+            .and_then(|item| item.get("value"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(checkpoint_key, Some("$(LP_DEPLOYMENT_ID):$(X07_JOB_RUN_ID)"));
     }
 
     #[test]

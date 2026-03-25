@@ -1,5 +1,5 @@
 {
-  "id": "plan_phaseb_canary_v1",
+  "id": "plan_deploy_loop_canary_v1",
   "ops_profile": {
     "bytes_len": 612,
     "path": "ops_release.json",

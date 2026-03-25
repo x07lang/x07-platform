@@ -16,14 +16,14 @@ else
 fi
 
 NOW_UNIX_MS="1762147200000"
-PACK_DIR="spec/fixtures/phaseA/pack_min"
+PACK_DIR="spec/fixtures/baseline/pack_min"
 PACK_MANIFEST="app.pack.json"
-PHASEB_CHANGE="spec/fixtures/phaseB/common/change_request.app_min.json"
-PHASEB_TMP="${ROOT_DIR}/_tmp/ci_phaseB"
+DEPLOY_LOOP_CHANGE="spec/fixtures/deploy_loop/common/change_request.app_min.json"
+DEPLOY_LOOP_TMP="${ROOT_DIR}/_tmp/ci_deploy_loop"
 
-mkdir -p "$PHASEB_TMP"
+mkdir -p "$DEPLOY_LOOP_TMP"
 
-CONFIG_DIR="${PHASEB_TMP}/config"
+CONFIG_DIR="${DEPLOY_LOOP_TMP}/config"
 rm -rf "$CONFIG_DIR"
 mkdir -p "$CONFIG_DIR"
 export X07LP_CONFIG_DIR="$CONFIG_DIR"
@@ -356,7 +356,7 @@ PY
 prepare_accepted_state() {
   local case_name="$1"
   local state_dir_rel="$2"
-  local out_dir="$PHASEB_TMP/$case_name"
+  local out_dir="$DEPLOY_LOOP_TMP/$case_name"
   mkdir -p "$out_dir"
   rm -rf "$ROOT_DIR/$state_dir_rel"
   mkdir -p "$ROOT_DIR/$state_dir_rel"
@@ -367,7 +367,7 @@ prepare_accepted_state() {
     deploy accept \
     --pack-dir "$PACK_DIR" \
     --pack-manifest "$PACK_MANIFEST" \
-    --change "$PHASEB_CHANGE" \
+    --change "$DEPLOY_LOOP_CHANGE" \
     --state-dir "$state_dir_rel" \
     --now-unix-ms "$NOW_UNIX_MS" \
     --json
@@ -385,8 +385,8 @@ prepare_accepted_state() {
 }
 
 echo "case: promote"
-PROMOTE_STATE_REL="_tmp/ci_phaseB/promote_state"
-PROMOTE_DIR="$PHASEB_TMP/promote"
+PROMOTE_STATE_REL="_tmp/ci_deploy_loop/promote_state"
+PROMOTE_DIR="$DEPLOY_LOOP_TMP/promote"
 mkdir -p "$PROMOTE_DIR"
 PROMOTE_EXEC_ID="$(prepare_accepted_state promote "$PROMOTE_STATE_REL")"
 run_x07lp \
@@ -394,14 +394,14 @@ run_x07lp \
   "$PROMOTE_DIR/deploy_run.cli.json" \
   deploy run \
   --deployment-id "$PROMOTE_EXEC_ID" \
-  --plan spec/fixtures/phaseB/promote/deploy.plan.json \
-  --metrics-dir spec/fixtures/phaseB/promote \
+  --plan spec/fixtures/deploy_loop/promote/deploy.plan.json \
+  --metrics-dir spec/fixtures/deploy_loop/promote \
   --pause-scale 0 \
   --state-dir "$PROMOTE_STATE_REL" \
   --now-unix-ms "$NOW_UNIX_MS" \
   --json
 validate_cli_report "$PROMOTE_DIR/deploy_run.cli.json" "$PROMOTE_DIR"
-assert_report_matches_template "$PROMOTE_DIR/deploy_run.cli.json" "$ROOT_DIR/spec/fixtures/phaseB/promote/expected/deploy.run.report.json"
+assert_report_matches_template "$PROMOTE_DIR/deploy_run.cli.json" "$ROOT_DIR/spec/fixtures/deploy_loop/promote/expected/deploy.run.report.json"
 check_schema_validate_ok \
   "contracts/spec/schemas/lp.deploy.execution.schema.json" \
   "$PROMOTE_STATE_REL/deploy/${PROMOTE_EXEC_ID}.json" \
@@ -411,8 +411,8 @@ assert_exec_state "$ROOT_DIR/$PROMOTE_STATE_REL/deploy/${PROMOTE_EXEC_ID}.json" 
 echo "ok: promote"
 
 echo "case: rollback"
-ROLLBACK_STATE_REL="_tmp/ci_phaseB/rollback_state"
-ROLLBACK_DIR="$PHASEB_TMP/rollback"
+ROLLBACK_STATE_REL="_tmp/ci_deploy_loop/rollback_state"
+ROLLBACK_DIR="$DEPLOY_LOOP_TMP/rollback"
 mkdir -p "$ROLLBACK_DIR"
 ROLLBACK_EXEC_ID="$(prepare_accepted_state rollback "$ROLLBACK_STATE_REL")"
 run_x07lp \
@@ -420,14 +420,14 @@ run_x07lp \
   "$ROLLBACK_DIR/deploy_run.cli.json" \
   deploy run \
   --deployment-id "$ROLLBACK_EXEC_ID" \
-  --plan spec/fixtures/phaseB/rollback/deploy.plan.json \
-  --metrics-dir spec/fixtures/phaseB/rollback \
+  --plan spec/fixtures/deploy_loop/rollback/deploy.plan.json \
+  --metrics-dir spec/fixtures/deploy_loop/rollback \
   --pause-scale 0 \
   --state-dir "$ROLLBACK_STATE_REL" \
   --now-unix-ms "$NOW_UNIX_MS" \
   --json
 validate_cli_report "$ROLLBACK_DIR/deploy_run.cli.json" "$ROLLBACK_DIR"
-assert_report_matches_template "$ROLLBACK_DIR/deploy_run.cli.json" "$ROOT_DIR/spec/fixtures/phaseB/rollback/expected/deploy.run.report.json"
+assert_report_matches_template "$ROLLBACK_DIR/deploy_run.cli.json" "$ROOT_DIR/spec/fixtures/deploy_loop/rollback/expected/deploy.run.report.json"
 check_schema_validate_ok \
   "contracts/spec/schemas/lp.deploy.execution.schema.json" \
   "$ROLLBACK_STATE_REL/deploy/${ROLLBACK_EXEC_ID}.json" \
@@ -437,8 +437,8 @@ assert_exec_state "$ROOT_DIR/$ROLLBACK_STATE_REL/deploy/${ROLLBACK_EXEC_ID}.json
 echo "ok: rollback"
 
 echo "case: retry_exhausted"
-RETRY_STATE_REL="_tmp/ci_phaseB/retry_state"
-RETRY_DIR="$PHASEB_TMP/retry_exhausted"
+RETRY_STATE_REL="_tmp/ci_deploy_loop/retry_state"
+RETRY_DIR="$DEPLOY_LOOP_TMP/retry_exhausted"
 mkdir -p "$RETRY_DIR"
 RETRY_EXEC_ID="$(prepare_accepted_state retry_exhausted "$RETRY_STATE_REL")"
 run_x07lp \
@@ -446,14 +446,14 @@ run_x07lp \
   "$RETRY_DIR/deploy_run.cli.json" \
   deploy run \
   --deployment-id "$RETRY_EXEC_ID" \
-  --plan spec/fixtures/phaseB/retry_exhausted/deploy.plan.json \
-  --metrics-dir spec/fixtures/phaseB/retry_exhausted \
+  --plan spec/fixtures/deploy_loop/retry_exhausted/deploy.plan.json \
+  --metrics-dir spec/fixtures/deploy_loop/retry_exhausted \
   --pause-scale 0 \
   --state-dir "$RETRY_STATE_REL" \
   --now-unix-ms "$NOW_UNIX_MS" \
   --json
 validate_cli_report "$RETRY_DIR/deploy_run.cli.json" "$RETRY_DIR"
-assert_report_matches_template "$RETRY_DIR/deploy_run.cli.json" "$ROOT_DIR/spec/fixtures/phaseB/retry_exhausted/expected/deploy.run.report.json"
+assert_report_matches_template "$RETRY_DIR/deploy_run.cli.json" "$ROOT_DIR/spec/fixtures/deploy_loop/retry_exhausted/expected/deploy.run.report.json"
 check_schema_validate_ok \
   "contracts/spec/schemas/lp.deploy.execution.schema.json" \
   "$RETRY_STATE_REL/deploy/${RETRY_EXEC_ID}.json" \
@@ -464,8 +464,8 @@ assert_retry_steps_present "$ROOT_DIR/$RETRY_STATE_REL/deploy/${RETRY_EXEC_ID}.j
 echo "ok: retry_exhausted"
 
 echo "case: stop_during_pause"
-STOP_STATE_REL="_tmp/ci_phaseB/stop_state"
-STOP_DIR="$PHASEB_TMP/stop_during_pause"
+STOP_STATE_REL="_tmp/ci_deploy_loop/stop_state"
+STOP_DIR="$DEPLOY_LOOP_TMP/stop_during_pause"
 mkdir -p "$STOP_DIR"
 STOP_EXEC_ID="$(prepare_accepted_state stop_during_pause "$STOP_STATE_REL")"
 (
@@ -474,8 +474,8 @@ STOP_EXEC_ID="$(prepare_accepted_state stop_during_pause "$STOP_STATE_REL")"
     "$STOP_DIR/deploy_run.cli.json" \
     deploy run \
     --deployment-id "$STOP_EXEC_ID" \
-    --plan spec/fixtures/phaseB/stop_during_pause/deploy.plan.json \
-    --metrics-dir spec/fixtures/phaseB/stop_during_pause \
+    --plan spec/fixtures/deploy_loop/stop_during_pause/deploy.plan.json \
+    --metrics-dir spec/fixtures/deploy_loop/stop_during_pause \
     --pause-scale 0.05 \
     --state-dir "$STOP_STATE_REL" \
     --now-unix-ms "$NOW_UNIX_MS" \
@@ -494,7 +494,7 @@ run_x07lp \
   --json
 wait "$STOP_RUN_PID" || true
 validate_cli_report "$STOP_DIR/deploy_stop.cli.json" "$STOP_DIR"
-assert_report_matches_template "$STOP_DIR/deploy_stop.cli.json" "$ROOT_DIR/spec/fixtures/phaseB/stop_during_pause/expected/deploy.stop.report.json"
+assert_report_matches_template "$STOP_DIR/deploy_stop.cli.json" "$ROOT_DIR/spec/fixtures/deploy_loop/stop_during_pause/expected/deploy.stop.report.json"
 check_schema_validate_ok \
   "contracts/spec/schemas/lp.deploy.execution.schema.json" \
   "$STOP_STATE_REL/deploy/${STOP_EXEC_ID}.json" \
@@ -504,7 +504,7 @@ assert_exec_state "$ROOT_DIR/$STOP_STATE_REL/deploy/${STOP_EXEC_ID}.json" aborte
 echo "ok: stop_during_pause"
 
 echo "case: query"
-QUERY_DIR="$PHASEB_TMP/query"
+QUERY_DIR="$DEPLOY_LOOP_TMP/query"
 mkdir -p "$QUERY_DIR"
 run_x07lp \
   "$QUERY_DIR/query_summary.run_report.json" \
@@ -515,7 +515,7 @@ run_x07lp \
   --state-dir "$PROMOTE_STATE_REL" \
   --json
 validate_cli_report "$QUERY_DIR/query_summary.cli.json" "$QUERY_DIR"
-assert_report_matches_template "$QUERY_DIR/query_summary.cli.json" "$ROOT_DIR/spec/fixtures/phaseB/query/expected/query.summary.report.json"
+assert_report_matches_template "$QUERY_DIR/query_summary.cli.json" "$ROOT_DIR/spec/fixtures/deploy_loop/query/expected/query.summary.report.json"
 run_x07lp \
   "$QUERY_DIR/query_timeline.run_report.json" \
   "$QUERY_DIR/query_timeline.cli.json" \
@@ -525,7 +525,7 @@ run_x07lp \
   --state-dir "$PROMOTE_STATE_REL" \
   --json
 validate_cli_report "$QUERY_DIR/query_timeline.cli.json" "$QUERY_DIR"
-assert_report_matches_template "$QUERY_DIR/query_timeline.cli.json" "$ROOT_DIR/spec/fixtures/phaseB/query/expected/query.timeline.report.json"
+assert_report_matches_template "$QUERY_DIR/query_timeline.cli.json" "$ROOT_DIR/spec/fixtures/deploy_loop/query/expected/query.timeline.report.json"
 run_x07lp \
   "$QUERY_DIR/query_decisions.run_report.json" \
   "$QUERY_DIR/query_decisions.cli.json" \
@@ -535,7 +535,7 @@ run_x07lp \
   --state-dir "$PROMOTE_STATE_REL" \
   --json
 validate_cli_report "$QUERY_DIR/query_decisions.cli.json" "$QUERY_DIR"
-assert_report_matches_template "$QUERY_DIR/query_decisions.cli.json" "$ROOT_DIR/spec/fixtures/phaseB/query/expected/query.decisions.report.json"
+assert_report_matches_template "$QUERY_DIR/query_decisions.cli.json" "$ROOT_DIR/spec/fixtures/deploy_loop/query/expected/query.decisions.report.json"
 run_x07lp \
   "$QUERY_DIR/query_artifacts.run_report.json" \
   "$QUERY_DIR/query_artifacts.cli.json" \
@@ -545,7 +545,7 @@ run_x07lp \
   --state-dir "$PROMOTE_STATE_REL" \
   --json
 validate_cli_report "$QUERY_DIR/query_artifacts.cli.json" "$QUERY_DIR"
-assert_report_matches_template "$QUERY_DIR/query_artifacts.cli.json" "$ROOT_DIR/spec/fixtures/phaseB/query/expected/query.artifacts.report.json"
+assert_report_matches_template "$QUERY_DIR/query_artifacts.cli.json" "$ROOT_DIR/spec/fixtures/deploy_loop/query/expected/query.artifacts.report.json"
 run_x07lp \
   "$QUERY_DIR/query_latest.run_report.json" \
   "$QUERY_DIR/query_latest.cli.json" \
@@ -557,10 +557,10 @@ run_x07lp \
   --state-dir "$PROMOTE_STATE_REL" \
   --json
 validate_cli_report "$QUERY_DIR/query_latest.cli.json" "$QUERY_DIR"
-assert_report_matches_template "$QUERY_DIR/query_latest.cli.json" "$ROOT_DIR/spec/fixtures/phaseB/query/expected/query.latest.report.json"
-SQLITE_DB="$ROOT_DIR/$PROMOTE_STATE_REL/index/phaseb.sqlite"
+assert_report_matches_template "$QUERY_DIR/query_latest.cli.json" "$ROOT_DIR/spec/fixtures/deploy_loop/query/expected/query.latest.report.json"
+SQLITE_DB="$ROOT_DIR/$PROMOTE_STATE_REL/index/deploy_loop.sqlite"
 assert_sqlite_schema "$SQLITE_DB"
 assert_sqlite_rows "$SQLITE_DB" "$PROMOTE_EXEC_ID" app_min staging
 echo "ok: query"
 
-echo "ok: phaseB"
+echo "ok: deploy loop"

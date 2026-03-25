@@ -1,9 +1,9 @@
--- Phase C derived incident/control index (SQLite additions)
--- Execute this after the Phase B schema has been materialized.
+-- Control plane derived incident/control index (SQLite additions)
+-- Execute this after the deploy loop schema has been materialized.
 
 INSERT OR REPLACE INTO meta (k, v) VALUES
-  ('phasec_schema_version', 'lp.sqlite.phasec_index@0.1.0'),
-  ('phasec_purpose', 'incident_control_query_index');
+  ('control_plane_schema_version', 'lp.sqlite.control_plane_index@0.1.0'),
+  ('control_plane_purpose', 'incident_control_query_index');
 
 CREATE TABLE IF NOT EXISTS incidents (
   incident_id TEXT PRIMARY KEY,

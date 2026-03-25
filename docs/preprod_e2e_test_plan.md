@@ -3,7 +3,7 @@
 Scope: `x07-platform` (OSS) only.
 
 Non-goals for this plan:
-- **Do not** test `x07-platform-cloud` / hosted control-plane.
+- **Do not** test the hosted control plane.
 - **Do not** run live mobile store providers (App Store Connect / Google Play). Mock device providers are in scope.
 
 This plan is written to be repeatable: every run should capture evidence (JSON outputs, logs, screenshots, DB queries) under a single run directory.
@@ -17,7 +17,7 @@ Required tools:
 - `docker` + `docker compose` (for the self-hosted wasmCloud target, and for `k3d`)
 - `kubectl`
 - `k3d` (K3s-in-Docker)
-- `sqlite3` (for PhaseB/PhaseC query-index verification)
+- `sqlite3` (for deploy-loop/control-plane query-index verification)
 
 Optional (but recommended) verification tools:
 - Playwright (UI screenshots + basic click-path smoke)
@@ -77,16 +77,16 @@ Targets in scope:
      - `$RUN_DIR/check_all.log`
      - `$RUN_DIR/ci_artifacts/` (copy `_tmp/ci_*` directories you want to keep)
 
-2. Local deploy + query + UI smoke (Phase C)
-   - `./scripts/ci/phaseC.sh`
+2. Local deploy + query + UI smoke (control plane)
+   - `./scripts/ci/control_plane.sh`
    - Serve UI against the produced state dir, then capture screenshots.
    - Evidence:
-     - `$RUN_DIR/phaseC.log`
-     - `$RUN_DIR/db/phaseb.sqlite.*` and `$RUN_DIR/db/phasec.sqlite.*` (query output)
+     - `$RUN_DIR/control_plane.log`
+     - `$RUN_DIR/db/deploy_loop.sqlite.*` and `$RUN_DIR/db/control_plane.sqlite.*` (query output)
      - `$RUN_DIR/ui/*.png` screenshots
 
 3. Local controls + incident + regression
-   - Use the Phase C state (or produce a new local state) and run:
+   - Use the control-plane state (or produce a new local state) and run:
      - pause/rerun/rollback/stop controls
      - incident capture and regression generation
    - Evidence:
@@ -132,39 +132,39 @@ Targets in scope:
 
 ### 3.1 Local (`__local__`) deploy execution + DB checks
 
-Run Phase C (creates a rich local state dir used throughout the UI/controls flows):
+Run the control-plane lane (creates a rich local state dir used throughout the UI/controls flows):
 ```bash
 cd x07-platform
-./scripts/ci/phaseC.sh 2>&1 | tee "$RUN_DIR/phaseC.log"
+./scripts/ci/control_plane.sh 2>&1 | tee "$RUN_DIR/control_plane.log"
 ```
 
-Phase C state directory (current convention):
-- `_tmp/ci_phaseC/promote_state`
+Control-plane state directory (current convention):
+- `_tmp/ci_control_plane/promote_state`
 
 Serve UI:
 ```bash
 ./scripts/x07lp-driver ui-serve \
-  --state-dir _tmp/ci_phaseC/promote_state \
+  --state-dir _tmp/ci_control_plane/promote_state \
   --addr 127.0.0.1:17090
 ```
 
 DB index checks (derived state; query acceleration):
 ```bash
-STATE_DIR="$PWD/_tmp/ci_phaseC/promote_state"
-sqlite3 "$STATE_DIR/index/phaseb.sqlite" "select k,v from meta order by k;"
-sqlite3 "$STATE_DIR/index/phaseb.sqlite" "select count(*) as executions from executions;"
-sqlite3 "$STATE_DIR/index/phasec.sqlite" "select count(*) as incidents from incidents;"
+STATE_DIR="$PWD/_tmp/ci_control_plane/promote_state"
+sqlite3 "$STATE_DIR/index/deploy_loop.sqlite" "select k,v from meta order by k;"
+sqlite3 "$STATE_DIR/index/deploy_loop.sqlite" "select count(*) as executions from executions;"
+sqlite3 "$STATE_DIR/index/control_plane.sqlite" "select count(*) as incidents from incidents;"
 ```
 
 Capture the outputs (example):
 ```bash
 {
-  echo "== phaseb meta ==";
-  sqlite3 "$STATE_DIR/index/phaseb.sqlite" "select k,v from meta order by k;";
-  echo "== phaseb counts ==";
-  sqlite3 "$STATE_DIR/index/phaseb.sqlite" "select count(*) as executions from executions;";
-  echo "== phasec counts ==";
-  sqlite3 "$STATE_DIR/index/phasec.sqlite" "select count(*) as incidents from incidents;";
+  echo "== deploy_loop meta ==";
+  sqlite3 "$STATE_DIR/index/deploy_loop.sqlite" "select k,v from meta order by k;";
+  echo "== deploy_loop counts ==";
+  sqlite3 "$STATE_DIR/index/deploy_loop.sqlite" "select count(*) as executions from executions;";
+  echo "== control_plane counts ==";
+  sqlite3 "$STATE_DIR/index/control_plane.sqlite" "select count(*) as incidents from incidents;";
 } 2>&1 | tee "$RUN_DIR/db/index_checks.txt"
 ```
 
@@ -200,8 +200,8 @@ kubectl logs -n default <pod> --all-containers >"$RUN_DIR/k8s/pod_logs.txt"
 Minimum screenshot set (Command Center):
 - `/apps`
 - `/device-releases`
-- `/deployments/<id>` (from Phase C)
-- `/incidents/<id>` (from Phase C)
+- `/deployments/<id>` (from control-plane lane)
+- `/incidents/<id>` (from control-plane lane)
 
 Recommended automation:
 - Use Playwright to (1) wait for the UI to load, (2) navigate to each route, and (3) save screenshots to `$RUN_DIR/ui/`.
@@ -215,7 +215,7 @@ A run is **green** when:
   - `k8s` smoke passes at minimum, and `k8s-extended` is recommended for release readiness.
   - `remote-oss` lane passes cleanly (TLS, OCI auth, encrypted secret-store checks).
 - UI screenshots are captured for the minimum set and are visually sane (no blank pages, error banners, missing data).
-- DB index checks show non-zero expected rows for Phase B/C (when Phase C state is present).
+- DB index checks show non-zero expected rows for deploy loop and control plane (when control-plane state is present).
 - No open P0/P1 issues remain in `docs/preprod_issue_log.md`.
 
 ## 6) Troubleshooting notes (common failure modes)
@@ -223,4 +223,4 @@ A run is **green** when:
 - If a CI script fails with missing native backends, re-run after sourcing:
   - `source scripts/ci/use_workspace_x07_bins.sh`
 - If k3s/K3d fails to start, verify Docker Desktop is running and `k3d cluster list` is healthy.
-- If UI shows empty lists, confirm `--state-dir` points at a populated state directory (for example `_tmp/ci_phaseC/promote_state`).
+- If UI shows empty lists, confirm `--state-dir` points at a populated state directory (for example `_tmp/ci_control_plane/promote_state`).

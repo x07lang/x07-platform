@@ -2358,7 +2358,7 @@ fn search_workspace_file(name: &str) -> Option<PathBuf> {
         root.join("arch").join("slo").join(name),
         root.join("spec")
             .join("fixtures")
-            .join("phaseA")
+            .join("baseline")
             .join("pack_min")
             .join(name),
     ];
@@ -5831,49 +5831,49 @@ fn rebuild_indexes(state_dir: &Path) -> Result<(PathBuf, PathBuf)> {
         .map_err(|_| anyhow!("rebuild indexes lock poisoned"))?;
     let index_dir = state_dir.join("index");
     fs::create_dir_all(&index_dir)?;
-    let phaseb_path = index_dir.join("phaseb.sqlite");
-    let phasec_path = index_dir.join("phasec.sqlite");
-    let phaseb_temp = temp_sibling_path(&phaseb_path, "sqlite");
-    let phasec_temp = temp_sibling_path(&phasec_path, "sqlite");
-    let phaseb_sql = fs::read_to_string(
+    let deploy_loop_path = index_dir.join("deploy_loop.sqlite");
+    let control_plane_path = index_dir.join("control_plane.sqlite");
+    let deploy_loop_temp = temp_sibling_path(&deploy_loop_path, "sqlite");
+    let control_plane_temp = temp_sibling_path(&control_plane_path, "sqlite");
+    let deploy_loop_sql = fs::read_to_string(
         root_dir()
             .join("adapters")
             .join("sql")
-            .join("phaseB_index.sqlite.sql"),
+            .join("deploy_loop_index.sqlite.sql"),
     )?;
-    let phasec_sql = fs::read_to_string(
+    let control_plane_sql = fs::read_to_string(
         root_dir()
             .join("adapters")
             .join("sql")
-            .join("phaseC_index.sqlite.sql"),
+            .join("control_plane_index.sqlite.sql"),
     )?;
     let mut latest_heads: BTreeMap<(String, String), (String, u64)> = BTreeMap::new();
-    for db_path in [&phaseb_temp, &phasec_temp] {
+    for db_path in [&deploy_loop_temp, &control_plane_temp] {
         let conn = Connection::open(db_path)?;
-        conn.execute_batch(&phaseb_sql)?;
-        if db_path == &phasec_temp {
-            conn.execute_batch(&phasec_sql)?;
+        conn.execute_batch(&deploy_loop_sql)?;
+        if db_path == &control_plane_temp {
+            conn.execute_batch(&control_plane_sql)?;
         }
         insert_execution_rows(&conn, state_dir, &mut latest_heads)?;
-        if db_path == &phasec_temp {
-            insert_phasec_rows(&conn, state_dir, &latest_heads)?;
+        if db_path == &control_plane_temp {
+            insert_control_plane_rows(&conn, state_dir, &latest_heads)?;
         }
     }
-    fs::rename(&phaseb_temp, &phaseb_path).with_context(|| {
+    fs::rename(&deploy_loop_temp, &deploy_loop_path).with_context(|| {
         format!(
             "rename {} -> {}",
-            phaseb_temp.display(),
-            phaseb_path.display()
+            deploy_loop_temp.display(),
+            deploy_loop_path.display()
         )
     })?;
-    fs::rename(&phasec_temp, &phasec_path).with_context(|| {
+    fs::rename(&control_plane_temp, &control_plane_path).with_context(|| {
         format!(
             "rename {} -> {}",
-            phasec_temp.display(),
-            phasec_path.display()
+            control_plane_temp.display(),
+            control_plane_path.display()
         )
     })?;
-    Ok((phaseb_path, phasec_path))
+    Ok((deploy_loop_path, control_plane_path))
 }
 
 fn insert_execution_rows(
@@ -6131,7 +6131,7 @@ fn incident_classification_seen(state_dir: &Path, classification: &str) -> bool 
     })
 }
 
-fn insert_phasec_rows(
+fn insert_control_plane_rows(
     conn: &Connection,
     state_dir: &Path,
     latest_heads: &BTreeMap<(String, String), (String, u64)>,
@@ -9584,8 +9584,8 @@ fn find_exec_id_for_run(state_dir: &Path, run_id: &str) -> Result<Option<String>
     Ok(None)
 }
 
-fn maybe_rebuild_phaseb(state_dir: &Path, force: bool) -> Result<(PathBuf, bool)> {
-    let db_path = state_dir.join("index").join("phaseb.sqlite");
+fn maybe_rebuild_deploy_loop_index(state_dir: &Path, force: bool) -> Result<(PathBuf, bool)> {
+    let db_path = state_dir.join("index").join("deploy_loop.sqlite");
     let rebuilt = force || !db_path.exists();
     if rebuilt {
         rebuild_indexes(state_dir)?;
@@ -9593,8 +9593,8 @@ fn maybe_rebuild_phaseb(state_dir: &Path, force: bool) -> Result<(PathBuf, bool)
     Ok((db_path, rebuilt))
 }
 
-fn maybe_rebuild_phasec(state_dir: &Path, force: bool) -> Result<(PathBuf, bool)> {
-    let db_path = state_dir.join("index").join("phasec.sqlite");
+fn maybe_rebuild_control_plane_index(state_dir: &Path, force: bool) -> Result<(PathBuf, bool)> {
+    let db_path = state_dir.join("index").join("control_plane.sqlite");
     let rebuilt = force || !db_path.exists();
     if rebuilt {
         rebuild_indexes(state_dir)?;
@@ -13565,7 +13565,7 @@ fn command_query_state(args: DeployQueryArgs) -> Result<Value> {
         ));
     }
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
-    let (db_path, rebuilt) = maybe_rebuild_phaseb(&state_dir, args.rebuild_index)?;
+    let (db_path, rebuilt) = maybe_rebuild_deploy_loop_index(&state_dir, args.rebuild_index)?;
     let (exec_id, resolution) = if let Some(exec_id) = args.deployment_id {
         (
             Some(exec_id.clone()),
@@ -15106,7 +15106,7 @@ fn command_incident_capture_execution(args: IncidentCaptureArgs) -> Result<Value
             )?;
             (meta, bundle, incident_dir, run_id)
         };
-    let (db_path, rebuilt) = maybe_rebuild_phasec(&state_dir, false)?;
+    let (db_path, rebuilt) = maybe_rebuild_control_plane_index(&state_dir, false)?;
     Ok(cli_report(
         "incident capture",
         true,
@@ -15135,7 +15135,8 @@ fn command_incident_get(args: IncidentGetArgs) -> Result<Value> {
 
 fn command_incident_get_state(args: IncidentGetArgs) -> Result<Value> {
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
-    let (db_path, rebuilt) = maybe_rebuild_phasec(&state_dir, args.rebuild_index)?;
+    let (db_path, rebuilt) =
+        maybe_rebuild_control_plane_index(&state_dir, args.rebuild_index)?;
     let Some((meta, bundle, incident_dir)) =
         build_incident_summary_from_disk(&state_dir, &args.incident_id)?
     else {
@@ -15181,7 +15182,8 @@ fn command_incident_list(args: IncidentListArgs) -> Result<Value> {
 
 fn command_incident_list_state(args: IncidentListArgs) -> Result<Value> {
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
-    let (db_path, rebuilt) = maybe_rebuild_phasec(&state_dir, args.rebuild_index)?;
+    let (db_path, rebuilt) =
+        maybe_rebuild_control_plane_index(&state_dir, args.rebuild_index)?;
     let mut items = Vec::new();
     for meta_path in read_incident_meta_paths(&state_dir) {
         let meta = load_json(&meta_path)?;
@@ -15601,7 +15603,8 @@ fn command_regress_from_incident_state(args: RegressFromIncidentArgs) -> Result<
 
 fn command_app_list(args: AppListArgs) -> Result<Value> {
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
-    let (db_path, rebuilt) = maybe_rebuild_phasec(&state_dir, args.rebuild_index)?;
+    let (db_path, rebuilt) =
+        maybe_rebuild_control_plane_index(&state_dir, args.rebuild_index)?;
     let conn = Connection::open(&db_path)?;
     let mut stmt = conn.prepare("SELECT app_id, environment, latest_deployment_id, deployment_status, outcome, public_listener, current_weight_pct, incident_count_total, incident_count_open, latest_incident_id, latest_decision_id, kill_state, updated_unix_ms FROM app_heads ORDER BY updated_unix_ms DESC, app_id ASC, environment ASC")?;
     let rows = stmt.query_map([], |row| {

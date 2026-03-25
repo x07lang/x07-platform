@@ -1,6 +1,6 @@
 {
   "schema_version": "lp.change_request@0.1.0",
-  "change_id": "lpcr_phaseb_app_min_staging",
+  "change_id": "lpcr_deploy_loop_app_min_staging",
   "created_unix_ms": 1762147200000,
   "target": {
     "app_id": "app_min",

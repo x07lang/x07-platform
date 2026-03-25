@@ -18,9 +18,9 @@ echo "ok: x07lp-driver tests"
 bash ./scripts/ci/target-conformance.sh k8s
 echo "ok: k8s target conformance"
 
-./scripts/ci/check_phaseA_golden.sh
-./scripts/ci/phaseB.sh
-./scripts/ci/phaseC.sh
+./scripts/ci/check_golden.sh
+./scripts/ci/deploy_loop.sh
+./scripts/ci/control_plane.sh
 ./scripts/ci/device-release.sh
 ./scripts/ci/remote-oss.sh
 

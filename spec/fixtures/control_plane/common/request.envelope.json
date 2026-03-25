@@ -4,7 +4,7 @@
   "path": "/api/health",
   "headers": {
     "accept": "application/json",
-    "x-lp-route-key": "ci-phasec-route-01"
+    "x-lp-route-key": "ci-control-plane-route-01"
   },
   "body": null
 }

@@ -1,9 +1,9 @@
 {
   "deployment_id": "__ANY__",
   "json": true,
-  "metrics_dir": "spec/fixtures/phaseB/stop_during_pause",
+  "metrics_dir": "spec/fixtures/deploy_loop/stop_during_pause",
   "now_unix_ms": "1762147200000",
   "pause_scale": 0.05,
-  "plan": "spec/fixtures/phaseB/stop_during_pause/deploy.plan.json",
+  "plan": "spec/fixtures/deploy_loop/stop_during_pause/deploy.plan.json",
   "state_dir": "__ANY__"
 }

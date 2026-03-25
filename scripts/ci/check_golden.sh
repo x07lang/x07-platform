@@ -178,116 +178,116 @@ if res.get("ok") is not True:
 PY
 }
 
-PACK_DIR="spec/fixtures/phaseA/pack_min"
+PACK_DIR="spec/fixtures/baseline/pack_min"
 NOW_UNIX_MS="1762147200000"
 
-CHANGE_ALLOW="spec/fixtures/phaseA/change_request.min.json"
-CHANGE_DENY="spec/fixtures/phaseA/change_request.ops_required.json"
+CHANGE_ALLOW="spec/fixtures/baseline/change_request.min.json"
+CHANGE_DENY="spec/fixtures/baseline/change_request.ops_required.json"
 
-GOLDEN_ALLOW="spec/fixtures/phaseA/golden/deploy_accept.allow.json"
-GOLDEN_DENY="spec/fixtures/phaseA/golden/deploy_accept.deny.ops_required.json"
+GOLDEN_ALLOW="spec/fixtures/baseline/golden/deploy_accept.allow.json"
+GOLDEN_DENY="spec/fixtures/baseline/golden/deploy_accept.deny.ops_required.json"
 
 mkdir -p "${ROOT_DIR}/_tmp"
 
 echo "case: allow"
-rm -rf "${ROOT_DIR}/_tmp/ci_phaseA_allow_state"
+rm -rf "${ROOT_DIR}/_tmp/ci_golden_allow_state"
 run_x07lp \
-  "${ROOT_DIR}/_tmp/ci_phaseA_allow.run_report.json" \
-  "${ROOT_DIR}/_tmp/ci_phaseA_allow.cli.json" \
+  "${ROOT_DIR}/_tmp/ci_golden_allow.run_report.json" \
+  "${ROOT_DIR}/_tmp/ci_golden_allow.cli.json" \
   deploy accept \
   --pack-dir "${PACK_DIR}" \
   --pack-manifest app.pack.json \
   --change "${CHANGE_ALLOW}" \
-  --state-dir _tmp/ci_phaseA_allow_state \
+  --state-dir _tmp/ci_golden_allow_state \
   --now-unix-ms "${NOW_UNIX_MS}" \
   --json
 
-golden_matches "${ROOT_DIR}/${GOLDEN_ALLOW}" "${ROOT_DIR}/_tmp/ci_phaseA_allow.cli.json" || {
+golden_matches "${ROOT_DIR}/${GOLDEN_ALLOW}" "${ROOT_DIR}/_tmp/ci_golden_allow.cli.json" || {
   echo "deploy accept allow output drifted" >&2
-  diff -u "${ROOT_DIR}/${GOLDEN_ALLOW}" "${ROOT_DIR}/_tmp/ci_phaseA_allow.cli.json" >&2
+  diff -u "${ROOT_DIR}/${GOLDEN_ALLOW}" "${ROOT_DIR}/_tmp/ci_golden_allow.cli.json" >&2
   exit 1
 }
-check_cli_report_fields "${ROOT_DIR}/_tmp/ci_phaseA_allow.cli.json" true 0 allow ""
+check_cli_report_fields "${ROOT_DIR}/_tmp/ci_golden_allow.cli.json" true 0 allow ""
 
-run_rel="$(extract_store_rel_path "${ROOT_DIR}/_tmp/ci_phaseA_allow.cli.json" lp.pipeline.run)"
-dec_rel="$(extract_store_rel_path "${ROOT_DIR}/_tmp/ci_phaseA_allow.cli.json" lp.decision.record)"
-exec_rel="$(extract_store_rel_path "${ROOT_DIR}/_tmp/ci_phaseA_allow.cli.json" lp.deploy.execution)"
+run_rel="$(extract_store_rel_path "${ROOT_DIR}/_tmp/ci_golden_allow.cli.json" lp.pipeline.run)"
+dec_rel="$(extract_store_rel_path "${ROOT_DIR}/_tmp/ci_golden_allow.cli.json" lp.decision.record)"
+exec_rel="$(extract_store_rel_path "${ROOT_DIR}/_tmp/ci_golden_allow.cli.json" lp.deploy.execution)"
 
 check_schema_validate_ok \
   "contracts/spec/schemas/lp.pipeline.run.schema.json" \
-  "_tmp/ci_phaseA_allow_state/${run_rel}" \
-  "${ROOT_DIR}/_tmp/ci_phaseA_allow.validate_run.run_report.json" \
-  "${ROOT_DIR}/_tmp/ci_phaseA_allow.validate_run.cli.json"
+  "_tmp/ci_golden_allow_state/${run_rel}" \
+  "${ROOT_DIR}/_tmp/ci_golden_allow.validate_run.run_report.json" \
+  "${ROOT_DIR}/_tmp/ci_golden_allow.validate_run.cli.json"
 
 check_schema_validate_ok \
   "contracts/spec/schemas/lp.decision.record.schema.json" \
-  "_tmp/ci_phaseA_allow_state/${dec_rel}" \
-  "${ROOT_DIR}/_tmp/ci_phaseA_allow.validate_dec.run_report.json" \
-  "${ROOT_DIR}/_tmp/ci_phaseA_allow.validate_dec.cli.json"
+  "_tmp/ci_golden_allow_state/${dec_rel}" \
+  "${ROOT_DIR}/_tmp/ci_golden_allow.validate_dec.run_report.json" \
+  "${ROOT_DIR}/_tmp/ci_golden_allow.validate_dec.cli.json"
 
 check_schema_validate_ok \
   "contracts/spec/schemas/lp.deploy.execution.schema.json" \
-  "_tmp/ci_phaseA_allow_state/${exec_rel}" \
-  "${ROOT_DIR}/_tmp/ci_phaseA_allow.validate_exec.run_report.json" \
-  "${ROOT_DIR}/_tmp/ci_phaseA_allow.validate_exec.cli.json"
+  "_tmp/ci_golden_allow_state/${exec_rel}" \
+  "${ROOT_DIR}/_tmp/ci_golden_allow.validate_exec.run_report.json" \
+  "${ROOT_DIR}/_tmp/ci_golden_allow.validate_exec.cli.json"
 
 echo "ok: allow"
 
 echo "case: deny (ops required, missing --ops-profile)"
-rm -rf "${ROOT_DIR}/_tmp/ci_phaseA_deny_state"
+rm -rf "${ROOT_DIR}/_tmp/ci_golden_deny_state"
 run_x07lp \
-  "${ROOT_DIR}/_tmp/ci_phaseA_deny.run_report.json" \
-  "${ROOT_DIR}/_tmp/ci_phaseA_deny.cli.json" \
+  "${ROOT_DIR}/_tmp/ci_golden_deny.run_report.json" \
+  "${ROOT_DIR}/_tmp/ci_golden_deny.cli.json" \
   deploy accept \
   --pack-dir "${PACK_DIR}" \
   --pack-manifest app.pack.json \
   --change "${CHANGE_DENY}" \
-  --state-dir _tmp/ci_phaseA_deny_state \
+  --state-dir _tmp/ci_golden_deny_state \
   --now-unix-ms "${NOW_UNIX_MS}" \
   --json
 
-golden_matches "${ROOT_DIR}/${GOLDEN_DENY}" "${ROOT_DIR}/_tmp/ci_phaseA_deny.cli.json" || {
+golden_matches "${ROOT_DIR}/${GOLDEN_DENY}" "${ROOT_DIR}/_tmp/ci_golden_deny.cli.json" || {
   echo "deploy accept deny output drifted" >&2
-  diff -u "${ROOT_DIR}/${GOLDEN_DENY}" "${ROOT_DIR}/_tmp/ci_phaseA_deny.cli.json" >&2
+  diff -u "${ROOT_DIR}/${GOLDEN_DENY}" "${ROOT_DIR}/_tmp/ci_golden_deny.cli.json" >&2
   exit 1
 }
-check_cli_report_fields "${ROOT_DIR}/_tmp/ci_phaseA_deny.cli.json" false 13 deny "LP_GATE_REJECTED"
+check_cli_report_fields "${ROOT_DIR}/_tmp/ci_golden_deny.cli.json" false 13 deny "LP_GATE_REJECTED"
 
-run_rel="$(extract_store_rel_path "${ROOT_DIR}/_tmp/ci_phaseA_deny.cli.json" lp.pipeline.run)"
-dec_rel="$(extract_store_rel_path "${ROOT_DIR}/_tmp/ci_phaseA_deny.cli.json" lp.decision.record)"
-exec_rel="$(extract_store_rel_path "${ROOT_DIR}/_tmp/ci_phaseA_deny.cli.json" lp.deploy.execution)"
+run_rel="$(extract_store_rel_path "${ROOT_DIR}/_tmp/ci_golden_deny.cli.json" lp.pipeline.run)"
+dec_rel="$(extract_store_rel_path "${ROOT_DIR}/_tmp/ci_golden_deny.cli.json" lp.decision.record)"
+exec_rel="$(extract_store_rel_path "${ROOT_DIR}/_tmp/ci_golden_deny.cli.json" lp.deploy.execution)"
 
 check_schema_validate_ok \
   "contracts/spec/schemas/lp.pipeline.run.schema.json" \
-  "_tmp/ci_phaseA_deny_state/${run_rel}" \
-  "${ROOT_DIR}/_tmp/ci_phaseA_deny.validate_run.run_report.json" \
-  "${ROOT_DIR}/_tmp/ci_phaseA_deny.validate_run.cli.json"
+  "_tmp/ci_golden_deny_state/${run_rel}" \
+  "${ROOT_DIR}/_tmp/ci_golden_deny.validate_run.run_report.json" \
+  "${ROOT_DIR}/_tmp/ci_golden_deny.validate_run.cli.json"
 
 check_schema_validate_ok \
   "contracts/spec/schemas/lp.decision.record.schema.json" \
-  "_tmp/ci_phaseA_deny_state/${dec_rel}" \
-  "${ROOT_DIR}/_tmp/ci_phaseA_deny.validate_dec.run_report.json" \
-  "${ROOT_DIR}/_tmp/ci_phaseA_deny.validate_dec.cli.json"
+  "_tmp/ci_golden_deny_state/${dec_rel}" \
+  "${ROOT_DIR}/_tmp/ci_golden_deny.validate_dec.run_report.json" \
+  "${ROOT_DIR}/_tmp/ci_golden_deny.validate_dec.cli.json"
 
 check_schema_validate_ok \
   "contracts/spec/schemas/lp.deploy.execution.schema.json" \
-  "_tmp/ci_phaseA_deny_state/${exec_rel}" \
-  "${ROOT_DIR}/_tmp/ci_phaseA_deny.validate_exec.run_report.json" \
-  "${ROOT_DIR}/_tmp/ci_phaseA_deny.validate_exec.cli.json"
+  "_tmp/ci_golden_deny_state/${exec_rel}" \
+  "${ROOT_DIR}/_tmp/ci_golden_deny.validate_exec.run_report.json" \
+  "${ROOT_DIR}/_tmp/ci_golden_deny.validate_exec.cli.json"
 
 echo "ok: deny"
 
 echo "case: bad pack digest mismatch"
-rm -rf "${ROOT_DIR}/_tmp/ci_phaseA_bad_digest_state"
+rm -rf "${ROOT_DIR}/_tmp/ci_golden_bad_digest_state"
 run_x07lp \
-  "${ROOT_DIR}/_tmp/ci_phaseA_bad_digest.run_report.json" \
-  "${ROOT_DIR}/_tmp/ci_phaseA_bad_digest.cli.json" \
+  "${ROOT_DIR}/_tmp/ci_golden_bad_digest.run_report.json" \
+  "${ROOT_DIR}/_tmp/ci_golden_bad_digest.cli.json" \
   deploy accept \
   --pack-dir "${PACK_DIR}" \
   --pack-manifest app.pack.bad.json \
   --change "${CHANGE_ALLOW}" \
-  --state-dir _tmp/ci_phaseA_bad_digest_state \
+  --state-dir _tmp/ci_golden_bad_digest_state \
   --now-unix-ms "${NOW_UNIX_MS}" \
   --json
-check_cli_report_fields "${ROOT_DIR}/_tmp/ci_phaseA_bad_digest.cli.json" false 12 "" "LP_PACK_DIGEST_MISMATCH_FILE"
+check_cli_report_fields "${ROOT_DIR}/_tmp/ci_golden_bad_digest.cli.json" false 12 "" "LP_PACK_DIGEST_MISMATCH_FILE"
 echo "ok: bad digest"

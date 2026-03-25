@@ -1,6 +1,6 @@
 # Pre-production release readiness: issue log (OSS)
 
-Scope: `x07-platform` OSS lanes only (no `x07-platform-cloud`).
+Scope: `x07-platform` OSS lanes only (no hosted control plane).
 
 Format:
 - Keep entries short and factual.
@@ -42,12 +42,12 @@ Format:
 - **Fix:** `x07-wasm-backend` `crates/x07-wasm/src/workload/surface.rs` now aligns generated HTTP probes with the cell’s container port when `runtime_image` overrides are in effect (plus updated test expectations)
 - **Status:** committed: `x07-wasm-backend@ff787ca` (released via `v0.2.11`)
 
-#### Local deploy CI (Phase B): `deploy run` fails with `deploy_driver_empty_stdout` when a stale remote target is selected
+#### Local deploy CI (deploy loop): `deploy run` fails with `deploy_driver_empty_stdout` when a stale remote target is selected
 
-- **Where:** `./scripts/ci/check_all.sh` → `./scripts/ci/phaseB.sh`
-- **Symptom:** Phase B `deploy run` returned `LP_INTERNAL deploy_driver_empty_stdout`; direct `x07lp-driver run ...` printed a non-JSON error about a missing remote CA cert under `_tmp/ci_remote_oss/...`
-- **Root cause:** Phase B invoked `deploy run` without `--target`; when a non-local target was selected in `x07lp` config, the driver tried to load remote TLS material and exited before emitting JSON (the wrapper only validates driver stdout)
-- **Fix:** `scripts/ci/phaseB.sh` now injects `--target __local__` for deploy/incident/regress commands when not provided
+- **Where:** `./scripts/ci/check_all.sh` → `./scripts/ci/deploy_loop.sh`
+- **Symptom:** deploy loop `deploy run` returned `LP_INTERNAL deploy_driver_empty_stdout`; direct `x07lp-driver run ...` printed a non-JSON error about a missing remote CA cert under `_tmp/ci_remote_oss/...`
+- **Root cause:** deploy loop invoked `deploy run` without `--target`; when a non-local target was selected in `x07lp` config, the driver tried to load remote TLS material and exited before emitting JSON (the wrapper only validates driver stdout)
+- **Fix:** `scripts/ci/deploy_loop.sh` now injects `--target __local__` for deploy/incident/regress commands when not provided
 - **Status:** committed: `x07-platform@90f6291`
 
 #### Remote OSS lane: missing OTLP export mount helper
@@ -74,25 +74,25 @@ Format:
 - **Fix:** k8s advisory binding provider now treats secret-present bindings as `ready` for CI semantics; soak/chaos lanes seed only Secrets (no extra Services) so required bindings can become `ready` without interfering with stop teardown assertions
 - **Status:** committed: `x07-platform@90f6291`
 
-#### Phase A accept golden drift after probe fixes
+#### Baseline accept golden drift after probe fixes
 
-- **Where:** `scripts/ci/check_phaseA_golden.sh`
+- **Where:** `scripts/ci/check_golden.sh`
 - **Symptom:** golden fixtures drifted due to updated pack digest / verify report digest
 - **Root cause:** pack verification evidence digest changed after upstream pack/verify changes; fixtures were stale
-- **Fix:** updated `spec/fixtures/phaseA/golden/deploy_accept.*.json` to match current deterministic outputs
+- **Fix:** updated `spec/fixtures/baseline/golden/deploy_accept.*.json` to match current deterministic outputs
 - **Status:** committed: `x07-platform@90f6291`
 
-#### Phase C pause flow: `pause_and_rerun` timed out waiting for `pause_*` step
+#### Control-plane pause flow: `pause_and_rerun` timed out waiting for `pause_*` step
 
-- **Where:** `scripts/ci/phaseC.sh` (`pause_and_rerun` case)
+- **Where:** `scripts/ci/control_plane.sh` (`pause_and_rerun` case)
 - **Symptom:** `timed out waiting for active pause step` during `deploy run` background execution
 - **Root cause:** the first `pause_*` step only becomes visible after candidate runtime start + runtime probe; 20s was insufficient on slower machines
 - **Fix:** increased `wait_for_pause_step` timeout to 60s
 - **Status:** committed: `x07-platform@90f6291`
 
-#### Phase C UI smoke: `x07lp-driver ui-serve` leaked in the background
+#### Control-plane UI smoke: `x07lp-driver ui-serve` leaked in the background
 
-- **Where:** `scripts/ci/phaseC.sh` (`ui_smoke` case) and `scripts/ci/ui-screenshot-smoke.sh`
+- **Where:** `scripts/ci/control_plane.sh` (`ui_smoke` case) and `scripts/ci/ui-screenshot-smoke.sh`
 - **Symptom:** a `ui-serve` process stayed running after the gate completed, leaving the default UI port bound (for example `127.0.0.1:17090`) and breaking later screenshot steps
 - **Root cause:** the gate launched `ui-serve` in a background subshell and later killed the subshell PID, leaving the child `x07lp-driver` process alive
 - **Fix:** use `exec` inside the background subshell so the tracked PID is the `x07lp-driver` process

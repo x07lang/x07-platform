@@ -21,6 +21,13 @@ The repo is local-first. The same contracts and operator model are used for:
 
 It ships a dark-themed **Command Center** web UI, a full-featured **CLI** (`x07lp`), and an **MCP tool surface** so AI agents can consume the same deploy, incident, and release state programmatically.
 
+## Design docs
+
+- Scale classes: `docs/adr/adr-scale-classes.md`
+- Rollout state machine: `docs/adr/adr-rollout-state-machine.md`
+- Kubernetes traffic shifting: `docs/adr/adr-traffic-shifting.md`
+- Telemetry identity: `docs/observability_identity.md`
+
 ## What Is In This Repo
 
 - **Lifecycle engine** for accepted packs, deploy plans, executions, incidents, regressions, and control actions
@@ -117,10 +124,10 @@ cd x07-platform
 LP="./scripts/x07lp-driver"
 
 STATE_DIR="$PWD/_tmp/demo_state"
-CHANGE="$PWD/spec/fixtures/phaseA/change_request.min.json"
-PACK_DIR="$PWD/spec/fixtures/phaseA/pack_min"
-PLAN="$PWD/spec/fixtures/phaseB/promote/deploy.plan.json"
-METRICS_DIR="$PWD/spec/fixtures/phaseB/promote"
+CHANGE="$PWD/spec/fixtures/baseline/change_request.min.json"
+PACK_DIR="$PWD/spec/fixtures/baseline/pack_min"
+PLAN="$PWD/spec/fixtures/deploy_loop/promote/deploy.plan.json"
+METRICS_DIR="$PWD/spec/fixtures/deploy_loop/promote"
 
 $LP accept \
   --target __local__ \
@@ -161,14 +168,14 @@ Use `--target __local__` for local commands when you may also have a saved remot
 Generate richer state for the UI:
 
 ```bash
-./scripts/ci/phaseC.sh
-./scripts/x07lp-driver ui-serve --state-dir _tmp/ci_phaseC/promote_state --addr 127.0.0.1:17090
+./scripts/ci/control_plane.sh
+./scripts/x07lp-driver ui-serve --state-dir _tmp/ci_control_plane/promote_state --addr 127.0.0.1:17090
 
 ./scripts/ci/device-release.sh
 ./scripts/x07lp-driver ui-serve --state-dir _tmp/ci_device_release/state --addr 127.0.0.1:17091
 ```
 
-Phase C state covers app, deployment, incident, and regression flows. Device-release state covers staged store rollout and release controls.
+Control-plane state covers app, deployment, incident, and regression flows. Device-release state covers staged store rollout and release controls.
 
 ### Local K3s workload smoke
 
@@ -354,7 +361,7 @@ cd ../x07-platform
 LP="./scripts/x07lp-driver"
 
 STATE_DIR="$PWD/_tmp/crewops_local_state"
-CHANGE="$PWD/spec/fixtures/phaseA/change_request.min.json"
+CHANGE="$PWD/spec/fixtures/baseline/change_request.min.json"
 PACK_DIR="$PWD/../x07-crewops/dist/crewops_gate/pack.crewops_release"
 PLAN="$PWD/../x07-crewops/dist/crewops_gate/deploy.crewops_release/deploy.plan.json"
 METRICS_DIR="$PWD/../x07-crewops/build/crewops_gate/platform_metrics"
@@ -445,7 +452,7 @@ $LP target-use --name oss-wasmcloud --json
 $LP accept \
   --target oss-wasmcloud \
   --pack-manifest "$PWD/../x07-crewops/dist/crewops_gate/pack.crewops_release/app.pack.json" \
-  --change "$PWD/spec/fixtures/phaseA/change_request.min.json" \
+  --change "$PWD/spec/fixtures/baseline/change_request.min.json" \
   --json >"$PWD/_tmp/crewops.remote.accept.json"
 
 REMOTE_RUN_ID="$(python3 -c 'import json,sys; doc=json.load(open(sys.argv[1])); print(doc["result"].get("run_id") or doc["result"].get("pipeline_run_id") or "")' "$PWD/_tmp/crewops.remote.accept.json")"
@@ -633,7 +640,7 @@ x07 pkg lock --project x07.json --check
 
 Focused gates:
 
-- `./scripts/ci/phaseC.sh` - app, incident, regression, and control-loop coverage
+- `./scripts/ci/control_plane.sh` - app, incident, regression, and control-loop coverage
 - `./scripts/ci/device-release.sh` - device-release creation, execution, and control coverage
 - `./scripts/ci/remote-oss.sh` - target onboarding, remote deploy, query, event, and log coverage
 

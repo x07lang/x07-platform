@@ -16,14 +16,14 @@ else
 fi
 
 NOW_UNIX_MS="1762752000000"
-PACK_DIR="spec/fixtures/phaseA/pack_min"
+PACK_DIR="spec/fixtures/baseline/pack_min"
 PACK_MANIFEST="app.pack.json"
-PHASEB_CHANGE="spec/fixtures/phaseB/common/change_request.app_min.json"
-PHASEC_TMP="${ROOT_DIR}/_tmp/ci_phaseC"
+DEPLOY_LOOP_CHANGE="spec/fixtures/deploy_loop/common/change_request.app_min.json"
+CONTROL_PLANE_TMP="${ROOT_DIR}/_tmp/ci_control_plane"
 UI_ADDR="127.0.0.1:17090"
 UI_BASE_URL="http://${UI_ADDR}"
 
-mkdir -p "$PHASEC_TMP"
+mkdir -p "$CONTROL_PLANE_TMP"
 
 PIDS=()
 cleanup() {
@@ -358,7 +358,7 @@ incident_materialized_dir() {
   printf '%s/%s/%s/%s\n' "$ROOT_DIR" "$state_dir_rel" "incidents/${app_id}/${env_name}" "$incident_id"
 }
 
-assert_phasec_sqlite_schema() {
+assert_control_plane_sqlite_schema() {
   local db_path="$1"
   "$PYTHON" - "$db_path" <<'PY'
 import pathlib
@@ -399,7 +399,7 @@ if missing:
 PY
 }
 
-assert_phasec_sqlite_rows() {
+assert_control_plane_sqlite_rows() {
   local db_path="$1"
   local app_id="$2"
   local env_name="$3"
@@ -476,7 +476,7 @@ PY
 prepare_accepted_state() {
   local case_name="$1"
   local state_dir_rel="$2"
-  local out_dir="$PHASEC_TMP/$case_name"
+  local out_dir="$CONTROL_PLANE_TMP/$case_name"
   mkdir -p "$out_dir"
   rm -rf "$ROOT_DIR/$state_dir_rel"
   mkdir -p "$ROOT_DIR/$state_dir_rel"
@@ -487,7 +487,7 @@ prepare_accepted_state() {
     deploy accept \
     --pack-dir "$PACK_DIR" \
     --pack-manifest "$PACK_MANIFEST" \
-    --change "$PHASEB_CHANGE" \
+    --change "$DEPLOY_LOOP_CHANGE" \
     --state-dir "$state_dir_rel" \
     --now-unix-ms "$NOW_UNIX_MS" \
     --json
@@ -515,8 +515,8 @@ prepare_promoted_execution() {
     "$out_dir/deploy_run.cli.json" \
     deploy run \
     --deployment-id "$exec_id" \
-    --plan spec/fixtures/phaseB/promote/deploy.plan.json \
-    --metrics-dir spec/fixtures/phaseB/promote \
+    --plan spec/fixtures/deploy_loop/promote/deploy.plan.json \
+    --metrics-dir spec/fixtures/deploy_loop/promote \
     --pause-scale 0 \
     --state-dir "$state_dir_rel" \
     --now-unix-ms "$NOW_UNIX_MS" \
@@ -537,8 +537,8 @@ prepare_rollback_execution() {
     "$out_dir/deploy_run.cli.json" \
     deploy run \
     --deployment-id "$exec_id" \
-    --plan spec/fixtures/phaseB/rollback/deploy.plan.json \
-    --metrics-dir spec/fixtures/phaseB/rollback \
+    --plan spec/fixtures/deploy_loop/rollback/deploy.plan.json \
+    --metrics-dir spec/fixtures/deploy_loop/rollback \
     --pause-scale 0 \
     --state-dir "$state_dir_rel" \
     --now-unix-ms "$NOW_UNIX_MS" \
@@ -549,14 +549,14 @@ prepare_rollback_execution() {
 }
 
 echo "case: baseline promote"
-PROMOTE_STATE_REL="_tmp/ci_phaseC/promote_state"
-PROMOTE_DIR="$PHASEC_TMP/promote"
+PROMOTE_STATE_REL="_tmp/ci_control_plane/promote_state"
+PROMOTE_DIR="$CONTROL_PLANE_TMP/promote"
 mkdir -p "$PROMOTE_DIR"
 PROMOTE_EXEC_ID="$(prepare_promoted_execution "$PROMOTE_STATE_REL" "$PROMOTE_DIR")"
 echo "ok: baseline promote"
 
 echo "case: incident_capture_5xx"
-INCIDENT_5XX_DIR="$PHASEC_TMP/incident_capture_5xx"
+INCIDENT_5XX_DIR="$CONTROL_PLANE_TMP/incident_capture_5xx"
 mkdir -p "$INCIDENT_5XX_DIR"
 run_x07lp \
   "$INCIDENT_5XX_DIR/incident_capture.run_report.json" \
@@ -564,9 +564,9 @@ run_x07lp \
   incident capture \
   --deployment-id "$PROMOTE_EXEC_ID" \
   --reason fixture_http_5xx \
-  --request spec/fixtures/phaseC/common/request.envelope.json \
-  --response spec/fixtures/phaseC/common/response.500.envelope.json \
-  --trace spec/fixtures/phaseC/common/trace.json \
+  --request spec/fixtures/control_plane/common/request.envelope.json \
+  --response spec/fixtures/control_plane/common/response.500.envelope.json \
+  --trace spec/fixtures/control_plane/common/trace.json \
   --classification http_5xx \
   --source router \
   --state-dir "$PROMOTE_STATE_REL" \
@@ -574,7 +574,7 @@ run_x07lp \
   --json
 validate_cli_report "$INCIDENT_5XX_DIR/incident_capture.cli.json" "$INCIDENT_5XX_DIR"
 validate_report_result_schema "contracts/spec/schemas/lp.incident.query.result.schema.json" "$INCIDENT_5XX_DIR/incident_capture.cli.json" "$INCIDENT_5XX_DIR" "incident_capture"
-assert_report_matches_template "$INCIDENT_5XX_DIR/incident_capture.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/incident_capture_5xx/expected/incident.capture.report.json"
+assert_report_matches_template "$INCIDENT_5XX_DIR/incident_capture.cli.json" "$ROOT_DIR/spec/fixtures/control_plane/incident_capture_5xx/expected/incident.capture.report.json"
 INCIDENT_5XX_ID="$(extract_report_field "$INCIDENT_5XX_DIR/incident_capture.cli.json" result.incident_id)"
 INCIDENT_5XX_DIR_PATH="$ROOT_DIR/$PROMOTE_STATE_REL/incidents/app_min/staging/${INCIDENT_5XX_ID}"
 assert_file_exists "$INCIDENT_5XX_DIR_PATH/incident.bundle.json"
@@ -592,7 +592,7 @@ check_schema_validate_ok \
 echo "ok: incident_capture_5xx"
 
 echo "case: incident_query"
-INCIDENT_QUERY_DIR="$PHASEC_TMP/incident_query"
+INCIDENT_QUERY_DIR="$CONTROL_PLANE_TMP/incident_query"
 mkdir -p "$INCIDENT_QUERY_DIR"
 run_x07lp \
   "$INCIDENT_QUERY_DIR/incident_list.run_report.json" \
@@ -605,7 +605,7 @@ run_x07lp \
   --json
 validate_cli_report "$INCIDENT_QUERY_DIR/incident_list.cli.json" "$INCIDENT_QUERY_DIR"
 validate_report_result_schema "contracts/spec/schemas/lp.incident.query.result.schema.json" "$INCIDENT_QUERY_DIR/incident_list.cli.json" "$INCIDENT_QUERY_DIR" "incident_list"
-assert_report_matches_template "$INCIDENT_QUERY_DIR/incident_list.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/incident_capture_5xx/expected/incident.list.report.json"
+assert_report_matches_template "$INCIDENT_QUERY_DIR/incident_list.cli.json" "$ROOT_DIR/spec/fixtures/control_plane/incident_capture_5xx/expected/incident.list.report.json"
 
 run_x07lp \
   "$INCIDENT_QUERY_DIR/incident_get.run_report.json" \
@@ -616,12 +616,12 @@ run_x07lp \
   --json
 validate_cli_report "$INCIDENT_QUERY_DIR/incident_get.cli.json" "$INCIDENT_QUERY_DIR"
 validate_report_result_schema "contracts/spec/schemas/lp.incident.query.result.schema.json" "$INCIDENT_QUERY_DIR/incident_get.cli.json" "$INCIDENT_QUERY_DIR" "incident_get"
-assert_report_matches_template "$INCIDENT_QUERY_DIR/incident_get.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/incident_capture_5xx/expected/incident.get.report.json"
+assert_report_matches_template "$INCIDENT_QUERY_DIR/incident_get.cli.json" "$ROOT_DIR/spec/fixtures/control_plane/incident_capture_5xx/expected/incident.get.report.json"
 echo "ok: incident_query"
 
 echo "case: incident_capture_slo_rollback"
-ROLLBACK_STATE_REL="_tmp/ci_phaseC/rollback_state"
-ROLLBACK_DIR="$PHASEC_TMP/incident_capture_slo_rollback"
+ROLLBACK_STATE_REL="_tmp/ci_control_plane/rollback_state"
+ROLLBACK_DIR="$CONTROL_PLANE_TMP/incident_capture_slo_rollback"
 mkdir -p "$ROLLBACK_DIR"
 ROLLBACK_EXEC_ID="$(prepare_rollback_execution "$ROLLBACK_STATE_REL" "$ROLLBACK_DIR")"
 run_x07lp \
@@ -634,30 +634,30 @@ run_x07lp \
   --json
 validate_cli_report "$ROLLBACK_DIR/incident_list.cli.json" "$ROLLBACK_DIR"
 validate_report_result_schema "contracts/spec/schemas/lp.incident.query.result.schema.json" "$ROLLBACK_DIR/incident_list.cli.json" "$ROLLBACK_DIR" "incident_list"
-assert_report_matches_template "$ROLLBACK_DIR/incident_list.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/incident_capture_slo_rollback/expected/incident.list.report.json"
+assert_report_matches_template "$ROLLBACK_DIR/incident_list.cli.json" "$ROOT_DIR/spec/fixtures/control_plane/incident_capture_slo_rollback/expected/incident.list.report.json"
 echo "ok: incident_capture_slo_rollback"
 
 echo "case: regression_from_incident"
-REGRESSION_DIR="$PHASEC_TMP/regression_from_incident"
+REGRESSION_DIR="$CONTROL_PLANE_TMP/regression_from_incident"
 mkdir -p "$REGRESSION_DIR"
 run_x07lp \
   "$REGRESSION_DIR/regress.run_report.json" \
   "$REGRESSION_DIR/regress.cli.json" \
   regress from-incident \
   --incident-id "$INCIDENT_5XX_ID" \
-  --name phasec_http_5xx \
-  --out-dir _tmp/ci_phaseC/generated_regression \
+  --name control_plane_http_5xx \
+  --out-dir _tmp/ci_control_plane/generated_regression \
   --state-dir "$PROMOTE_STATE_REL" \
   --now-unix-ms 1762752010000 \
   --json
 validate_cli_report "$REGRESSION_DIR/regress.cli.json" "$REGRESSION_DIR"
 validate_report_result_schema "contracts/spec/schemas/lp.regression.run.result.schema.json" "$REGRESSION_DIR/regress.cli.json" "$REGRESSION_DIR" "regress"
-assert_report_matches_template "$REGRESSION_DIR/regress.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/regression_from_incident/expected/regress.from_incident.report.json"
+assert_report_matches_template "$REGRESSION_DIR/regress.cli.json" "$ROOT_DIR/spec/fixtures/control_plane/regression_from_incident/expected/regress.from_incident.report.json"
 REGRESSION_ID="$(extract_report_field "$REGRESSION_DIR/regress.cli.json" result.regression_id)"
 echo "ok: regression_from_incident"
 
 echo "case: app_list"
-APP_LIST_DIR="$PHASEC_TMP/app_list"
+APP_LIST_DIR="$CONTROL_PLANE_TMP/app_list"
 mkdir -p "$APP_LIST_DIR"
 run_x07lp \
   "$APP_LIST_DIR/app_list.run_report.json" \
@@ -668,12 +668,12 @@ run_x07lp \
   --json
 validate_cli_report "$APP_LIST_DIR/app_list.cli.json" "$APP_LIST_DIR"
 validate_report_result_schema "contracts/spec/schemas/lp.app.list.result.schema.json" "$APP_LIST_DIR/app_list.cli.json" "$APP_LIST_DIR" "app_list"
-assert_report_matches_template "$APP_LIST_DIR/app_list.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/app_list/expected/app.list.report.json"
+assert_report_matches_template "$APP_LIST_DIR/app_list.cli.json" "$ROOT_DIR/spec/fixtures/control_plane/app_list/expected/app.list.report.json"
 echo "ok: app_list"
 
 echo "case: pause_and_rerun"
-PAUSE_STATE_REL="_tmp/ci_phaseC/pause_state"
-PAUSE_DIR="$PHASEC_TMP/pause_and_rerun"
+PAUSE_STATE_REL="_tmp/ci_control_plane/pause_state"
+PAUSE_DIR="$CONTROL_PLANE_TMP/pause_and_rerun"
 mkdir -p "$PAUSE_DIR"
 PAUSE_EXEC_ID="$(prepare_accepted_state pause_and_rerun "$PAUSE_STATE_REL")"
 (
@@ -682,8 +682,8 @@ PAUSE_EXEC_ID="$(prepare_accepted_state pause_and_rerun "$PAUSE_STATE_REL")"
     "$PAUSE_DIR/deploy_run.cli.json" \
     deploy run \
     --deployment-id "$PAUSE_EXEC_ID" \
-    --plan spec/fixtures/phaseC/pause_and_rerun/deploy.plan.json \
-    --metrics-dir spec/fixtures/phaseB/stop_during_pause \
+    --plan spec/fixtures/control_plane/pause_and_rerun/deploy.plan.json \
+    --metrics-dir spec/fixtures/deploy_loop/stop_during_pause \
     --pause-scale 0.2 \
     --state-dir "$PAUSE_STATE_REL" \
     --now-unix-ms 1762752015000 \
@@ -704,7 +704,7 @@ run_x07lp \
   --json
 validate_cli_report "$PAUSE_DIR/deploy_pause.cli.json" "$PAUSE_DIR"
 validate_report_result_schema "contracts/spec/schemas/lp.control.action.result.schema.json" "$PAUSE_DIR/deploy_pause.cli.json" "$PAUSE_DIR" "deploy_pause"
-assert_report_matches_template "$PAUSE_DIR/deploy_pause.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/pause_and_rerun/expected/deploy.pause.report.json"
+assert_report_matches_template "$PAUSE_DIR/deploy_pause.cli.json" "$ROOT_DIR/spec/fixtures/control_plane/pause_and_rerun/expected/deploy.pause.report.json"
 wait_for_control_state "$ROOT_DIR/$PAUSE_STATE_REL/deploy/${PAUSE_EXEC_ID}.json" paused 10
 wait "$PAUSE_RUN_PID" || true
 PIDS=("${PIDS[@]/$PAUSE_RUN_PID}")
@@ -721,13 +721,13 @@ run_x07lp \
   --json
 validate_cli_report "$PAUSE_DIR/deploy_rerun.cli.json" "$PAUSE_DIR"
 validate_report_result_schema "contracts/spec/schemas/lp.control.action.result.schema.json" "$PAUSE_DIR/deploy_rerun.cli.json" "$PAUSE_DIR" "deploy_rerun"
-assert_report_matches_template "$PAUSE_DIR/deploy_rerun.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/pause_and_rerun/expected/deploy.rerun.report.json"
+assert_report_matches_template "$PAUSE_DIR/deploy_rerun.cli.json" "$ROOT_DIR/spec/fixtures/control_plane/pause_and_rerun/expected/deploy.rerun.report.json"
 RERUN_EXEC_ID="$(extract_report_field "$PAUSE_DIR/deploy_rerun.cli.json" result.new_execution_id)"
 assert_file_exists "$ROOT_DIR/$PAUSE_STATE_REL/deploy/${RERUN_EXEC_ID}.json"
 echo "ok: pause_and_rerun"
 
 echo "case: kill_switch"
-KILL_DIR="$PHASEC_TMP/kill_switch"
+KILL_DIR="$CONTROL_PLANE_TMP/kill_switch"
 mkdir -p "$KILL_DIR"
 run_x07lp \
   "$KILL_DIR/app_kill.run_report.json" \
@@ -741,7 +741,7 @@ run_x07lp \
   --json
 validate_cli_report "$KILL_DIR/app_kill.cli.json" "$KILL_DIR"
 validate_report_result_schema "contracts/spec/schemas/lp.control.action.result.schema.json" "$KILL_DIR/app_kill.cli.json" "$KILL_DIR" "app_kill"
-assert_report_matches_template "$KILL_DIR/app_kill.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/kill_switch/expected/app.kill.report.json"
+assert_report_matches_template "$KILL_DIR/app_kill.cli.json" "$ROOT_DIR/spec/fixtures/control_plane/kill_switch/expected/app.kill.report.json"
 
 run_x07lp \
   "$KILL_DIR/app_unkill.run_report.json" \
@@ -755,7 +755,7 @@ run_x07lp \
   --json
 validate_cli_report "$KILL_DIR/app_unkill.cli.json" "$KILL_DIR"
 validate_report_result_schema "contracts/spec/schemas/lp.control.action.result.schema.json" "$KILL_DIR/app_unkill.cli.json" "$KILL_DIR" "app_unkill"
-assert_report_matches_template "$KILL_DIR/app_unkill.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/kill_switch/expected/app.unkill.report.json"
+assert_report_matches_template "$KILL_DIR/app_unkill.cli.json" "$ROOT_DIR/spec/fixtures/control_plane/kill_switch/expected/app.unkill.report.json"
 
 run_x07lp \
   "$KILL_DIR/platform_kill.run_report.json" \
@@ -767,7 +767,7 @@ run_x07lp \
   --json
 validate_cli_report "$KILL_DIR/platform_kill.cli.json" "$KILL_DIR"
 validate_report_result_schema "contracts/spec/schemas/lp.control.action.result.schema.json" "$KILL_DIR/platform_kill.cli.json" "$KILL_DIR" "platform_kill"
-assert_report_matches_template "$KILL_DIR/platform_kill.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/kill_switch/expected/platform.kill.report.json"
+assert_report_matches_template "$KILL_DIR/platform_kill.cli.json" "$ROOT_DIR/spec/fixtures/control_plane/kill_switch/expected/platform.kill.report.json"
 
 run_x07lp \
   "$KILL_DIR/platform_unkill.run_report.json" \
@@ -779,11 +779,11 @@ run_x07lp \
   --json
 validate_cli_report "$KILL_DIR/platform_unkill.cli.json" "$KILL_DIR"
 validate_report_result_schema "contracts/spec/schemas/lp.control.action.result.schema.json" "$KILL_DIR/platform_unkill.cli.json" "$KILL_DIR" "platform_unkill"
-assert_report_matches_template "$KILL_DIR/platform_unkill.cli.json" "$ROOT_DIR/spec/fixtures/phaseC/kill_switch/expected/platform.unkill.report.json"
+assert_report_matches_template "$KILL_DIR/platform_unkill.cli.json" "$ROOT_DIR/spec/fixtures/control_plane/kill_switch/expected/platform.unkill.report.json"
 echo "ok: kill_switch"
 
 echo "case: ui_smoke"
-UI_DIR="$PHASEC_TMP/ui"
+UI_DIR="$CONTROL_PLANE_TMP/ui"
 mkdir -p "$UI_DIR"
 (
   cd "$ROOT_DIR"
@@ -794,20 +794,20 @@ PIDS+=("$UI_PID")
 wait_for_http "$UI_BASE_URL/api/apps" 15
 
 http_get_json "$UI_BASE_URL/api/apps" "$UI_DIR/api.apps.json"
-assert_report_matches_template "$UI_DIR/api.apps.json" "$ROOT_DIR/spec/fixtures/phaseC/ui/expected/api.apps.report.json"
+assert_report_matches_template "$UI_DIR/api.apps.json" "$ROOT_DIR/spec/fixtures/control_plane/ui/expected/api.apps.report.json"
 
 http_get_json "$UI_BASE_URL/api/incidents/${INCIDENT_5XX_ID}" "$UI_DIR/api.incident.get.json"
-assert_report_matches_template "$UI_DIR/api.incident.get.json" "$ROOT_DIR/spec/fixtures/phaseC/ui/expected/api.incident.get.report.json"
+assert_report_matches_template "$UI_DIR/api.incident.get.json" "$ROOT_DIR/spec/fixtures/control_plane/ui/expected/api.incident.get.report.json"
 
 kill "$UI_PID" >/dev/null 2>&1 || true
 wait "$UI_PID" >/dev/null 2>&1 || true
 PIDS=("${PIDS[@]/$UI_PID}")
 echo "ok: ui_smoke"
 
-echo "case: phasec sqlite"
-PHASEC_DB="$ROOT_DIR/$PROMOTE_STATE_REL/index/phasec.sqlite"
-assert_phasec_sqlite_schema "$PHASEC_DB"
-assert_phasec_sqlite_rows "$PHASEC_DB" app_min staging "$INCIDENT_5XX_ID" "$REGRESSION_ID"
-echo "ok: phasec sqlite"
+echo "case: control_plane sqlite"
+CONTROL_PLANE_DB="$ROOT_DIR/$PROMOTE_STATE_REL/index/control_plane.sqlite"
+assert_control_plane_sqlite_schema "$CONTROL_PLANE_DB"
+assert_control_plane_sqlite_rows "$CONTROL_PLANE_DB" app_min staging "$INCIDENT_5XX_ID" "$REGRESSION_ID"
+echo "ok: control_plane sqlite"
 
-echo "ok: phaseC"
+echo "ok: control_plane"

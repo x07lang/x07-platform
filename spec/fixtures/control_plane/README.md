@@ -1,6 +1,6 @@
-# Phase C fixture set
+# Control-plane fixture set
 
-This fixture set is the first-pass CI/golden surface for the Phase C additions:
+This fixture set is the first-pass CI/golden surface for the control-plane additions:
 
 - incident capture (`incident capture`, `incident list`, `incident get`)
 - regression generation (`regress from-incident`)
@@ -9,4 +9,4 @@ This fixture set is the first-pass CI/golden surface for the Phase C additions:
 - UI/API smoke (`x07lp-driver ui-serve` serving `/api/apps` and `/api/incidents/:incident_id`)
 
 Templates under `expected/` use `__ANY__` placeholders and are meant for the wildcard matcher
-already used by `scripts/ci/phaseB.sh`.
+already used by `scripts/ci/deploy_loop.sh`.

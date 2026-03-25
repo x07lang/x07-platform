@@ -1,9 +1,9 @@
 {
   "deployment_id": "__ANY__",
   "json": true,
-  "metrics_dir": "spec/fixtures/phaseB/rollback",
+  "metrics_dir": "spec/fixtures/deploy_loop/rollback",
   "now_unix_ms": "1762147200000",
   "pause_scale": 0,
-  "plan": "spec/fixtures/phaseB/rollback/deploy.plan.json",
+  "plan": "spec/fixtures/deploy_loop/rollback/deploy.plan.json",
   "state_dir": "__ANY__"
 }

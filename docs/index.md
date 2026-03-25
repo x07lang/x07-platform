@@ -33,7 +33,7 @@ Current surface:
 - Additive target-profile kinds: `oss_remote`, `hosted`, `k8s`, and `wasmcloud`
 - Public draft schemas for `lp.workload.*`, `lp.topology.preview.result@0.1.0`, `lp.binding.*`, `lp.scale.profile@0.1.0`, and `lp.release.*`
 - MCP router/worker surface under `gateway/mcp/`
-- Historical deploy compatibility note for the preserved `docs/phaseB.md` path
+- Deploy loop compatibility note in `docs/deploy_loop_compatibility.md`
 - CI gates for accept, local deploy execution, query, and MCP coverage
 
 For an end-to-end check, run `./scripts/ci/check_all.sh`.

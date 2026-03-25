@@ -86,10 +86,10 @@ REMOTE_SECRET_STORE_PATH="${TMP_DIR}/remote-secret-store.enc.json"
 REMOTE_SECRET_MASTER_KEY_PATH="${TMP_DIR}/remote-secret-store.key"
 BAD_SECRET_MASTER_KEY_PATH="${TMP_DIR}/remote-secret-store.bad.key"
 
-PACK_FIXTURE="spec/fixtures/phaseA/pack_min/app.pack.json"
+PACK_FIXTURE="spec/fixtures/baseline/pack_min/app.pack.json"
 ROLLBACK_PACK_FIXTURE="spec/fixtures/remote-oss/common/pack_app_min_spin/app.pack.json"
-PACK_DIGEST_MISMATCH_FIXTURE="spec/fixtures/phaseA/pack_min/app.pack.bad.json"
-CHANGE_FIXTURE="spec/fixtures/phaseB/common/change_request.app_min.json"
+PACK_DIGEST_MISMATCH_FIXTURE="spec/fixtures/baseline/pack_min/app.pack.bad.json"
+CHANGE_FIXTURE="spec/fixtures/deploy_loop/common/change_request.app_min.json"
 REMOTE_FIXTURE_INDEX="spec/fixtures/remote-oss/fixture_index.json"
 
 rm -rf "$TMP_DIR"
@@ -1065,9 +1065,9 @@ done
 run_x07lp "${TMP_DIR}/remote_incident_capture.capture.run_report.json" "${TMP_DIR}/remote_incident_capture.capture.cli.json" \
   incident capture --target "$TARGET_NAME" --deployment "$PROMOTE_EXEC_ID" --reason "ci capture" \
   --classification http_5xx --source router \
-  --request spec/fixtures/phaseC/common/request.envelope.json \
-  --response spec/fixtures/phaseC/common/response.500.envelope.json \
-  --trace spec/fixtures/phaseC/common/trace.json --json
+  --request spec/fixtures/control_plane/common/request.envelope.json \
+  --response spec/fixtures/control_plane/common/response.500.envelope.json \
+  --trace spec/fixtures/control_plane/common/trace.json --json
 assert_report_matches_template \
   "${TMP_DIR}/remote_incident_capture.capture.cli.json" \
   "${ROOT_DIR}/spec/fixtures/remote-oss/remote_incident_capture/expected/incident.capture.report.json"

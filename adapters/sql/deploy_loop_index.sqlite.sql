@@ -1,4 +1,4 @@
--- Phase B derived decision index (SQLite)
+-- Deploy loop derived decision index (SQLite)
 -- Source of truth remains the content-addressed store under state_dir.
 -- This database is rebuildable derived state for query acceleration only.
 
@@ -13,9 +13,9 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 
 INSERT OR REPLACE INTO meta (k, v) VALUES
-  ('schema_version', 'lp.sqlite.phaseb_index@0.1.0'),
+  ('schema_version', 'lp.sqlite.deploy_loop_index@0.1.0'),
   ('owner', 'x07-platform'),
-  ('purpose', 'phaseb_decision_trail_query_index');
+  ('purpose', 'deploy_loop_decision_trail_query_index');
 
 CREATE TABLE IF NOT EXISTS executions (
   exec_id TEXT PRIMARY KEY,

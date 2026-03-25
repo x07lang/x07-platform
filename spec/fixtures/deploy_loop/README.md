@@ -1,6 +1,6 @@
-# Phase B fixtures
+# Deploy loop fixtures
 
-This fixture set drives the Phase B CI gate for deterministic local progressive delivery.
+This fixture set drives the deploy-loop CI gate for deterministic local progressive delivery.
 
 Required scenarios:
 
