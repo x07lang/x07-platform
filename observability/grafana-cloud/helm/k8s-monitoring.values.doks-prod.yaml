@@ -1,0 +1,4 @@
+# grafana/k8s-monitoring values (DOKS production).
+
+cluster:
+  name: x07-doks-prod

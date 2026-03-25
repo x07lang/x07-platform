@@ -1,0 +1,57 @@
+# grafana/k8s-monitoring values (common baseline).
+#
+# Notes:
+# - This file intentionally does not include any secrets.
+# - Inject the Grafana Cloud OTLP url/credentials at deploy time using `--set`.
+# - The in-cluster OTLP receiver is exposed on 4317/4318 via the `alloy-receiver` Service.
+
+cluster:
+  name: ""
+
+destinations:
+  - name: grafanaCloudOtlp
+    type: otlp
+    url: ""
+    auth:
+      type: basic
+      username: ""
+      password: ""
+    metrics:
+      enabled: true
+    logs:
+      enabled: true
+    traces:
+      enabled: true
+
+clusterMetrics:
+  enabled: true
+
+clusterEvents:
+  enabled: true
+
+podLogs:
+  enabled: true
+
+applicationObservability:
+  enabled: true
+  receivers:
+    otlp:
+      grpc:
+        enabled: true
+        port: 4317
+      http:
+        enabled: true
+        port: 4318
+
+alloy-receiver:
+  enabled: true
+  alloy:
+    extraPorts:
+      - name: otlp-grpc
+        port: 4317
+        targetPort: 4317
+        protocol: TCP
+      - name: otlp-http
+        port: 4318
+        targetPort: 4318
+        protocol: TCP
