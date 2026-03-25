@@ -366,6 +366,7 @@ fn command_run(args: WorkloadRunArgs) -> Result<Value> {
         &workload_id,
         &public_base_url,
         &cells,
+        accepted.get("binding_requirements").unwrap_or(&Value::Null),
     )?;
     for path in &manifest_paths {
         kubectl_apply_path(&target_profile, path)?;
@@ -1276,6 +1277,7 @@ fn write_k8s_manifests(
     workload_id: &str,
     public_base_url: &str,
     cells: &[K8sCellDeployment],
+    binding_requirements: &Value,
 ) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
     let ingress_class_name = std::env::var("X07LP_K8S_INGRESS_CLASS")
@@ -1325,7 +1327,7 @@ fn write_k8s_manifests(
                                 "annotations": workload_cell_annotations(cell, public_base_url),
                             },
                             "spec": {
-                                "containers": [container_doc(cell)?]
+                                "containers": [container_doc(cell, binding_requirements)?]
                             }
                         }
                     }
@@ -1458,7 +1460,7 @@ fn write_k8s_manifests(
                                     },
                                     "spec": {
                                         "restartPolicy": "OnFailure",
-                                        "containers": [container_doc(cell)?]
+                                        "containers": [container_doc(cell, binding_requirements)?]
                                     }
                                 }
                             }
@@ -1558,6 +1560,17 @@ fn initial_replicas(cell: &K8sCellDeployment) -> u64 {
 }
 
 fn deployment_strategy_doc(cell: &K8sCellDeployment) -> Value {
+    fn int_or_percent(value: &str) -> Value {
+        let trimmed = value.trim();
+        if trimmed.ends_with('%') {
+            json!(trimmed)
+        } else if let Ok(parsed) = trimmed.parse::<u32>() {
+            json!(parsed)
+        } else {
+            json!(trimmed)
+        }
+    }
+
     let Some(rollout) = cell.rollout.as_ref() else {
         return json!({"type": "RollingUpdate"});
     };
@@ -1572,15 +1585,18 @@ fn deployment_strategy_doc(cell: &K8sCellDeployment) -> Value {
                 doc.get_mut("rollingUpdate").and_then(Value::as_object_mut)
             {
                 if let Some(max_unavailable) = rollout.max_unavailable.as_deref() {
-                    rolling_update.insert("maxUnavailable".to_string(), json!(max_unavailable));
+                    rolling_update.insert(
+                        "maxUnavailable".to_string(),
+                        int_or_percent(max_unavailable),
+                    );
                 }
                 if let Some(max_surge) = rollout.max_surge.as_deref() {
-                    rolling_update.insert("maxSurge".to_string(), json!(max_surge));
+                    rolling_update.insert("maxSurge".to_string(), int_or_percent(max_surge));
                 }
                 if rollout.strategy == "canary-lite"
                     && !rolling_update.contains_key("maxUnavailable")
                 {
-                    rolling_update.insert("maxUnavailable".to_string(), json!("0"));
+                    rolling_update.insert("maxUnavailable".to_string(), json!(0));
                 }
             }
             doc
@@ -1627,13 +1643,17 @@ fn hpa_doc(namespace: &str, public_base_url: &str, cell: &K8sCellDeployment) -> 
     }))
 }
 
-fn container_doc(cell: &K8sCellDeployment) -> Result<Value> {
+fn container_doc(cell: &K8sCellDeployment, binding_requirements: &Value) -> Result<Value> {
     let mut container = json!({
         "name": sanitize_k8s_name(&cell.cell_key),
         "image": cell.image,
         "imagePullPolicy": "IfNotPresent",
         "env": workload_cell_env(cell),
     });
+    let env_from = workload_cell_env_from(cell, binding_requirements);
+    if !env_from.is_empty() {
+        container["envFrom"] = json!(env_from);
+    }
     if let Some(container_port) = cell.container_port {
         container["ports"] = json!([{
             "name": "http",
@@ -1650,6 +1670,65 @@ fn container_doc(cell: &K8sCellDeployment) -> Result<Value> {
         container["startupProbe"] = startup;
     }
     Ok(container)
+}
+
+fn workload_cell_env_from(cell: &K8sCellDeployment, binding_requirements: &Value) -> Vec<Value> {
+    let mut required_by_name: HashMap<String, bool> = HashMap::new();
+    if let Some(bindings) = binding_requirements
+        .get("bindings")
+        .and_then(Value::as_array)
+    {
+        for binding in bindings {
+            let Some(name) = binding.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let required = binding
+                .get("required")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            required_by_name.insert(name.to_string(), required);
+        }
+    }
+
+    let mut env_from = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for binding_ref in &cell.binding_refs {
+        if !seen.insert(binding_ref.clone()) {
+            continue;
+        }
+        let required = required_by_name.get(binding_ref).copied().unwrap_or(true);
+        env_from.push(json!({
+            "prefix": format!("X07_BINDING_{}_", sanitize_env_key(binding_ref)),
+            "secretRef": {
+                "name": sanitize_k8s_name(binding_ref),
+                "optional": !required,
+            }
+        }));
+    }
+    env_from
+}
+
+fn sanitize_env_key(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut last_underscore = false;
+    for ch in value.chars() {
+        let upper = ch.to_ascii_uppercase();
+        if upper.is_ascii_alphanumeric() {
+            out.push(upper);
+            last_underscore = false;
+        } else if !last_underscore {
+            out.push('_');
+            last_underscore = true;
+        }
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "BINDING".to_string()
+    } else {
+        out
+    }
 }
 
 fn workload_cell_env(cell: &K8sCellDeployment) -> Vec<Value> {
