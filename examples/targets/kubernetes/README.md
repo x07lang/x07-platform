@@ -17,6 +17,19 @@ Import the profile with:
 ./scripts/x07lp-driver target add --profile examples/targets/kubernetes/target.example.json
 ```
 
+## Telemetry identity
+
+When `x07lp workload run` renders Kubernetes resources, it injects stable identity labels for correlation:
+
+- `lp.environment_id` (from `lp.target.profile@0.1.0` `default_env` if present; otherwise the namespace)
+- `lp.deployment_id` (the generated workload deployment id)
+- `lp.service_id` (the workload id)
+
+Workload containers receive matching env vars via the Downward API:
+
+- `LP_ENVIRONMENT_ID`, `LP_DEPLOYMENT_ID`, `LP_SERVICE_ID`
+- `OTEL_RESOURCE_ATTRIBUTES` (includes `service.name`, `deployment.environment`, and the `lp.*` ids)
+
 ## Local K3s path
 
 For local development on macOS or Linux with Docker, use K3s through `k3d` and expose the ingress loadbalancer on a host port:

@@ -308,6 +308,9 @@ fn command_run(args: WorkloadRunArgs) -> Result<Value> {
     )?;
     let namespace = get_str(&target_profile, &["default_namespace"])
         .ok_or_else(|| anyhow!("k8s target missing default_namespace"))?;
+    let environment_id = get_str(&target_profile, &["default_env"])
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| namespace.clone());
     ensure_k8s_namespace(&target_profile, &namespace)?;
 
     let runtime_pack = accepted
@@ -362,6 +365,7 @@ fn command_run(args: WorkloadRunArgs) -> Result<Value> {
     let manifest_paths = write_k8s_manifests(
         &manifest_dir,
         &namespace,
+        &environment_id,
         &deployment_id,
         &workload_id,
         &public_base_url,
@@ -1273,6 +1277,7 @@ fn parse_autoscaling(cell: &Value) -> Result<Option<K8sAutoscaling>> {
 fn write_k8s_manifests(
     manifest_dir: &Path,
     namespace: &str,
+    environment_id: &str,
     deployment_id: &str,
     workload_id: &str,
     public_base_url: &str,
@@ -1284,13 +1289,7 @@ fn write_k8s_manifests(
         .ok()
         .filter(|value| !value.trim().is_empty());
     for cell in cells {
-        let labels = json!({
-            "x07.io/workload-id": workload_id,
-            "x07.io/deployment-id": deployment_id,
-            "x07.io/cell-key": cell.cell_key,
-            "x07.io/cell-kind": cell.cell_kind,
-            "x07.io/ingress-kind": cell.ingress_kind,
-        });
+        let labels = workload_cell_labels(workload_id, deployment_id, environment_id, cell);
         match cell.resource_kind() {
             K8sCellResourceKind::Deployment => {
                 let deployment_name = cell
@@ -1303,7 +1302,7 @@ fn write_k8s_manifests(
                     "metadata": {
                         "name": deployment_name,
                         "namespace": namespace,
-                        "labels": labels,
+                        "labels": labels.clone(),
                         "annotations": workload_cell_annotations(cell, public_base_url),
                     },
                     "spec": {
@@ -1317,13 +1316,7 @@ fn write_k8s_manifests(
                         },
                         "template": {
                             "metadata": {
-                                "labels": {
-                                    "x07.io/workload-id": workload_id,
-                                    "x07.io/deployment-id": deployment_id,
-                                    "x07.io/cell-key": cell.cell_key,
-                                    "x07.io/cell-kind": cell.cell_kind,
-                                    "x07.io/ingress-kind": cell.ingress_kind,
-                                },
+                                "labels": labels.clone(),
                                 "annotations": workload_cell_annotations(cell, public_base_url),
                             },
                             "spec": {
@@ -1364,7 +1357,7 @@ fn write_k8s_manifests(
                         "metadata": {
                             "name": service_name,
                             "namespace": namespace,
-                            "labels": labels,
+                            "labels": labels.clone(),
                         },
                         "spec": {
                             "selector": {
@@ -1384,7 +1377,7 @@ fn write_k8s_manifests(
                         "metadata": {
                             "name": ingress_name,
                             "namespace": namespace,
-                            "labels": labels,
+                            "labels": labels.clone(),
                             "annotations": {
                                 "x07.io/public-base-url": public_base_url,
                             }
@@ -1437,7 +1430,7 @@ fn write_k8s_manifests(
                     "metadata": {
                         "name": cronjob_name,
                         "namespace": namespace,
-                        "labels": labels,
+                        "labels": labels.clone(),
                         "annotations": workload_cell_annotations(cell, public_base_url),
                     },
                     "spec": {
@@ -1449,13 +1442,7 @@ fn write_k8s_manifests(
                                 "backoffLimit": schedule.retry_limit.unwrap_or(0),
                                 "template": {
                                     "metadata": {
-                                        "labels": {
-                                            "x07.io/workload-id": workload_id,
-                                            "x07.io/deployment-id": deployment_id,
-                                            "x07.io/cell-key": cell.cell_key,
-                                            "x07.io/cell-kind": cell.cell_kind,
-                                            "x07.io/ingress-kind": cell.ingress_kind,
-                                        },
+                                        "labels": labels,
                                         "annotations": workload_cell_annotations(cell, public_base_url),
                                     },
                                     "spec": {
@@ -1491,6 +1478,24 @@ fn write_k8s_manifests(
         }
     }
     Ok(paths)
+}
+
+fn workload_cell_labels(
+    workload_id: &str,
+    deployment_id: &str,
+    environment_id: &str,
+    cell: &K8sCellDeployment,
+) -> Value {
+    json!({
+        "x07.io/workload-id": workload_id,
+        "x07.io/deployment-id": deployment_id,
+        "x07.io/cell-key": cell.cell_key,
+        "x07.io/cell-kind": cell.cell_kind,
+        "x07.io/ingress-kind": cell.ingress_kind,
+        "lp.environment_id": environment_id,
+        "lp.deployment_id": deployment_id,
+        "lp.service_id": workload_id,
+    })
 }
 
 fn workload_cell_annotations(cell: &K8sCellDeployment, public_base_url: &str) -> Value {
@@ -1733,6 +1738,22 @@ fn sanitize_env_key(value: &str) -> String {
 
 fn workload_cell_env(cell: &K8sCellDeployment) -> Vec<Value> {
     let mut env = Vec::new();
+    env.push(json!({
+        "name": "LP_ENVIRONMENT_ID",
+        "valueFrom": { "fieldRef": { "fieldPath": "metadata.labels['lp.environment_id']" } }
+    }));
+    env.push(json!({
+        "name": "LP_DEPLOYMENT_ID",
+        "valueFrom": { "fieldRef": { "fieldPath": "metadata.labels['lp.deployment_id']" } }
+    }));
+    env.push(json!({
+        "name": "LP_SERVICE_ID",
+        "valueFrom": { "fieldRef": { "fieldPath": "metadata.labels['lp.service_id']" } }
+    }));
+    env.push(json!({
+        "name": "OTEL_RESOURCE_ATTRIBUTES",
+        "value": "service.name=$(LP_SERVICE_ID),deployment.environment=$(LP_ENVIRONMENT_ID),lp.environment_id=$(LP_ENVIRONMENT_ID),lp.deployment_id=$(LP_DEPLOYMENT_ID),lp.service_id=$(LP_SERVICE_ID)"
+    }));
     env.push(json!({"name": "X07_WORKLOAD_CELL_KEY", "value": cell.cell_key}));
     env.push(json!({"name": "X07_WORKLOAD_CELL_KIND", "value": cell.cell_kind}));
     env.push(json!({"name": "X07_WORKLOAD_INGRESS_KIND", "value": cell.ingress_kind}));
@@ -3031,7 +3052,7 @@ mod tests {
     use super::{
         BindingHealthRollup, binding_health_rollup, binding_status_doc, deployable_cells,
         health_for_observed_state, merge_observed_state_with_binding_health, sanitize_k8s_name,
-        sanitize_route_path, workload_state_result_doc,
+        sanitize_route_path, workload_cell_env, workload_cell_labels, workload_state_result_doc,
     };
     use serde_json::json;
 
@@ -3225,6 +3246,95 @@ mod tests {
             Some("svc-api-settlement-cron")
         );
         assert!(cells[1].deployment_name.is_none());
+    }
+
+    #[test]
+    fn workload_cell_env_includes_otel_identity() {
+        let runtime_pack = json!({
+            "cells": [
+                {
+                    "cell_key": "primary",
+                    "cell_kind": "api-cell",
+                    "ingress_kind": "http",
+                    "runtime_class": "native-http",
+                    "scale_class": "replicated-http",
+                    "topology_group": "frontdoor",
+                    "binding_refs": [],
+                    "binding_probe_hints": [],
+                    "executable": {
+                        "kind": "oci_image",
+                        "image": "ghcr.io/example/api:1.0.0",
+                        "container_port": 8080
+                    }
+                }
+            ]
+        });
+        let cells = deployable_cells("svc.api", &runtime_pack).expect("cells");
+        let env = workload_cell_env(&cells[0]);
+
+        let env_id = env
+            .iter()
+            .find(|item| {
+                item.get("name").and_then(serde_json::Value::as_str) == Some("LP_ENVIRONMENT_ID")
+            })
+            .and_then(|item| item.get("valueFrom"))
+            .and_then(|item| item.get("fieldRef"))
+            .and_then(|item| item.get("fieldPath"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(env_id, Some("metadata.labels['lp.environment_id']"));
+
+        let attrs = env
+            .iter()
+            .find(|item| {
+                item.get("name").and_then(serde_json::Value::as_str)
+                    == Some("OTEL_RESOURCE_ATTRIBUTES")
+            })
+            .and_then(|item| item.get("value"))
+            .and_then(serde_json::Value::as_str);
+        assert_eq!(
+            attrs,
+            Some("service.name=$(LP_SERVICE_ID),deployment.environment=$(LP_ENVIRONMENT_ID),lp.environment_id=$(LP_ENVIRONMENT_ID),lp.deployment_id=$(LP_DEPLOYMENT_ID),lp.service_id=$(LP_SERVICE_ID)")
+        );
+    }
+
+    #[test]
+    fn workload_cell_labels_include_identity() {
+        let runtime_pack = json!({
+            "cells": [
+                {
+                    "cell_key": "primary",
+                    "cell_kind": "api-cell",
+                    "ingress_kind": "http",
+                    "runtime_class": "native-http",
+                    "scale_class": "replicated-http",
+                    "topology_group": "frontdoor",
+                    "binding_refs": [],
+                    "binding_probe_hints": [],
+                    "executable": {
+                        "kind": "oci_image",
+                        "image": "ghcr.io/example/api:1.0.0",
+                        "container_port": 8080
+                    }
+                }
+            ]
+        });
+        let cells = deployable_cells("svc.api", &runtime_pack).expect("cells");
+        let labels = workload_cell_labels("svc.api", "deploy_123", "prod", &cells[0]);
+
+        assert_eq!(
+            labels
+                .get("lp.environment_id")
+                .and_then(serde_json::Value::as_str),
+            Some("prod")
+        );
+        assert_eq!(
+            labels.get("lp.deployment_id").and_then(serde_json::Value::as_str),
+            Some("deploy_123")
+        );
+        assert_eq!(
+            labels.get("lp.service_id").and_then(serde_json::Value::as_str),
+            Some("svc.api")
+        );
     }
 
     #[test]
