@@ -23,6 +23,9 @@ pub(super) fn resolve_remote_fixture_inputs(
     fixture: Option<&str>,
 ) -> (Option<String>, Option<String>) {
     let fixture_name = remote_fixture_name(fixture);
+    let Some(fixture_name) = fixture_name.as_deref() else {
+        return (None, None);
+    };
     let Some(index_doc) = load_json(&remote_fixture_index_path()).ok() else {
         return (None, None);
     };
@@ -34,10 +37,7 @@ pub(super) fn resolve_remote_fixture_inputs(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let requested = fixture_name
-        .as_deref()
-        .unwrap_or("remote_promote")
-        .to_string();
+    let requested = fixture_name.to_string();
     let resolved_name = resolve_fixture_alias(&items, &requested).unwrap_or(requested);
     let Some(item) = items
         .iter()

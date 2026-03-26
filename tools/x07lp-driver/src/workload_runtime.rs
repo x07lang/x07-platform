@@ -1092,7 +1092,11 @@ fn deployable_cells(workload_id: &str, runtime_pack: &Value) -> Result<Vec<K8sCe
                     .and_then(Value::as_object)
                     .and_then(|leases| leases.get("count"))
                     .and_then(Value::as_u64)
-                    .or_else(|| autoscaling.as_ref().map(|autoscaling| autoscaling.max_replicas))
+                    .or_else(|| {
+                        autoscaling
+                            .as_ref()
+                            .map(|autoscaling| autoscaling.max_replicas)
+                    })
                     .unwrap_or(1)
                     .max(1);
                 (0..lease_count)
@@ -1148,11 +1152,7 @@ fn deployable_cells(workload_id: &str, runtime_pack: &Value) -> Result<Vec<K8sCe
             } else {
                 None
             },
-            keda_trigger_auth_name: if uses_keda {
-                None
-            } else {
-                None
-            },
+            keda_trigger_auth_name: if uses_keda { None } else { None },
             service_account_name,
             role_name,
             role_binding_name,
@@ -1396,9 +1396,7 @@ fn parse_consumer_lag_scaling(value: Option<&Value>) -> Result<Option<K8sConsume
         polling_interval_seconds: value
             .get("polling_interval_seconds")
             .and_then(Value::as_u64),
-        cooldown_period_seconds: value
-            .get("cooldown_period_seconds")
-            .and_then(Value::as_u64),
+        cooldown_period_seconds: value.get("cooldown_period_seconds").and_then(Value::as_u64),
         scale_to_zero: value
             .get("scale_to_zero")
             .and_then(Value::as_bool)
@@ -1443,7 +1441,9 @@ fn resolve_keda_bootstrap_servers(
         )
         .is_err()
     {
-        bail!("keda scaling requested but keda is not installed (missing CRD scaledobjects.keda.sh)");
+        bail!(
+            "keda scaling requested but keda is not installed (missing CRD scaledobjects.keda.sh)"
+        );
     }
 
     let mut resolved = HashMap::new();
@@ -1589,7 +1589,8 @@ fn write_k8s_manifests(
                             },
                             "spec": {}
                         });
-                        let path = manifest_dir.join(format!("lease.{}.{}.json", cell.cell_key, idx));
+                        let path =
+                            manifest_dir.join(format!("lease.{}.{}.json", cell.cell_key, idx));
                         let _ = write_json(&path, &lease_doc)?;
                         paths.push(path);
                     }
@@ -2051,15 +2052,14 @@ fn hpa_doc(namespace: &str, public_base_url: &str, cell: &K8sCellDeployment) -> 
     let target_cpu = autoscaling.target_cpu_utilization?;
     let deployment_name = cell.deployment_name.as_deref()?;
     let hpa_name = cell.hpa_name.as_deref()?;
-    let scale_down_stabilization_seconds = autoscaling.scale_down_stabilization_seconds.or_else(
-        || {
+    let scale_down_stabilization_seconds =
+        autoscaling.scale_down_stabilization_seconds.or_else(|| {
             if cell.scale_class == "partitioned-consumer" {
                 Some(300)
             } else {
                 None
             }
-        },
-    );
+        });
     let scale_up_stabilization_seconds = autoscaling.scale_up_stabilization_seconds;
     let mut doc = json!({
         "apiVersion": "autoscaling/v2",
@@ -2268,12 +2268,16 @@ fn workload_cell_env(cell: &K8sCellDeployment) -> Vec<Value> {
             "singleton-orchestrator" => {
                 if let Some(lease_name) = cell.lease_names.first() {
                     env.push(json!({"name": "X07_LEADER_ELECTION_ENABLED", "value": "true"}));
-                    env.push(json!({"name": "X07_LEADER_ELECTION_LEASE_NAME", "value": lease_name}));
+                    env.push(
+                        json!({"name": "X07_LEADER_ELECTION_LEASE_NAME", "value": lease_name}),
+                    );
                 }
             }
             "leased-worker" => {
                 env.push(json!({"name": "X07_WORK_LEASES_ENABLED", "value": "true"}));
-                env.push(json!({"name": "X07_WORK_LEASE_NAMES", "value": cell.lease_names.join(",")}));
+                env.push(
+                    json!({"name": "X07_WORK_LEASE_NAMES", "value": cell.lease_names.join(",")}),
+                );
             }
             _ => {}
         }
@@ -3935,7 +3939,9 @@ mod tests {
             .and_then(serde_json::Value::as_str);
         assert_eq!(
             attrs,
-            Some("service.name=$(LP_SERVICE_ID),deployment.environment=$(LP_ENVIRONMENT_ID),lp.environment_id=$(LP_ENVIRONMENT_ID),lp.deployment_id=$(LP_DEPLOYMENT_ID),lp.service_id=$(LP_SERVICE_ID)")
+            Some(
+                "service.name=$(LP_SERVICE_ID),deployment.environment=$(LP_ENVIRONMENT_ID),lp.environment_id=$(LP_ENVIRONMENT_ID),lp.deployment_id=$(LP_DEPLOYMENT_ID),lp.service_id=$(LP_SERVICE_ID)"
+            )
         );
     }
 
@@ -3970,11 +3976,15 @@ mod tests {
             Some("prod")
         );
         assert_eq!(
-            labels.get("lp.deployment_id").and_then(serde_json::Value::as_str),
+            labels
+                .get("lp.deployment_id")
+                .and_then(serde_json::Value::as_str),
             Some("deploy_123")
         );
         assert_eq!(
-            labels.get("lp.service_id").and_then(serde_json::Value::as_str),
+            labels
+                .get("lp.service_id")
+                .and_then(serde_json::Value::as_str),
             Some("svc.api")
         );
     }
@@ -4057,14 +4067,15 @@ mod tests {
 
         let env = workload_cell_env(&cells[0]);
         assert!(env.iter().any(|item| {
-            item.get("name").and_then(serde_json::Value::as_str)
-                == Some("X07_WORK_LEASES_ENABLED")
+            item.get("name").and_then(serde_json::Value::as_str) == Some("X07_WORK_LEASES_ENABLED")
                 && item.get("value").and_then(serde_json::Value::as_str) == Some("true")
         }));
         assert!(env.iter().any(|item| {
-            item.get("name").and_then(serde_json::Value::as_str)
-                == Some("X07_WORK_LEASE_NAMES")
-                && item.get("value").and_then(serde_json::Value::as_str).is_some()
+            item.get("name").and_then(serde_json::Value::as_str) == Some("X07_WORK_LEASE_NAMES")
+                && item
+                    .get("value")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some()
         }));
     }
 
@@ -4138,9 +4149,9 @@ mod tests {
             ]
         });
         let err = deployable_cells("svc.api", &runtime_pack).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("cannot set both autoscaling.target_cpu_utilization and autoscaling.consumer_lag"));
+        assert!(err.to_string().contains(
+            "cannot set both autoscaling.target_cpu_utilization and autoscaling.consumer_lag"
+        ));
     }
 
     #[test]
@@ -4173,7 +4184,9 @@ mod tests {
         let env = workload_cell_env(&cells[0]);
         let run_id = env
             .iter()
-            .find(|item| item.get("name").and_then(serde_json::Value::as_str) == Some("X07_JOB_RUN_ID"))
+            .find(|item| {
+                item.get("name").and_then(serde_json::Value::as_str) == Some("X07_JOB_RUN_ID")
+            })
             .and_then(|item| item.get("valueFrom"))
             .and_then(|item| item.get("fieldRef"))
             .and_then(|item| item.get("fieldPath"))
@@ -4182,10 +4195,16 @@ mod tests {
 
         let checkpoint_key = env
             .iter()
-            .find(|item| item.get("name").and_then(serde_json::Value::as_str) == Some("X07_JOB_CHECKPOINT_KEY"))
+            .find(|item| {
+                item.get("name").and_then(serde_json::Value::as_str)
+                    == Some("X07_JOB_CHECKPOINT_KEY")
+            })
             .and_then(|item| item.get("value"))
             .and_then(serde_json::Value::as_str);
-        assert_eq!(checkpoint_key, Some("$(LP_DEPLOYMENT_ID):$(X07_JOB_RUN_ID)"));
+        assert_eq!(
+            checkpoint_key,
+            Some("$(LP_DEPLOYMENT_ID):$(X07_JOB_RUN_ID)")
+        );
     }
 
     #[test]

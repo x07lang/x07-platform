@@ -4651,8 +4651,141 @@ fn load_exec(state_dir: &Path, exec_id: &str) -> Result<Value> {
 }
 
 fn save_exec(state_dir: &Path, exec_doc: &Value) -> Result<Vec<u8>> {
-    let exec_id = get_str(exec_doc, &["exec_id"]).ok_or_else(|| anyhow!("missing exec_id"))?;
-    write_json(&exec_path(state_dir, &exec_id), exec_doc)
+    let mut persisted = exec_doc.clone();
+    refresh_deploy_recovery_meta(&mut persisted);
+    let exec_id = get_str(&persisted, &["exec_id"]).ok_or_else(|| anyhow!("missing exec_id"))?;
+    write_json(&exec_path(state_dir, &exec_id), &persisted)
+}
+
+fn latest_decision_reason_code(exec_doc: &Value) -> Option<String> {
+    get_path(exec_doc, &["meta", "decisions"])
+        .and_then(Value::as_array)
+        .and_then(|items| items.last())
+        .and_then(|decision| {
+            get_path(decision, &["reasons"])
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+        })
+        .and_then(|reason| get_str(reason, &["code"]))
+}
+
+fn set_deploy_recovery_failure(exec_doc: &mut Value, classification: &str, now_unix_ms: u64) {
+    let recovery = ensure_object_field(exec_doc, "meta")
+        .entry("recovery".to_string())
+        .or_insert_with(|| json!({}));
+    let recovery = ensure_object(recovery);
+    recovery.insert("failure_classification".to_string(), json!(classification));
+    recovery.insert("last_failure_unix_ms".to_string(), json!(now_unix_ms));
+}
+
+fn clear_deploy_recovery_failure(exec_doc: &mut Value) {
+    let recovery = ensure_object_field(exec_doc, "meta")
+        .entry("recovery".to_string())
+        .or_insert_with(|| json!({}));
+    let recovery = ensure_object(recovery);
+    recovery.insert("failure_classification".to_string(), Value::Null);
+    recovery.insert("last_failure_unix_ms".to_string(), Value::Null);
+}
+
+fn deploy_recovery_state(exec_doc: &Value) -> &'static str {
+    let status = get_str(exec_doc, &["status"]).unwrap_or_else(|| "planned".to_string());
+    let outcome = get_str(exec_doc, &["meta", "outcome"]).unwrap_or_else(|| "unknown".to_string());
+    let control_state =
+        get_str(exec_doc, &["meta", "control_state"]).unwrap_or_else(|| "active".to_string());
+    match status.as_str() {
+        "planned" => "ready",
+        "started" if control_state == "paused" => "resumable",
+        "started" => "running",
+        "completed" if outcome == "rolled_back" => "rolled_back",
+        "completed" => "completed",
+        "failed" => "failed",
+        "aborted" => "aborted",
+        _ => "ready",
+    }
+}
+
+fn derive_deploy_failure_classification(exec_doc: &Value) -> Value {
+    if let Some(value) = get_path(exec_doc, &["meta", "recovery", "failure_classification"])
+        && !value.is_null()
+    {
+        return value.clone();
+    }
+    let status = get_str(exec_doc, &["status"]).unwrap_or_else(|| "planned".to_string());
+    let outcome = get_str(exec_doc, &["meta", "outcome"]).unwrap_or_else(|| "unknown".to_string());
+    if status == "aborted" || outcome == "aborted" {
+        return json!("aborted");
+    }
+    if outcome == "rolled_back" {
+        if latest_decision_reason_code(exec_doc).as_deref() == Some("LP_SLO_DECISION_ROLLBACK") {
+            return json!("slo_rollback");
+        }
+        return json!("manual_rollback");
+    }
+    if status != "failed" && outcome != "failed" {
+        return Value::Null;
+    }
+    match latest_decision_reason_code(exec_doc).as_deref() {
+        Some("LP_SLO_TOOL_FAILED") => json!("analysis_failed"),
+        Some("LP_RETRY_BUDGET_EXHAUSTED") => json!("retry_budget_exhausted"),
+        Some("LP_SLO_DECISION_ROLLBACK") => json!("slo_rollback"),
+        _ => json!("unknown"),
+    }
+}
+
+fn refresh_deploy_recovery_meta(exec_doc: &mut Value) {
+    let run_id = get_str(exec_doc, &["run_id"]).unwrap_or_default();
+    let exec_id = get_str(exec_doc, &["exec_id"]).unwrap_or_default();
+    let parent_exec_id = get_path(exec_doc, &["meta", "parent_exec_id"])
+        .cloned()
+        .unwrap_or(Value::Null);
+    let last_failure_unix_ms = get_path(exec_doc, &["meta", "recovery", "last_failure_unix_ms"])
+        .cloned()
+        .unwrap_or(Value::Null);
+    let steps = get_path(exec_doc, &["steps"])
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let last_completed_step_idx = steps
+        .iter()
+        .filter(|step| {
+            matches!(
+                get_str(step, &["status"]).as_deref(),
+                Some("ok" | "skipped")
+            )
+        })
+        .filter_map(|step| get_u64(step, &["idx"]))
+        .max();
+    let next_step_idx = steps
+        .iter()
+        .find(|step| get_str(step, &["status"]).as_deref() == Some("running"))
+        .and_then(|step| get_u64(step, &["idx"]))
+        .or_else(|| {
+            steps
+                .iter()
+                .filter_map(|step| get_u64(step, &["idx"]))
+                .max()
+                .map(|idx| idx + 1)
+        })
+        .unwrap_or(0);
+    let resume_from_step_idx =
+        get_u64(exec_doc, &["meta", "rerun_from_step_idx"]).unwrap_or(next_step_idx);
+    let state = deploy_recovery_state(exec_doc);
+    let failure_classification = derive_deploy_failure_classification(exec_doc);
+    ensure_object_field(exec_doc, "meta").insert(
+        "recovery".to_string(),
+        json!({
+            "checkpoint_key": format!("lp.chkpt.{run_id}"),
+            "attempt_exec_id": exec_id,
+            "parent_exec_id": parent_exec_id,
+            "state": state,
+            "resume_supported": state != "completed",
+            "last_completed_step_idx": last_completed_step_idx,
+            "next_step_idx": next_step_idx,
+            "resume_from_step_idx": resume_from_step_idx,
+            "failure_classification": failure_classification,
+            "last_failure_unix_ms": last_failure_unix_ms,
+        }),
+    );
 }
 
 fn ensure_deploy_meta(exec_doc: &mut Value, run_doc: &Value, state_dir: &Path) -> Result<()> {
@@ -4713,7 +4846,24 @@ fn ensure_deploy_meta(exec_doc: &mut Value, run_doc: &Value, state_dir: &Path) -
         json!({"stable": revisions, "candidate": revisions}),
     );
     upsert_default(meta, "runtime", json!({}));
-    upsert_default(meta, "routing", json!({"candidate_weight_pct": 0}));
+    upsert_default(meta, "routing", json!({}));
+    if let Some(routing) = meta.get_mut("routing").and_then(Value::as_object_mut) {
+        if !routing.contains_key("candidate_weight_pct") {
+            routing.insert("candidate_weight_pct".to_string(), json!(0));
+        }
+        if !routing.contains_key("strategy") {
+            routing.insert("strategy".to_string(), json!("canary"));
+        }
+        if !routing.contains_key("cutover_kind") {
+            routing.insert("cutover_kind".to_string(), json!("weight_shift"));
+        }
+        if !routing.contains_key("active_slot") {
+            routing.insert("active_slot".to_string(), Value::Null);
+        }
+        if !routing.contains_key("last_cutover_unix_ms") {
+            routing.insert("last_cutover_unix_ms".to_string(), Value::Null);
+        }
+    }
     upsert_default(
         meta,
         "analysis",
@@ -4729,9 +4879,11 @@ fn ensure_deploy_meta(exec_doc: &mut Value, run_doc: &Value, state_dir: &Path) -
         "retry_budget",
         json!({"max_attempts_per_step": 3, "consumed": {}}),
     );
+    upsert_default(meta, "recovery", json!({}));
     upsert_default(meta, "decisions", json!([]));
     upsert_default(meta, "artifacts", json!([]));
     upsert_default(meta, "ext", json!({}));
+    refresh_deploy_recovery_meta(exec_doc);
     Ok(())
 }
 
@@ -4983,6 +5135,10 @@ fn build_remote_execution_meta(exec_doc: &Value, run_doc: &Value, local_meta: &V
             "public_base_url": public_base_url,
             "listener_id": get_path(&remote, &["routing", "listener_id"]).cloned().unwrap_or(Value::Null),
             "candidate_weight_pct": get_u64(&routing, &["candidate_weight_pct"]).unwrap_or(0),
+            "strategy": get_str(&routing, &["strategy"]).unwrap_or_else(|| "canary".to_string()),
+            "cutover_kind": get_str(&routing, &["cutover_kind"]).unwrap_or_else(|| "weight_shift".to_string()),
+            "active_slot": get_path(&routing, &["active_slot"]).cloned().unwrap_or(Value::Null),
+            "last_cutover_unix_ms": get_path(&routing, &["last_cutover_unix_ms"]).cloned().unwrap_or(Value::Null),
             "algorithm": get_str(&routing, &["algorithm"]).unwrap_or_else(|| "hash_bucket_v1".to_string()),
             "route_key_header": get_str(&routing, &["route_key_header"]).unwrap_or_else(|| "X-LP-Route-Key".to_string()),
             "last_updated_step_idx": get_path(&routing, &["last_updated_step_idx"]).cloned().unwrap_or(Value::Null),
@@ -5001,6 +5157,7 @@ fn build_remote_execution_meta(exec_doc: &Value, run_doc: &Value, local_meta: &V
             "lease_holder": get_path(&remote, &["control", "lease_holder"]).cloned().unwrap_or(Value::Null),
             "last_idempotency_key": get_path(&remote, &["control", "last_idempotency_key"]).cloned().unwrap_or(Value::Null),
         },
+        "recovery": get_path(local_meta, &["recovery"]).cloned().unwrap_or_else(|| json!({})),
         "ext": get_path(exec_doc, &["meta", "ext"]).cloned().unwrap_or_else(|| json!({})),
     })
 }
@@ -5089,6 +5246,11 @@ fn sanitize_query_decision(decision: &Value, public_aliases: bool) -> Value {
 
 fn build_execution_view(exec_doc: &Value, run_doc: &Value, state_dir: &Path) -> Value {
     let meta = get_path(exec_doc, &["meta"])
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let mut exec_with_recovery = exec_doc.clone();
+    refresh_deploy_recovery_meta(&mut exec_with_recovery);
+    let recovery = get_path(&exec_with_recovery, &["meta", "recovery"])
         .cloned()
         .unwrap_or_else(|| json!({}));
     let steps = get_path(exec_doc, &["steps"])
@@ -5187,7 +5349,7 @@ fn build_execution_view(exec_doc: &Value, run_doc: &Value, state_dir: &Path) -> 
         "exec_id": get_str(exec_doc, &["exec_id"]).unwrap_or_default(),
         "run_id": get_str(exec_doc, &["run_id"]).unwrap_or_default(),
         "created_unix_ms": get_u64(exec_doc, &["created_unix_ms"]).unwrap_or(0),
-        "status": get_str(exec_doc, &["status"]).unwrap_or_else(|| "planned".to_string()),
+        "status": normalized_exec_status(exec_doc),
         "plan": exec_doc.get("plan").cloned().unwrap_or(Value::Null),
         "meta": {
             "schema_version": "lp.deploy.execution.meta.local@0.1.0",
@@ -5218,6 +5380,10 @@ fn build_execution_view(exec_doc: &Value, run_doc: &Value, state_dir: &Path) -> 
                 "public_listener": public_listener,
                 "listener_addr": listener_addr,
                 "candidate_weight_pct": get_u64(&meta, &["routing", "candidate_weight_pct"]).unwrap_or(0),
+                "strategy": get_str(&meta, &["routing", "strategy"]).unwrap_or_else(|| "canary".to_string()),
+                "cutover_kind": get_str(&meta, &["routing", "cutover_kind"]).unwrap_or_else(|| "weight_shift".to_string()),
+                "active_slot": get_path(&meta, &["routing", "active_slot"]).cloned().unwrap_or(Value::Null),
+                "last_cutover_unix_ms": get_path(&meta, &["routing", "last_cutover_unix_ms"]).cloned().unwrap_or(Value::Null),
                 "algorithm": "hash_bucket_v1",
                 "route_key_header": "X-LP-Route-Key",
                 "last_updated_step_idx": last_route_step.as_ref().and_then(|v| get_u64(v, &["idx"])),
@@ -5230,6 +5396,7 @@ fn build_execution_view(exec_doc: &Value, run_doc: &Value, state_dir: &Path) -> 
                 "last_analysis_step_idx": last_analysis_step.as_ref().and_then(|v| get_u64(v, &["idx"])),
             },
             "retry_budget": get_path(&meta, &["retry_budget"]).cloned().unwrap_or_else(|| json!({"max_attempts_per_step":3,"consumed":{}})),
+            "recovery": recovery,
             "steps": steps,
             "decisions": get_path(&meta, &["decisions"]).cloned().unwrap_or_else(|| json!([])),
             "artifacts": artifacts,
@@ -5326,10 +5493,19 @@ fn build_query_result(
         "index": { "used": true, "rebuilt": rebuilt, "db_path": db_path.to_string_lossy() },
     });
     if matches!(view, "summary" | "full") {
+        let manifest_digest = get_path(run_doc, &["inputs", "artifact", "manifest", "digest"])
+            .cloned()
+            .unwrap_or(Value::Null);
+        let stable_revision = get_path(&meta, &["revisions", "stable"])
+            .cloned()
+            .unwrap_or_else(|| manifest_digest.clone());
+        let candidate_revision = get_path(&meta, &["revisions", "candidate"])
+            .cloned()
+            .unwrap_or_else(|| manifest_digest.clone());
         ensure_object(&mut result).extend(Map::from_iter([
             (
                 "status".to_string(),
-                json!(get_str(exec_doc, &["status"]).unwrap_or_else(|| "planned".to_string())),
+                json!(normalized_exec_status(exec_doc)),
             ),
             (
                 "outcome".to_string(),
@@ -5372,18 +5548,8 @@ fn build_query_result(
                     .cloned()
                     .unwrap_or(Value::Null),
             ),
-            (
-                "stable_revision".to_string(),
-                get_path(&meta, &["revisions", "stable"])
-                    .cloned()
-                    .unwrap_or(Value::Null),
-            ),
-            (
-                "candidate_revision".to_string(),
-                get_path(&meta, &["revisions", "candidate"])
-                    .cloned()
-                    .unwrap_or(Value::Null),
-            ),
+            ("stable_revision".to_string(), stable_revision),
+            ("candidate_revision".to_string(), candidate_revision),
             (
                 "control_state".to_string(),
                 json!(get_str(&meta, &["control_state"]).unwrap_or_else(|| "active".to_string())),
@@ -5823,6 +5989,13 @@ fn update_exec_for_kill(
     );
 }
 
+fn normalized_exec_status(exec_doc: &Value) -> String {
+    match get_path(exec_doc, &["status"]).and_then(Value::as_str) {
+        Some("accepted") | None => "planned".to_string(),
+        Some(status) => status.to_string(),
+    }
+}
+
 fn rebuild_indexes(state_dir: &Path) -> Result<(PathBuf, PathBuf)> {
     static REBUILD_INDEXES_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     let _guard = REBUILD_INDEXES_LOCK
@@ -5945,7 +6118,7 @@ fn insert_execution_rows(
                 environment,
                 get_u64(&exec_doc, &["created_unix_ms"]).unwrap_or(0) as i64,
                 updated_unix_ms as i64,
-                get_str(&exec_doc, &["status"]).unwrap_or_else(|| "planned".to_string()),
+                normalized_exec_status(&exec_doc),
                 get_str(&meta, &["outcome"]),
                 get_u64(&meta, &["routing", "candidate_weight_pct"]).unwrap_or(0) as i64,
                 get_str(&meta, &["public_listener"]),
@@ -10029,6 +10202,74 @@ fn build_device_release_incident_context(exec_doc: &Value) -> Result<IncidentCon
     })
 }
 
+fn incident_trigger_path(state_dir: &Path, trigger_id: &str) -> PathBuf {
+    state_dir
+        .join("incident_triggers")
+        .join(format!("{trigger_id}.json"))
+}
+
+fn valid_incident_trigger_signal(signal_type: &str) -> bool {
+    matches!(
+        signal_type,
+        "slo_burn" | "crash_loop" | "probe_fail" | "manual"
+    )
+}
+
+fn valid_incident_trigger_severity(severity: &str) -> bool {
+    matches!(severity, "info" | "warn" | "page")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_deployment_incident_trigger(
+    state_dir: &Path,
+    exec_doc: &mut Value,
+    run_doc: &Value,
+    signal_type: &str,
+    severity: &str,
+    reason: &str,
+    rollout_id: Option<&str>,
+    observations: &Value,
+    request_id: Option<&str>,
+    trace_id: Option<&str>,
+    now_unix_ms: u64,
+) -> Result<Value> {
+    ensure_deploy_meta(exec_doc, run_doc, state_dir)?;
+    let context = build_deployment_incident_context(exec_doc, run_doc, state_dir)?;
+    let deployment_id = get_str(exec_doc, &["exec_id"]).unwrap_or_default();
+    let trigger_id = gen_id(
+        "lptrig",
+        &format!("{deployment_id}:{signal_type}:{severity}:{reason}:{now_unix_ms}"),
+    );
+    let observations = if observations.is_object() {
+        observations.clone()
+    } else {
+        json!({})
+    };
+    let trigger_doc = json!({
+        "schema_version": "lp.incident.trigger@0.1.0",
+        "trigger_id": trigger_id,
+        "deployment_id": deployment_id,
+        "environment_id": context.target_environment,
+        "service_id": context.target_app_id,
+        "rollout_id": rollout_id.map(Value::from).unwrap_or(Value::Null),
+        "signal_type": signal_type,
+        "severity": severity,
+        "reason": reason,
+        "observations": observations,
+        "request_id": request_id.map(Value::from).unwrap_or(Value::Null),
+        "trace_id": trace_id.map(Value::from).unwrap_or(Value::Null),
+        "created_unix_ms": now_unix_ms,
+        "meta": {
+            "run_id": context.run_id,
+            "public_listener": get_path(exec_doc, &["meta", "public_listener"]).cloned().unwrap_or(Value::Null),
+            "current_weight_pct": get_path(exec_doc, &["meta", "routing", "candidate_weight_pct"]).cloned().unwrap_or(Value::Null),
+        }
+    });
+    let trigger_id = get_str(&trigger_doc, &["trigger_id"]).unwrap_or_default();
+    let _ = write_json(&incident_trigger_path(state_dir, &trigger_id), &trigger_doc)?;
+    Ok(trigger_doc)
+}
+
 fn find_existing_incident_for_key(
     state_dir: &Path,
     deployment_id: Option<&str>,
@@ -13596,7 +13837,39 @@ fn command_query_state(args: DeployQueryArgs) -> Result<Value> {
     };
     let exec_doc = load_exec(&state_dir, &exec_id)?;
     let run_id = get_str(&exec_doc, &["run_id"]).unwrap_or_default();
-    let run_doc = load_json(&run_path(&state_dir, &run_id))?;
+    if run_id.trim().is_empty() {
+        return Ok(cli_report(
+            "deploy query",
+            false,
+            19,
+            json!({ "deployment_id": exec_id }),
+            None,
+            vec![result_diag(
+                "LP_RUN_ID_MISSING",
+                "run",
+                "deploy query missing run_id in execution record",
+                "error",
+            )],
+        ));
+    }
+    let run_doc = match load_json(&run_path(&state_dir, &run_id)) {
+        Ok(doc) => doc,
+        Err(err) => {
+            return Ok(cli_report(
+                "deploy query",
+                false,
+                19,
+                json!({ "deployment_id": exec_id, "run_id": run_id }),
+                Some(&run_id),
+                vec![result_diag(
+                    "LP_RUN_NOT_FOUND",
+                    "run",
+                    &err.to_string(),
+                    "error",
+                )],
+            ));
+        }
+    };
     Ok(cli_report(
         "deploy query",
         true,
@@ -13636,10 +13909,61 @@ fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
     let now_unix_ms = args.common.now_unix_ms.unwrap_or_else(now_ms);
     let pause_scale = args.pause_scale.unwrap_or(1.0);
-    let metrics_dir = args.metrics_dir.as_deref().map(repo_path);
+    let fixture = args
+        .fixture
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let (fixture_plan, fixture_metrics_dir) =
+        if fixture.is_some() && (args.plan.is_none() || args.metrics_dir.is_none()) {
+            resolve_remote_fixture_inputs(fixture)
+        } else {
+            (None, None)
+        };
+    let metrics_dir = args
+        .metrics_dir
+        .as_deref()
+        .map(repo_path)
+        .or_else(|| fixture_metrics_dir.as_deref().map(repo_path));
     let mut exec_doc = load_exec(&state_dir, &args.deployment_id)?;
     let run_id = get_str(&exec_doc, &["run_id"]).unwrap_or_default();
-    let run_doc = load_json(&run_path(&state_dir, &run_id))?;
+    if run_id.trim().is_empty() {
+        return Ok(cli_report(
+            "deploy run",
+            false,
+            19,
+            json!({ "deployment_id": args.deployment_id, "outcome": "failed" }),
+            None,
+            vec![result_diag(
+                "LP_RUN_ID_MISSING",
+                "run",
+                "deploy run missing run_id in execution record",
+                "error",
+            )],
+        ));
+    }
+    let run_doc = match load_json(&run_path(&state_dir, &run_id)) {
+        Ok(doc) => doc,
+        Err(err) => {
+            return Ok(cli_report(
+                "deploy run",
+                false,
+                19,
+                json!({
+                    "deployment_id": args.deployment_id,
+                    "run_id": run_id,
+                    "outcome": "failed",
+                }),
+                Some(&run_id),
+                vec![result_diag(
+                    "LP_RUN_NOT_FOUND",
+                    "run",
+                    &err.to_string(),
+                    "error",
+                )],
+            ));
+        }
+    };
     ensure_deploy_meta(&mut exec_doc, &run_doc, &state_dir)?;
     let remote_exec = get_path(&exec_doc, &["meta", "ext", "remote"]).is_some();
     let _remote_lease = match try_acquire_remote_run_lease(
@@ -13653,7 +13977,8 @@ fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
         RemoteLeaseAcquire::Acquired(guard) => Some(guard),
         RemoteLeaseAcquire::Conflict(report) => return Ok(report),
     };
-    let plan_path = resolve_plan_path(args.plan.as_deref());
+    let plan_path = resolve_plan_path(args.plan.as_deref())
+        .or_else(|| resolve_plan_path(fixture_plan.as_deref()));
     let (plan_doc, plan_bytes) = match plan_path.as_ref() {
         Some(path) => {
             let plan = normalize_plan(load_json(path)?);
@@ -13683,6 +14008,34 @@ fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
             }
         },
     };
+    let strategy_type = get_str(&plan_doc, &["strategy", "type"]).unwrap_or_else(|| {
+        if get_path(&plan_doc, &["strategy", "blue_green"]).is_some_and(|value| !value.is_null()) {
+            "blue_green".to_string()
+        } else {
+            "canary".to_string()
+        }
+    });
+    let blue_green_auto_promote =
+        get_bool(&plan_doc, &["strategy", "blue_green", "auto_promote"]).unwrap_or(true);
+    if strategy_type == "blue_green" && !blue_green_auto_promote {
+        return Ok(cli_report(
+            "deploy run",
+            false,
+            26,
+            json!({
+                "deployment_id": args.deployment_id,
+                "run_id": run_id,
+                "outcome": "failed",
+            }),
+            Some(&run_id),
+            vec![result_diag(
+                "LP_BLUE_GREEN_MANUAL_UNSUPPORTED",
+                "run",
+                "blue/green plans require auto_promote=true in the OSS driver",
+                "error",
+            )],
+        ));
+    }
     let mut plan_artifact_raw =
         cas_put(&state_dir, "deploy.plan", "application/json", &plan_bytes)?;
     ensure_object(&mut plan_artifact_raw)
@@ -13729,7 +14082,28 @@ fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
                 "candidate": manifest_digest,
             }),
         );
+        if let Some(routing) = meta.get_mut("routing").and_then(Value::as_object_mut) {
+            routing.insert("strategy".to_string(), json!(strategy_type.clone()));
+            routing.insert(
+                "cutover_kind".to_string(),
+                json!(if strategy_type == "blue_green" {
+                    "selector_swap"
+                } else {
+                    "weight_shift"
+                }),
+            );
+            routing.insert(
+                "active_slot".to_string(),
+                if strategy_type == "blue_green" {
+                    json!("stable")
+                } else {
+                    Value::Null
+                },
+            );
+            routing.insert("last_cutover_unix_ms".to_string(), Value::Null);
+        }
     }
+    clear_deploy_recovery_failure(&mut exec_doc);
     let prepare_reason = vec![json!({"code":"LP_PLAN_READY","message":"deploy plan is ready"})];
     let (prepare_decision, _) = write_decision_record(
         &state_dir,
@@ -13759,6 +14133,7 @@ fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
     let stable_paths = runtime_state_paths(&state_dir, &args.deployment_id, "stable");
     let candidate_paths = runtime_state_paths(&state_dir, &args.deployment_id, "candidate");
     if let Err(err) = materialize_pack_dir(&state_dir, &run_doc, &stable_paths["work"]) {
+        set_deploy_recovery_failure(&mut exec_doc, "runtime_start_failed", now_unix_ms);
         let (meta_doc, bundle, incident_dir) = capture_incident_impl(
             &state_dir,
             &mut exec_doc,
@@ -13807,6 +14182,7 @@ fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
         ) {
             Ok(deployment) => deployment,
             Err(err) => {
+                set_deploy_recovery_failure(&mut exec_doc, "runtime_start_failed", now_unix_ms);
                 let _ = capture_incident_impl(
                     &state_dir,
                     &mut exec_doc,
@@ -13918,6 +14294,7 @@ fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
         )?
     };
     if !runtime_probe_ok(&runtime_probe_doc) {
+        set_deploy_recovery_failure(&mut exec_doc, "runtime_health_failed", now_unix_ms);
         let _ = capture_incident_impl(
             &state_dir,
             &mut exec_doc,
@@ -14000,6 +14377,92 @@ fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
     ensure_object(&mut exec_doc).insert("status".to_string(), json!("started"));
     ensure_object(&mut exec_doc).insert("steps".to_string(), Value::Array(steps.clone()));
     let _ = save_exec(&state_dir, &exec_doc)?;
+
+    if strategy_type == "blue_green" {
+        let cutover_unix_ms = now_unix_ms + 2;
+        let (cutover_decision, _) = write_decision_record(
+            &state_dir,
+            &format!(
+                "{}:blue_green_cutover:{cutover_unix_ms}",
+                args.deployment_id
+            ),
+            &run_id,
+            "deploy.route.cutover",
+            "allow",
+            vec![json!({
+                "code": "LP_BLUE_GREEN_CUTOVER",
+                "message": "blue/green cutover switched the active slot to candidate"
+            })],
+            vec![runtime_probe_artifact.clone()],
+            cutover_unix_ms,
+            Some(2),
+            false,
+        )?;
+        push_decision(&mut exec_doc, cutover_decision.clone(), None);
+        {
+            let meta = ensure_object_field(&mut exec_doc, "meta");
+            meta.insert("updated_unix_ms".to_string(), json!(cutover_unix_ms));
+            if let Some(routing) = meta.get_mut("routing").and_then(Value::as_object_mut) {
+                routing.insert("candidate_weight_pct".to_string(), json!(100));
+                routing.insert("active_slot".to_string(), json!("candidate"));
+                routing.insert("last_updated_step_idx".to_string(), json!(2));
+                routing.insert("last_cutover_unix_ms".to_string(), json!(cutover_unix_ms));
+            }
+        }
+        steps.push(build_exec_step(
+            2,
+            "blue_green_cutover",
+            "deploy.route.cutover",
+            "ok",
+            cutover_unix_ms,
+            Some(cutover_unix_ms),
+            vec![get_str(&cutover_decision, &["decision_id"]).unwrap_or_default()],
+            Some(100),
+            None,
+        ));
+        ensure_object(&mut exec_doc).insert("steps".to_string(), Value::Array(steps));
+        write_router_state(
+            &state_dir,
+            &args.deployment_id,
+            &listener_addr,
+            &stable_addr,
+            &candidate_addr,
+            &stable_work_dir,
+            &candidate_work_dir,
+            &api_prefix,
+            100,
+            2,
+        )?;
+        if remote_exec {
+            undeploy_remote_slot(&exec_doc, "stable")?;
+            release_remote_slot_port(&state_dir, &args.deployment_id, "stable");
+        }
+        update_terminal_meta(&mut exec_doc, "promoted", cutover_unix_ms);
+        ensure_object(&mut exec_doc).insert("status".to_string(), json!("completed"));
+        let exec_bytes = save_exec(&state_dir, &exec_doc)?;
+        let exec_artifact = build_deploy_execution_artifact(&exec_doc, &exec_bytes);
+        push_artifact(
+            &mut exec_doc,
+            artifact_summary("deploy_execution", &exec_artifact, 0, None),
+        );
+        let _ = save_exec(&state_dir, &exec_doc)?;
+        rebuild_indexes(&state_dir)?;
+        return Ok(cli_report(
+            "deploy run",
+            true,
+            0,
+            json!({
+                "deployment_id": args.deployment_id,
+                "run_id": run_id,
+                "final_decision_id": get_path(&exec_doc, &["meta", "latest_decision_id"]).cloned().unwrap_or(Value::Null),
+                "outcome": "promoted",
+                "latest_weight_pct": 100,
+                "public_listener": get_path(&exec_doc, &["meta", "public_listener"]).cloned().unwrap_or(Value::Null),
+            }),
+            Some(&run_id),
+            Vec::new(),
+        ));
+    }
 
     let mut step_cursor = 2usize;
     let mut analysis_counter = 0usize;
@@ -14461,6 +14924,11 @@ fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
                         undeploy_remote_slot(&exec_doc, "candidate")?;
                         release_remote_slot_port(&state_dir, &args.deployment_id, "candidate");
                     }
+                    set_deploy_recovery_failure(
+                        &mut exec_doc,
+                        "slo_rollback",
+                        now_unix_ms + step_cursor as u64 + attempt as u64,
+                    );
                     {
                         let meta = ensure_object_field(&mut exec_doc, "meta");
                         meta.entry("routing".to_string())
@@ -14495,6 +14963,23 @@ fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
                         "not_applicable",
                         now_unix_ms + step_cursor as u64 + attempt as u64,
                     )?;
+                    let _ = record_deployment_incident_trigger(
+                        &state_dir,
+                        &mut exec_doc,
+                        &run_doc,
+                        "slo_burn",
+                        "page",
+                        "slo gate required rollback",
+                        Some(&args.deployment_id),
+                        &json!({
+                            "decision_id": get_path(&decision, &["decision_id"]).cloned().unwrap_or(Value::Null),
+                            "required_decision": required,
+                            "analysis_step_idx": step_cursor,
+                        }),
+                        None,
+                        None,
+                        now_unix_ms + step_cursor as u64 + attempt as u64,
+                    );
                     rebuild_indexes(&state_dir)?;
                     return Ok(cli_report(
                         "deploy run",
@@ -14518,6 +15003,11 @@ fn command_run_execution(args: DeployRunArgs) -> Result<Value> {
                     ));
                 }
                 if attempt >= retry_budget {
+                    set_deploy_recovery_failure(
+                        &mut exec_doc,
+                        "retry_budget_exhausted",
+                        now_unix_ms + step_cursor as u64 + attempt as u64,
+                    );
                     {
                         let meta = ensure_object_field(&mut exec_doc, "meta");
                         meta.insert("outcome".to_string(), json!("failed"));
@@ -14681,6 +15171,7 @@ fn command_stop_execution(args: DeploymentControlArgs) -> Result<Value> {
         "aborted",
         now_unix_ms,
     )?;
+    set_deploy_recovery_failure(&mut exec_doc, "aborted", now_unix_ms);
     update_terminal_meta(&mut exec_doc, "aborted", now_unix_ms);
     ensure_object(&mut exec_doc).insert("status".to_string(), json!("aborted"));
     prepare_router_terminal_state(
@@ -14801,6 +15292,7 @@ fn command_rollback_execution(args: DeploymentControlArgs) -> Result<Value> {
         "rolled_back",
         now_unix_ms,
     )?;
+    set_deploy_recovery_failure(&mut exec_doc, "manual_rollback", now_unix_ms);
     update_terminal_meta(&mut exec_doc, "rolled_back", now_unix_ms);
     ensure_object(&mut exec_doc).insert("status".to_string(), json!("completed"));
     prepare_router_terminal_state(
@@ -15002,6 +15494,7 @@ fn command_rerun_execution(args: DeploymentRerunArgs) -> Result<Value> {
         meta.insert("latest_signed_control_decision_id".to_string(), Value::Null);
         meta.insert("updated_unix_ms".to_string(), json!(now_unix_ms));
     }
+    clear_deploy_recovery_failure(&mut new_exec);
     let _ = save_exec(&state_dir, &new_exec)?;
     let result = build_control_action_result(
         &gen_id(
@@ -15135,8 +15628,7 @@ fn command_incident_get(args: IncidentGetArgs) -> Result<Value> {
 
 fn command_incident_get_state(args: IncidentGetArgs) -> Result<Value> {
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
-    let (db_path, rebuilt) =
-        maybe_rebuild_control_plane_index(&state_dir, args.rebuild_index)?;
+    let (db_path, rebuilt) = maybe_rebuild_control_plane_index(&state_dir, args.rebuild_index)?;
     let Some((meta, bundle, incident_dir)) =
         build_incident_summary_from_disk(&state_dir, &args.incident_id)?
     else {
@@ -15182,8 +15674,7 @@ fn command_incident_list(args: IncidentListArgs) -> Result<Value> {
 
 fn command_incident_list_state(args: IncidentListArgs) -> Result<Value> {
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
-    let (db_path, rebuilt) =
-        maybe_rebuild_control_plane_index(&state_dir, args.rebuild_index)?;
+    let (db_path, rebuilt) = maybe_rebuild_control_plane_index(&state_dir, args.rebuild_index)?;
     let mut items = Vec::new();
     for meta_path in read_incident_meta_paths(&state_dir) {
         let meta = load_json(&meta_path)?;
@@ -15603,8 +16094,7 @@ fn command_regress_from_incident_state(args: RegressFromIncidentArgs) -> Result<
 
 fn command_app_list(args: AppListArgs) -> Result<Value> {
     let state_dir = resolve_state_dir(args.common.state_dir.as_deref());
-    let (db_path, rebuilt) =
-        maybe_rebuild_control_plane_index(&state_dir, args.rebuild_index)?;
+    let (db_path, rebuilt) = maybe_rebuild_control_plane_index(&state_dir, args.rebuild_index)?;
     let conn = Connection::open(&db_path)?;
     let mut stmt = conn.prepare("SELECT app_id, environment, latest_deployment_id, deployment_status, outcome, public_listener, current_weight_pct, incident_count_total, incident_count_open, latest_incident_id, latest_decision_id, kill_state, updated_unix_ms FROM app_heads ORDER BY updated_unix_ms DESC, app_id ASC, environment ASC")?;
     let rows = stmt.query_map([], |row| {
@@ -17163,6 +17653,104 @@ fn dispatch_remote_request(request: HttpRequest, state_dir: &Path) -> Result<UiH
             }
             UiHttpResponse::Json(200, report)
         }
+        ("POST", ["v1", "incidents", "triggers"]) => {
+            let body_doc = parse_http_body(&request.body)?;
+            let deployment_id = get_http_string(&body_doc, "deployment_id", "");
+            let signal_type = get_http_string(&body_doc, "signal_type", "manual");
+            let severity = get_http_string(&body_doc, "severity", "info");
+            let reason = get_http_string(&body_doc, "reason", "");
+            if deployment_id.is_empty() || reason.is_empty() {
+                UiHttpResponse::Json(
+                    400,
+                    cli_report(
+                        "incident trigger",
+                        false,
+                        2,
+                        json!({}),
+                        None,
+                        vec![result_diag(
+                            "LP_INVALID_ARGS",
+                            "parse",
+                            "incident trigger requires deployment_id and reason",
+                            "error",
+                        )],
+                    ),
+                )
+            } else if !valid_incident_trigger_signal(&signal_type) {
+                UiHttpResponse::Json(
+                    400,
+                    cli_report(
+                        "incident trigger",
+                        false,
+                        2,
+                        json!({}),
+                        None,
+                        vec![result_diag(
+                            "LP_INVALID_ARGS",
+                            "parse",
+                            "incident trigger signal_type must be one of slo_burn|crash_loop|probe_fail|manual",
+                            "error",
+                        )],
+                    ),
+                )
+            } else if !valid_incident_trigger_severity(&severity) {
+                UiHttpResponse::Json(
+                    400,
+                    cli_report(
+                        "incident trigger",
+                        false,
+                        2,
+                        json!({}),
+                        None,
+                        vec![result_diag(
+                            "LP_INVALID_ARGS",
+                            "parse",
+                            "incident trigger severity must be one of info|warn|page",
+                            "error",
+                        )],
+                    ),
+                )
+            } else {
+                let mut exec_doc = load_exec(state_dir, &deployment_id)?;
+                let run_id = get_str(&exec_doc, &["run_id"]).unwrap_or_default();
+                let run_doc = load_json(&run_path(state_dir, &run_id))?;
+                let trigger_doc = record_deployment_incident_trigger(
+                    state_dir,
+                    &mut exec_doc,
+                    &run_doc,
+                    &signal_type,
+                    &severity,
+                    &reason,
+                    get_http_optional_string(&body_doc, "rollout_id").as_deref(),
+                    body_doc.get("observations").unwrap_or(&Value::Null),
+                    get_http_optional_string(&body_doc, "request_id").as_deref(),
+                    get_http_optional_string(&body_doc, "trace_id").as_deref(),
+                    common.now_unix_ms.unwrap_or_else(now_ms),
+                )?;
+                let _ = record_remote_event(
+                    state_dir,
+                    &deployment_id,
+                    "incident.trigger",
+                    "remote incident trigger recorded",
+                    json!({
+                        "trigger_id": get_path(&trigger_doc, &["trigger_id"]).cloned().unwrap_or(Value::Null),
+                        "signal_type": signal_type,
+                        "severity": severity,
+                    }),
+                );
+                UiHttpResponse::Json(
+                    200,
+                    cli_report(
+                        "incident trigger",
+                        true,
+                        0,
+                        trigger_doc,
+                        Some(&run_id),
+                        Vec::new(),
+                    ),
+                )
+            }
+        }
         ("GET", ["v1", "incidents"]) => UiHttpResponse::Json(
             200,
             command_incident_list_state(IncidentListArgs {
@@ -18492,6 +19080,121 @@ mod tests {
             .collect::<BTreeMap<_, _>>()
     }
 
+    fn fixture_path(rel: &str) -> String {
+        root_dir().join(rel).to_string_lossy().into_owned()
+    }
+
+    fn local_state_args(state_dir: &Path) -> CommonStateArgs {
+        CommonStateArgs {
+            state_dir: Some(state_dir.to_string_lossy().into_owned()),
+            now_unix_ms: Some(1_730_000_000_000),
+            json: true,
+        }
+    }
+
+    fn local_hosted_args() -> HostedDeployArgs {
+        HostedDeployArgs {
+            hosted: false,
+            api_base: None,
+        }
+    }
+
+    fn accept_local_fixture_deployment(state_dir: &Path) -> Result<(String, String)> {
+        let pack_dir = PathBuf::from(fixture_path(
+            "spec/fixtures/remote-oss/common/pack_app_min_spin",
+        ));
+        let change_path = PathBuf::from(fixture_path(
+            "spec/fixtures/deploy_loop/common/change_request.app_min.json",
+        ));
+        let mut manifest_doc = None;
+        let mut manifest_artifact = None;
+        for entry in walkdir::WalkDir::new(&pack_dir) {
+            let entry = entry?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry.path();
+            let rel_path = path
+                .strip_prefix(&pack_dir)
+                .with_context(|| format!("strip pack dir prefix from {}", path.display()))?;
+            let bytes = fs::read(path)?;
+            let artifact = cas_put(
+                state_dir,
+                &rel_path.to_string_lossy(),
+                media_type_for_path(path),
+                &bytes,
+            )?;
+            if rel_path == Path::new("app.pack.json") {
+                manifest_doc = Some(serde_json::from_slice::<Value>(&bytes)?);
+                manifest_artifact = Some(artifact);
+            }
+        }
+        let manifest_doc =
+            manifest_doc.ok_or_else(|| anyhow!("missing app.pack.json in fixture pack"))?;
+        let manifest_artifact =
+            manifest_artifact.ok_or_else(|| anyhow!("missing manifest artifact"))?;
+        let change_doc = load_json(&change_path)?;
+        let change_id =
+            get_str(&change_doc, &["change_id"]).ok_or_else(|| anyhow!("missing change_id"))?;
+        let _ = write_json(
+            &state_dir.join("changes").join(format!("{change_id}.json")),
+            &change_doc,
+        )?;
+        let now_unix_ms = local_state_args(state_dir).now_unix_ms.unwrap_or(0);
+        let run_id = gen_id("lprun", "tests:accepted_run");
+        let exec_id = gen_id("lpexec", "tests:accepted_exec");
+        let run_doc = json!({
+            "schema_version": "lp.pipeline.run@0.1.0",
+            "run_id": run_id,
+            "created_unix_ms": now_unix_ms,
+            "updated_unix_ms": now_unix_ms,
+            "inputs": {
+                "artifact": {
+                    "manifest": manifest_artifact
+                },
+                "change_request": {
+                    "change_id": change_id
+                }
+            }
+        });
+        let exec_doc = json!({
+            "schema_version": "lp.deploy.execution@0.1.0",
+            "exec_id": exec_id,
+            "run_id": run_id,
+            "status": "accepted",
+            "created_unix_ms": now_unix_ms,
+            "updated_unix_ms": now_unix_ms,
+            "meta": {
+                "decisions": [],
+                "routing": {
+                    "candidate_weight_pct": 0,
+                    "last_updated_step_idx": 0,
+                    "api_prefix": get_str(&manifest_doc, &["routing", "api_prefix"])
+                        .unwrap_or_else(|| "/api".to_string())
+                }
+            },
+            "steps": []
+        });
+        let _ = write_json(&run_path(state_dir, &run_id), &run_doc)?;
+        let _ = save_exec(state_dir, &exec_doc)?;
+        Ok((exec_id, run_id))
+    }
+
+    fn write_blue_green_plan(path: &Path) -> Result<()> {
+        let mut plan_doc = load_json(&PathBuf::from(fixture_path(
+            "spec/fixtures/deploy_loop/promote/deploy.plan.json",
+        )))?;
+        plan_doc["strategy"] = json!({
+            "type": "blue_green",
+            "blue_green": {
+                "auto_promote": true
+            },
+            "canary": Value::Null
+        });
+        let _ = write_json(path, &plan_doc)?;
+        Ok(())
+    }
+
     #[test]
     fn hosted_session_round_trip_stays_separate_from_oss_targets() -> Result<()> {
         let _guard = TEST_ENV_LOCK
@@ -18511,6 +19214,195 @@ mod tests {
         assert_eq!(load_hosted_session_doc()?, session);
         assert!(!x07lp_targets_dir()?.exists());
         assert!(!x07lp_current_target_path()?.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn blue_green_run_promotes_candidate_and_persists_recovery_metadata() -> Result<()> {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let tmp = TempDir::new("blue-green-run")?;
+        let config_dir = tmp.path.join("config");
+        let config_dir_raw = config_dir.to_string_lossy().into_owned();
+        let _config = ScopedEnvVar::set("X07LP_CONFIG_DIR", &config_dir_raw);
+        let (exec_id, run_id) = accept_local_fixture_deployment(&tmp.path)?;
+        let plan_path = tmp.path.join("blue-green.plan.json");
+        write_blue_green_plan(&plan_path)?;
+
+        let report = command_run_execution(DeployRunArgs {
+            deployment_id: exec_id.clone(),
+            accepted_run: Some(run_id.clone()),
+            plan: Some(plan_path.to_string_lossy().into_owned()),
+            metrics_dir: None,
+            pause_scale: Some(0.0),
+            target: None,
+            fixture: None,
+            hosted: local_hosted_args(),
+            common: local_state_args(&tmp.path),
+        })?;
+
+        assert_eq!(report.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            get_str(&report, &["result", "outcome"]).as_deref(),
+            Some("promoted")
+        );
+        assert_eq!(
+            get_path(&report, &["result", "latest_weight_pct"]).and_then(Value::as_u64),
+            Some(100)
+        );
+
+        let exec_doc = load_exec(&tmp.path, &exec_id)?;
+        assert_eq!(
+            get_str(&exec_doc, &["status"]).as_deref(),
+            Some("completed")
+        );
+        assert_eq!(
+            get_str(&exec_doc, &["meta", "outcome"]).as_deref(),
+            Some("promoted")
+        );
+        assert_eq!(
+            get_str(&exec_doc, &["meta", "routing", "strategy"]).as_deref(),
+            Some("blue_green")
+        );
+        assert_eq!(
+            get_str(&exec_doc, &["meta", "routing", "cutover_kind"]).as_deref(),
+            Some("selector_swap")
+        );
+        assert_eq!(
+            get_str(&exec_doc, &["meta", "routing", "active_slot"]).as_deref(),
+            Some("candidate")
+        );
+        assert_eq!(
+            get_path(&exec_doc, &["meta", "routing", "candidate_weight_pct"])
+                .and_then(Value::as_u64),
+            Some(100)
+        );
+        assert!(get_u64(&exec_doc, &["meta", "routing", "last_cutover_unix_ms"]).is_some());
+        assert_eq!(
+            get_str(&exec_doc, &["meta", "recovery", "state"]).as_deref(),
+            Some("completed")
+        );
+        assert_eq!(
+            get_path(&exec_doc, &["meta", "recovery", "resume_supported"]).and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            get_path(&exec_doc, &["meta", "recovery", "attempt_exec_id"]).and_then(Value::as_str),
+            Some(exec_id.as_str())
+        );
+        assert_eq!(
+            get_path(&exec_doc, &["meta", "recovery", "checkpoint_key"]).and_then(Value::as_str),
+            Some(format!("lp.chkpt.{run_id}").as_str())
+        );
+        assert_eq!(
+            get_path(&exec_doc, &["meta", "recovery", "failure_classification"]),
+            Some(&Value::Null)
+        );
+        assert!(
+            get_path(&exec_doc, &["steps"])
+                .and_then(Value::as_array)
+                .is_some_and(|steps| {
+                    steps.iter().any(|step| {
+                        get_str(step, &["name"]).as_deref() == Some("blue_green_cutover")
+                            && get_str(step, &["kind"]).as_deref() == Some("deploy.route.cutover")
+                    })
+                })
+        );
+
+        let router_state = load_router_state_doc(&tmp.path, &exec_id)?;
+        assert_eq!(
+            get_path(&router_state, &["candidate_weight_pct"]).and_then(Value::as_u64),
+            Some(100)
+        );
+        assert_eq!(
+            get_path(&router_state, &["last_updated_step_idx"]).and_then(Value::as_u64),
+            Some(2)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remote_incident_trigger_endpoint_records_trigger_documents() -> Result<()> {
+        let _guard = TEST_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let _token = ScopedEnvVar::set("X07LP_REMOTE_BEARER_TOKEN", "test-remote-token");
+        let tmp = TempDir::new("remote-incident-trigger")?;
+        let config_dir = tmp.path.join("config");
+        let config_dir_raw = config_dir.to_string_lossy().into_owned();
+        let _config = ScopedEnvVar::set("X07LP_CONFIG_DIR", &config_dir_raw);
+        let (exec_id, run_id) = accept_local_fixture_deployment(&tmp.path)?;
+
+        let response = dispatch_remote_request(
+            HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/incidents/triggers".to_string(),
+                query: BTreeMap::new(),
+                headers: BTreeMap::from([(
+                    "authorization".to_string(),
+                    "Bearer test-remote-token".to_string(),
+                )]),
+                body: canon_json_bytes(&json!({
+                    "deployment_id": exec_id,
+                    "rollout_id": "lproll_demo",
+                    "signal_type": "manual",
+                    "severity": "warn",
+                    "reason": "operator observed elevated retries",
+                    "request_id": "req_demo",
+                    "trace_id": "trace_demo",
+                    "observations": {
+                        "source": "test"
+                    }
+                })),
+            },
+            &tmp.path,
+        )?;
+
+        let UiHttpResponse::Json(status, report) = response else {
+            panic!("expected JSON response");
+        };
+        assert_eq!(status, 200);
+        assert_eq!(report.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            get_str(&report, &["result", "schema_version"]).as_deref(),
+            Some("lp.incident.trigger@0.1.0")
+        );
+        assert_eq!(
+            get_str(&report, &["result", "signal_type"]).as_deref(),
+            Some("manual")
+        );
+        assert_eq!(
+            get_str(&report, &["result", "severity"]).as_deref(),
+            Some("warn")
+        );
+        assert_eq!(
+            get_str(&report, &["result", "reason"]).as_deref(),
+            Some("operator observed elevated retries")
+        );
+        assert_eq!(
+            get_str(&report, &["result", "rollout_id"]).as_deref(),
+            Some("lproll_demo")
+        );
+        assert_eq!(
+            get_str(&report, &["result", "request_id"]).as_deref(),
+            Some("req_demo")
+        );
+        assert_eq!(
+            get_str(&report, &["result", "trace_id"]).as_deref(),
+            Some("trace_demo")
+        );
+        assert_eq!(
+            get_str(&report, &["result", "meta", "run_id"]).as_deref(),
+            Some(run_id.as_str())
+        );
+
+        let trigger_id = get_str(&report, &["result", "trigger_id"])
+            .ok_or_else(|| anyhow!("missing trigger_id"))?;
+        let trigger_doc = load_json(&incident_trigger_path(&tmp.path, &trigger_id))?;
+        assert_eq!(trigger_doc, report["result"]);
         Ok(())
     }
 

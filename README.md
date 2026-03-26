@@ -53,8 +53,8 @@ That makes `x07-platform` the production operations part of the language ecosyst
 | Capability | Description |
 |---|---|
 | **Sealed artifact intake** | Admits `x07.app.pack@0.1.0` artifacts, validates digests, and stores them in a content-addressed store. |
-| **Deploy execution** | Executes `x07.deploy.plan@0.2.0` locally with weighted canary routing, SLO gating, and automatic promotion or rollback. |
-| **Incident capture** | Captures HTTP 5xx responses, runtime failures, SLO rollbacks, and manual operator captures as `lp.incident.bundle@0.1.0`. |
+| **Deploy execution** | Executes `x07.deploy.plan@0.2.0` locally with weighted canary or blue/green routing, SLO gating, deterministic recovery checkpoints, and automatic promotion or rollback. |
+| **Incident capture** | Captures HTTP 5xx responses, runtime failures, SLO rollbacks, and manual operator captures as `lp.incident.bundle@0.1.0`, and accepts explicit incident-trigger ingestion for deployment-scoped signals. |
 | **Regression generation** | Generates automated test fixtures from incidents via `x07-wasm app regress from-incident`. |
 | **Operator controls** | Pause, rerun, rollback, stop, app kill/unkill, and platform kill/unkill from CLI, UI, or MCP tools. |
 | **Self-hosted remote targets** | Onboard wasmCloud-based self-hosted targets and deploy the same sealed artifacts remotely. |
