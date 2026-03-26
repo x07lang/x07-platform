@@ -1,10 +1,10 @@
 # x07-platform
 
-**x07-platform** is the lifecycle runtime and self-hosted control plane for shipping, supervising, and repairing X07 applications and device releases.
+**x07-platform** is the public runtime and self-hosted control plane for operating X07 workloads and release flows. The current first lane is governed backend delivery: API, event-consumer, and scheduled-job cells packaged as `x07.workload.pack@0.1.0` and run through `x07lp`.
 
-In the X07 ecosystem, `x07` is where you write and package programs, `x07-wasm-backend` turns those programs into sealed app and device artifacts, and `x07-platform` runs the operational loop around them: deploy, watch, capture incidents, generate regressions, and control releases.
+In the X07 ecosystem, `x07` is where you write services and scaffolds, `x07-wasm-backend` turns them into workload, app, and device artifacts, and `x07-platform` runs the operational loop around them: workload accept, binding and topology inspection, release review, deploy, incident capture, regression generation, and control actions.
 
-The vision is simple: an end user or coding agent should be able to move from "the app is ready" to "the app is running safely in production" without switching to a separate ad hoc stack with different contracts, different state, and different tooling.
+The vision is simple: an end user or coding agent should be able to move from "the workload is ready" to "the workload is running safely in production" without switching to a separate ad hoc stack with different contracts, different state, and different tooling.
 
 The platform operates as one closed loop:
 
@@ -14,10 +14,11 @@ change request -> sealed artifact -> deploy plan -> execution -> incident captur
 
 The repo is local-first. The same contracts and operator model are used for:
 
-- local deploy and device-release demos
+- local Kubernetes workload demos and release-review flows
 - self-hosted OSS remote targets, currently the wasmCloud reference target
 - additive target-profile support for hosted, Kubernetes, and wasmCloud control-plane attachments
-- a future hosted boundary; the managed product is intentionally not the main demo path in this repo
+- older app and device-release demos that still share the same control plane
+- a managed hosted boundary built separately; the public repo is not the managed product
 
 It ships a dark-themed **Command Center** web UI, a full-featured **CLI** (`x07lp`), and an **MCP tool surface** so AI agents can consume the same deploy, incident, and release state programmatically.
 
@@ -30,10 +31,10 @@ It ships a dark-themed **Command Center** web UI, a full-featured **CLI** (`x07l
 
 ## What Is In This Repo
 
-- **Lifecycle engine** for accepted packs, deploy plans, executions, incidents, regressions, and control actions
-- **`x07lp` CLI and driver scripts** for local and remote platform workflows
+- **Lifecycle engine** for workload intake, release control, deploy plans, executions, incidents, regressions, and control actions
+- **`x07lp` CLI and driver scripts** for platform and control-plane workflows across local, self-hosted, and hosted lanes
 - **Command Center UI** for operators who want a browser view over the same state the CLI exposes
-- **Public docs and fixtures** for local demos, device-release flows, and contract-backed examples
+- **Public docs and fixtures** for Kubernetes workload demos, hosted review flows, and contract-backed examples
 - **MCP-facing platform surface** so coding agents can read platform state and invoke safe controls
 
 ## How It Fits The Whole X07 Story
@@ -41,24 +42,24 @@ It ships a dark-themed **Command Center** web UI, a full-featured **CLI** (`x07l
 The broader X07 release path looks like this:
 
 1. Build the program in [`x07`](https://github.com/x07lang/x07)
-2. Package web, app, or device artifacts in [`x07-wasm-backend`](https://github.com/x07lang/x07-wasm-backend)
-3. If needed, run the same reducer on desktop or mobile with [`x07-device-host`](https://github.com/x07lang/x07-device-host)
-4. Publish packages through [`x07-registry`](https://github.com/x07lang/x07-registry) and browse them on [`x07.io`](https://x07.io)
-5. Roll the finished artifact through `x07-platform`
+2. Package workload, web, app, or device artifacts in [`x07-wasm-backend`](https://github.com/x07lang/x07-wasm-backend)
+3. Operate workloads, bindings, releases, incidents, and regressions through `x07-platform`
+4. If needed, run the same reducer on desktop or mobile with [`x07-device-host`](https://github.com/x07lang/x07-device-host)
+5. Publish packages through [`x07-registry`](https://github.com/x07lang/x07-registry) and browse them on [`x07.io`](https://x07.io)
 
-That makes `x07-platform` the production operations part of the language ecosystem, not a separate product bolted on later.
+That makes `x07-platform` the public operations part of the language ecosystem, not a separate product bolted on later. The managed control layer built on top of this split is x07 Sentinel, backed by the private `x07-platform-cloud` repo.
 
 ## What The Platform Does
 
 | Capability | Description |
 |---|---|
-| **Sealed artifact intake** | Admits `x07.app.pack@0.1.0` artifacts, validates digests, and stores them in a content-addressed store. |
+| **Artifact intake** | Admits `x07.workload.pack@0.1.0` and `x07.app.pack@0.1.0` artifacts, validates digests, and stores them in a content-addressed store. |
 | **Deploy execution** | Executes `x07.deploy.plan@0.2.0` locally with weighted canary or blue/green routing, SLO gating, deterministic recovery checkpoints, and automatic promotion or rollback. |
 | **Incident capture** | Captures HTTP 5xx responses, runtime failures, SLO rollbacks, and manual operator captures as `lp.incident.bundle@0.1.0`, and accepts explicit incident-trigger ingestion for deployment-scoped signals. |
 | **Regression generation** | Generates automated test fixtures from incidents via `x07-wasm app regress from-incident`. |
 | **Operator controls** | Pause, rerun, rollback, stop, app kill/unkill, and platform kill/unkill from CLI, UI, or MCP tools. |
-| **Self-hosted remote targets** | Onboard wasmCloud-based self-hosted targets and deploy the same sealed artifacts remotely. |
-| **Workload and release surfaces** | Carry workload-pack inventory, topology preview, binding status, hosted release-review documents, and a local Kubernetes workload lane for HTTP, event-consumer, and scheduled-job cells alongside the existing deploy and device-release loop. |
+| **Workload and release surfaces** | Carry workload-pack inventory, topology preview, binding status, hosted release-review documents, and a Kubernetes workload lane for HTTP, event-consumer, and scheduled-job cells. |
+| **Control-plane attachments** | Attach Kubernetes, hosted, and wasmCloud target profiles to the same public contract model without changing the control surface. |
 | **Device release orchestration** | Create staged iOS and Android release plans and supervise rollout through App Store Connect and Google Play mock providers. |
 | **Command Center UI** | Dark-themed web dashboard for real-time monitoring of apps, deployments, incidents, regressions, and device releases. |
 | **MCP tool integration** | Expose all surfaces (deploy, incident, regression, app, platform, device release) as MCP tools for agent consumption. |
@@ -88,11 +89,11 @@ Extra prerequisites:
 
 ## Practical Ways To Use It
 
-- **Standalone local demo:** use the bundled fixtures to understand the deploy, incident, and device-release loop without any external services
+- **Kubernetes workload lane:** package `x07.workload.pack@0.1.0` artifacts and run them through `x07lp workload ...` for HTTP, event-consumer, and scheduled-job cells
+- **Hosted Sentinel review loop:** use `x07lp login`, `release-submit`, `release-query`, `release-explain`, `release-rollback`, and `binding-status` against a hosted control-plane session
 - **Self-hosted control plane:** point `x07lp` at a target and run the same contracts against a remote environment
-- **Agent-operated platform:** let an MCP-aware coding agent inspect executions, read incidents, and trigger safe controls without scraping logs or dashboards
-- **Hosted Sentinel review loop:** use `x07lp release-submit`, `release-query`, `release-explain`, `release-rollback`, and `binding-status` against a hosted control-plane session
-- **End-to-end app release path:** pair it with `x07-wasm app pack`, `x07-wasm deploy plan`, and incident-derived regression generation
+- **Agent-operated platform:** let an MCP-aware coding agent inspect workloads, releases, incidents, and executions without scraping logs or dashboards
+- **Secondary app and device loops:** pair it with `x07-wasm app pack`, `x07-wasm deploy plan`, incident-derived regression generation, or device release supervision when those broader flows are needed
 
 ## Run From Source
 
@@ -116,6 +117,8 @@ If you want to use it as part of the full ecosystem story, keep `x07-platform` a
 - [`x07-crewops`](https://github.com/x07lang/x07-crewops) or another app repo for a realistic sealed-artifact input
 
 ## Quick Start: Local Demo
+
+For service-oriented backend work, start with [Local K3s workload smoke](#local-k3s-workload-smoke) below. The local deploy loop here remains useful for the older app/deploy fixtures and Command Center state.
 
 Run a minimal local deploy using the bundled fixtures:
 
@@ -179,7 +182,7 @@ Control-plane state covers app, deployment, incident, and regression flows. Devi
 
 ### Local K3s workload smoke
 
-The OSS platform now has a dedicated workload lane for `x07.workload.pack@0.1.0` artifacts on Kubernetes. The fastest end-to-end verification path is the bundled K3s smoke:
+The OSS platform now has a dedicated workload lane for `x07.workload.pack@0.1.0` artifacts on Kubernetes. This is the current first backend-delivery lane and the fastest end-to-end verification path in the repo:
 
 ```bash
 cd x07-platform
