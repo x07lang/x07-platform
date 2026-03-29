@@ -23,8 +23,8 @@
     },
     {
       "name": "ext-data-model",
-      "path": ".x07/deps/ext-data-model/0.1.10",
-      "version": "0.1.10"
+      "path": ".x07/deps/ext-data-model/0.1.11",
+      "version": "0.1.11"
     },
     {
       "name": "ext-db-core",
@@ -53,8 +53,8 @@
     },
     {
       "name": "ext-json-rs",
-      "path": ".x07/deps/ext-json-rs/0.1.6",
-      "version": "0.1.6"
+      "path": ".x07/deps/ext-json-rs/0.1.7",
+      "version": "0.1.7"
     },
     {
       "name": "ext-jsonschema-rs",
@@ -143,12 +143,12 @@
       "version": "0.1.5"
     },
     "ext-data-model": {
-      "path": ".x07/deps/ext-data-model/0.1.10",
-      "version": "0.1.10"
+      "path": ".x07/deps/ext-data-model/0.1.11",
+      "version": "0.1.11"
     },
     "ext-json-rs": {
-      "path": ".x07/deps/ext-json-rs/0.1.6",
-      "version": "0.1.6"
+      "path": ".x07/deps/ext-json-rs/0.1.7",
+      "version": "0.1.7"
     },
     "ext-mcp-sandbox": {
       "path": ".x07/deps/ext-mcp-sandbox/0.3.10",
@@ -173,6 +173,6 @@
       "world": "run-os-sandboxed"
     }
   },
-  "schema_version": "x07.project@0.3.0",
+  "schema_version": "x07.project@0.4.0",
   "world": "run-os"
 }
