@@ -2116,11 +2116,13 @@ fn hpa_doc(namespace: &str, public_base_url: &str, cell: &K8sCellDeployment) -> 
 }
 
 fn container_doc(cell: &K8sCellDeployment, binding_requirements: &Value) -> Result<Value> {
+    let mut env = workload_cell_env(cell);
+    env.extend(workload_cell_binding_env(cell, binding_requirements));
     let mut container = json!({
         "name": sanitize_k8s_name(&cell.cell_key),
         "image": cell.image,
         "imagePullPolicy": "IfNotPresent",
-        "env": workload_cell_env(cell),
+        "env": env,
     });
     let env_from = workload_cell_env_from(cell, binding_requirements);
     if !env_from.is_empty() {
@@ -2142,6 +2144,57 @@ fn container_doc(cell: &K8sCellDeployment, binding_requirements: &Value) -> Resu
         container["startupProbe"] = startup;
     }
     Ok(container)
+}
+
+fn workload_cell_binding_env(cell: &K8sCellDeployment, binding_requirements: &Value) -> Vec<Value> {
+    let mut required_by_name: HashMap<String, bool> = HashMap::new();
+    let mut kind_by_name: HashMap<String, String> = HashMap::new();
+    if let Some(bindings) = binding_requirements
+        .get("bindings")
+        .and_then(Value::as_array)
+    {
+        for binding in bindings {
+            let Some(name) = binding.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let required = binding
+                .get("required")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            required_by_name.insert(name.to_string(), required);
+            if let Some(kind) = binding.get("kind").and_then(Value::as_str) {
+                kind_by_name.insert(name.to_string(), kind.to_string());
+            }
+        }
+    }
+
+    let mut env = Vec::new();
+    for binding_ref in &cell.binding_refs {
+        if kind_by_name.get(binding_ref).map(String::as_str) != Some("s3") {
+            continue;
+        }
+        let required = required_by_name.get(binding_ref).copied().unwrap_or(true);
+        let optional = !required;
+        let name = sanitize_k8s_name(binding_ref);
+        env.push(json!({
+            "name": "X07_OS_OBJ_S3_ENDPOINT",
+            "valueFrom": { "secretKeyRef": { "name": name, "key": "ENDPOINT", "optional": optional } }
+        }));
+        env.push(json!({
+            "name": "X07_OS_OBJ_S3_BUCKET",
+            "valueFrom": { "secretKeyRef": { "name": sanitize_k8s_name(binding_ref), "key": "BUCKET", "optional": optional } }
+        }));
+        env.push(json!({
+            "name": "X07_OS_OBJ_S3_ACCESS_KEY",
+            "valueFrom": { "secretKeyRef": { "name": sanitize_k8s_name(binding_ref), "key": "ACCESS_KEY", "optional": optional } }
+        }));
+        env.push(json!({
+            "name": "X07_OS_OBJ_S3_SECRET_KEY",
+            "valueFrom": { "secretKeyRef": { "name": sanitize_k8s_name(binding_ref), "key": "SECRET_KEY", "optional": optional } }
+        }));
+        break;
+    }
+    env
 }
 
 fn workload_cell_env_from(cell: &K8sCellDeployment, binding_requirements: &Value) -> Vec<Value> {
@@ -3696,9 +3749,10 @@ fn resolve_kubectl_command() -> (String, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::{
-        BindingHealthRollup, binding_health_rollup, binding_status_doc, deployable_cells,
-        health_for_observed_state, merge_observed_state_with_binding_health, sanitize_k8s_name,
-        sanitize_route_path, workload_cell_env, workload_cell_labels, workload_state_result_doc,
+        BindingHealthRollup, binding_health_rollup, binding_status_doc, container_doc,
+        deployable_cells, health_for_observed_state, merge_observed_state_with_binding_health,
+        sanitize_k8s_name, sanitize_route_path, workload_cell_env, workload_cell_labels,
+        workload_state_result_doc,
     };
     use serde_json::json;
 
@@ -4027,6 +4081,77 @@ mod tests {
             item.get("name").and_then(serde_json::Value::as_str)
                 == Some("X07_LEADER_ELECTION_LEASE_NAME")
         }));
+    }
+
+    #[test]
+    fn container_doc_materializes_s3_binding_as_x07_obj_env() {
+        let runtime_pack = json!({
+            "cells": [
+                {
+                    "cell_key": "primary",
+                    "cell_kind": "api-cell",
+                    "ingress_kind": "http",
+                    "runtime_class": "native-http",
+                    "scale_class": "replicated-http",
+                    "topology_group": "frontdoor",
+                    "binding_refs": ["obj.reports"],
+                    "binding_probe_hints": [{
+                        "binding_ref": "obj.reports",
+                        "binding_kind": "s3"
+                    }],
+                    "executable": {
+                        "kind": "oci_image",
+                        "image": "ghcr.io/example/api:1.0.0",
+                        "container_port": 8080
+                    }
+                }
+            ]
+        });
+        let binding_requirements = json!({
+            "bindings": [
+                { "name": "obj.reports", "kind": "s3", "required": false }
+            ]
+        });
+
+        let cells = deployable_cells("svc.api", &runtime_pack).expect("cells");
+        let doc = container_doc(&cells[0], &binding_requirements).expect("container");
+        let env = doc
+            .get("env")
+            .and_then(serde_json::Value::as_array)
+            .expect("env");
+
+        for (key, secret_key) in [
+            ("X07_OS_OBJ_S3_ENDPOINT", "ENDPOINT"),
+            ("X07_OS_OBJ_S3_BUCKET", "BUCKET"),
+            ("X07_OS_OBJ_S3_ACCESS_KEY", "ACCESS_KEY"),
+            ("X07_OS_OBJ_S3_SECRET_KEY", "SECRET_KEY"),
+        ] {
+            let v = env
+                .iter()
+                .find(|item| item.get("name").and_then(serde_json::Value::as_str) == Some(key))
+                .expect(key);
+            assert_eq!(
+                v.get("valueFrom")
+                    .and_then(|item| item.get("secretKeyRef"))
+                    .and_then(|item| item.get("name"))
+                    .and_then(serde_json::Value::as_str),
+                Some("obj-reports")
+            );
+            assert_eq!(
+                v.get("valueFrom")
+                    .and_then(|item| item.get("secretKeyRef"))
+                    .and_then(|item| item.get("key"))
+                    .and_then(serde_json::Value::as_str),
+                Some(secret_key)
+            );
+            assert_eq!(
+                v.get("valueFrom")
+                    .and_then(|item| item.get("secretKeyRef"))
+                    .and_then(|item| item.get("optional"))
+                    .and_then(serde_json::Value::as_bool),
+                Some(true)
+            );
+        }
     }
 
     #[test]
