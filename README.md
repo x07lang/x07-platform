@@ -1,5 +1,9 @@
 # x07-platform
 
+## Agent Entrypoint
+
+Start here: https://x07lang.org/docs/getting-started/agent-quickstart
+
 **x07-platform** is the public runtime and self-hosted control plane for operating X07 workloads and release flows. The current first lane is governed backend delivery: API, event-consumer, and scheduled-job cells packaged as `x07.workload.pack@0.1.0` and run through `x07lp`.
 
 In the X07 ecosystem, `x07` is where you write services and scaffolds, `x07-wasm-backend` turns them into workload, app, and device artifacts, and `x07-platform` runs the operational loop around them: workload accept, binding and topology inspection, release review, deploy, incident capture, regression generation, and control actions.
